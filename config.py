@@ -29,7 +29,7 @@ def m_bloque(nombre): return f'bloque:{nombre}'
 # ---------- CSV (una fila por paso) ----------
 COLUMNAS_CSV = ['t_iso', 'estado', 'meta', 'angulo', 'p_prima', 'direccion',
                 'dtheta', 'P_hat', 'artefacto', 'fiabilidad', 'beta',
-                'error_verdadero']
+                'error_verdadero', 'error_sombra']
 
 # ---------- Tiempos (s) ----------
 CICLO_S     = 2.1
