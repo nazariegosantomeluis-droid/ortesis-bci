@@ -1,6 +1,6 @@
-cat > .gitignore << 'EOF'
 .venv/
 __pycache__/
-resultados/*.csv
+resultados/*
+!resultados/.gitkeep
+modelos/*.pkl
 *.xdf
-EOF

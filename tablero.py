@@ -1,0 +1,184 @@
+"""Tablero en vivo: escucha el flujo 'Estado' del orquestador y dibuja 5 paneles.
+
+  1. p cruda del decoder y umbral b del agente
+  2. cierre de la ortesis contra la meta
+  3. P_hat por paso (rojo = el paso fue erroneo)
+  4. error movil del agente contra el decoder en la sombra
+  5. beta +- 2 desviaciones, confianza viva del detector y cambios detectados
+
+Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
+      python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
+"""
+import argparse
+import json
+import sys
+from collections import deque
+
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+from pylsl import StreamInlet, resolve_byprop
+
+import config
+
+N = 300          # pasos visibles
+VENTANA = 20     # para el error movil
+
+
+class Tablero(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('ortesis-bci · tablero')
+        self.resize(1200, 900)
+        pg.setConfigOptions(antialias=True, background='w', foreground='k')
+        lay = QtWidgets.QVBoxLayout(self)
+
+        cab = QtWidgets.QHBoxLayout()
+        self.lbl_estado = QtWidgets.QLabel('Esperando al orquestador...')
+        self.lbl_cue = QtWidgets.QLabel('')
+        self.lbl_cp = QtWidgets.QLabel('')
+        for w, tam in ((self.lbl_estado, 16), (self.lbl_cue, 28), (self.lbl_cp, 12)):
+            w.setStyleSheet(f'font-size:{tam}px; font-weight:bold; padding:4px;')
+        cab.addWidget(self.lbl_estado, 3)
+        cab.addWidget(self.lbl_cue, 2)
+        lay.addLayout(cab)
+        lay.addWidget(self.lbl_cp)
+
+        self.g = pg.GraphicsLayoutWidget()
+        lay.addWidget(self.g)
+        titulos = ['p cruda y umbral b', 'cierre vs meta', 'P_hat por paso',
+                   f'error movil ({VENTANA} pasos)', 'beta, confianza del detector y cambios']
+        self.p = []
+        for i, t in enumerate(titulos):
+            pl = self.g.addPlot(row=i, col=0, title=t)
+            pl.showGrid(x=True, y=True, alpha=0.3)
+            pl.addLegend(offset=(5, 5))
+            if i:
+                pl.setXLink(self.p[0])
+            self.p.append(pl)
+        pen = lambda c, w=2, s=QtCore.Qt.SolidLine: pg.mkPen(c, width=w, style=s)
+        self.c_p = self.p[0].plot(pen=pen('#1f77b4'), name='p cruda')
+        self.c_b = self.p[0].plot(pen=pen('#d62728', 2, QtCore.Qt.DashLine), name='umbral b')
+        self.p[0].setYRange(0, 1)
+        self.c_ang = self.p[1].plot(pen=pen('#2ca02c'), name='cierre')
+        self.c_meta = self.p[1].plot(pen=pen('k', 1, QtCore.Qt.DashLine), name='meta')
+        self.p[1].setYRange(-0.05, 1.05)
+        self.c_ph = self.p[2].plot(pen=None, symbol='o', symbolSize=6, name='P_hat')
+        self.p[2].setYRange(0, 1)
+        self.c_ea = self.p[3].plot(pen=pen('#ff7f0e'), name='agente')
+        self.c_es = self.p[3].plot(pen=pen('#7f7f7f'), name='sombra (sin aprender)')
+        self.p[3].setYRange(0, 0.7)
+        self.c_beta = self.p[4].plot(pen=pen('#1f77b4'), name='beta')
+        self.c_sup = self.p[4].plot(pen=pen('#1f77b4', 1))
+        self.c_inf = self.p[4].plot(pen=pen('#1f77b4', 1))
+        self.p[4].addItem(pg.FillBetweenItem(self.c_sup, self.c_inf, brush=(31, 119, 180, 50)))
+        self.c_ev = self.p[4].plot(pen=pen('#9467bd'), name='Youden vivo del detector')
+        self.c_fi = self.p[4].plot(pen=pen('#8c564b', 1), name='fiabilidad (0 = congelado)')
+
+        self.d = {k: deque(maxlen=N) for k in
+                  ('paso', 'p', 'b', 'ang', 'meta', 'ph', 'err', 'es', 'beta', 'sd', 'ev', 'fi')}
+        self.inlet = None
+        self.meta = 0
+        self._conectar()
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self._actualizar)
+        self.timer.start(150)
+
+    def _conectar(self):
+        s = resolve_byprop('name', 'Estado', timeout=0.2)
+        if s:
+            self.inlet = StreamInlet(s[0], max_buflen=60)
+            self.lbl_estado.setText('Conectado al orquestador')
+
+    def _actualizar(self):
+        if self.inlet is None:
+            self._conectar()
+            return
+        nuevos = False
+        while True:
+            m, _ = self.inlet.pull_sample(timeout=0.0)
+            if m is None:
+                break
+            self._procesar(json.loads(m[0]))
+            nuevos = True
+        if nuevos:
+            self._dibujar()
+
+    def _procesar(self, e):
+        tipo = e.get('tipo')
+        if tipo == 'cue':
+            cerrar = e['meta'] > 0
+            self.lbl_cue.setText('CERRAR' if cerrar else 'RELAJA')
+            self.lbl_cue.setStyleSheet(f'font-size:28px;font-weight:bold;padding:4px;'
+                                       f'color:{"#d62728" if cerrar else "#1f77b4"};')
+        elif tipo == 'checkpoint':
+            color = '#2ca02c' if e['ok'] else '#d62728'
+            self.lbl_cp.setText(e['texto'])
+            self.lbl_cp.setStyleSheet(f'font-size:12px;font-weight:bold;color:{color};')
+        elif tipo == 'paso':
+            d = self.d
+            if d['paso'] and e['paso'] < d['paso'][-1]:          # nueva sesion
+                for q in d.values():
+                    q.clear()
+            d['paso'].append(e['paso']); d['p'].append(e['p_crudo']); d['b'].append(e['b'])
+            d['ang'].append(e['angulo']); d['meta'].append(1.0 if e['meta'] > 0 else 0.0)
+            d['ph'].append(np.nan if e['P_hat'] is None else e['P_hat'])
+            d['err'].append(e['error']); d['es'].append(e['error_sombra'])
+            d['beta'].append(e['beta']); d['sd'].append(e['sd_beta']); d['ev'].append(e['youden'])
+            d['fi'].append(e['fiabilidad'])
+            if e.get('cambio'):
+                color = '#9467bd' if e['cambio'] == 'sesgo' else '#8c564b'
+                self.p[4].addItem(pg.InfiniteLine(e['paso'], angle=90, pen=pg.mkPen(color, width=1)))
+            if e.get('perturbado') and not getattr(self, '_pert_marcada', False):
+                for pl in self.p:
+                    pl.addItem(pg.InfiniteLine(e['paso'], angle=90,
+                                               pen=pg.mkPen('r', width=1, style=QtCore.Qt.DotLine)))
+                self._pert_marcada = True
+            congel = ' · APRENDIZAJE CONGELADO' if e['congelado'] else ''
+            self.lbl_estado.setText(f"{e['estado']} · paso {e['paso']} · beta {e['beta']:+.2f} · "
+                                    f"ACK {e['latencia_ms']:.1f} ms{congel}")
+            self.lbl_estado.setStyleSheet('font-size:16px;font-weight:bold;padding:4px;' +
+                                          ('color:#d62728;' if e['congelado'] else ''))
+
+    def _dibujar(self):
+        d = {k: np.array(v, dtype=float) for k, v in self.d.items()}
+        x = d['paso']
+        self.c_p.setData(x, d['p'])
+        self.c_b.setData(x, d['b'])
+        self.c_ang.setData(x, d['ang'])
+        self.c_meta.setData(x, d['meta'], stepMode=None)
+        colores = [pg.mkBrush('#d62728' if v else '#2ca02c') for v in d['err']]
+        ok = np.isfinite(d['ph'])
+        self.c_ph.setData(x[ok], d['ph'][ok], symbolBrush=[c for c, o in zip(colores, ok) if o])
+        if len(x) >= 2:
+            k = np.ones(min(VENTANA, len(x))) / min(VENTANA, len(x))
+            ea = np.convolve(d['err'], k, mode='valid')
+            es = np.convolve(d['es'], k, mode='valid')
+            xx = x[len(x) - len(ea):]
+            self.c_ea.setData(xx, ea)
+            self.c_es.setData(xx, es)
+        self.c_beta.setData(x, d['beta'])
+        self.c_sup.setData(x, d['beta'] + 2 * d['sd'])
+        self.c_inf.setData(x, d['beta'] - 2 * d['sd'])
+        self.c_ev.setData(x, d['ev'])
+        self.c_fi.setData(x, d['fi'])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--captura', help='guarda una imagen del tablero y sale')
+    ap.add_argument('--segundos', type=float, default=15)
+    a = ap.parse_args()
+    app = QtWidgets.QApplication(sys.argv)
+    t = Tablero()
+    t.show()
+    if a.captura:
+        def salir():
+            t.grab().save(a.captura)
+            app.quit()
+        QtCore.QTimer.singleShot(int(a.segundos * 1000), salir)
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
