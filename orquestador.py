@@ -98,7 +98,7 @@ class BackendSim:
         orq.fsm.ir_a('CAL_MI')
         orq.fsm.ir_a('CAL_ERRP')
         return {'w0': self.w0, 'c0': self.c0, 'sens': self.a.sens, 'espec': self.a.espec,
-                'salida': 'binaria', 'p_error_cal': 0.3}
+                'salida': 'binaria', 'p_error_cal': 0.3, 'umbral': 0.5}
 
     def cue(self, meta):
         pass
@@ -171,14 +171,16 @@ class BackendReal:
         xf = self.hw.filtrar(x, config.BANDA_MI, self.eeg.fs)
         return xf[:, -int(config.VENTANA_MI * self.eeg.fs):]
 
-    def _decidir_secuencial(self, y, pred, umbral, n, n_max, extra_ok=True):
+    def _decidir_secuencial(self, y, pred, umbral, n, n_max, n_min, extra_ok=True):
         """GO si el limite inferior del IC 90% de la BA ya supera el umbral; NO GO si el
         superior ya quedo abajo; si no, seguir juntando ensayos."""
         lo, hi = self.hw.intervalo_ba(y, pred)
         aviso(f'    [{n} ensayos] BA {self.hw.exactitud_balanceada(y, pred):.2f}  IC90 [{lo:.2f}, {hi:.2f}]')
         if lo >= umbral and extra_ok:
             return 'go'
-        if hi < umbral:
+        # la exactitud sigue subiendo con mas ensayos (curva de aprendizaje): solo se
+        # declara NO GO temprano con bastantes datos y el intervalo claramente abajo
+        if hi < umbral - 0.05 and n >= 1.5 * n_min:
             return 'nogo'
         return 'go' if n >= n_max and lo >= umbral else ('fin' if n >= n_max else 'seguir')
 
@@ -200,7 +202,7 @@ class BackendReal:
             if n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi:
                 self.decoder = self.hw.DecoderIM().ajustar(np.array(X), np.array(y))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
-                                             config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi)
+                                             config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
                 if r != 'seguir':
                     break
         np.savez(config.RESULTADOS / f'calibracion_mi_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
@@ -227,9 +229,11 @@ class BackendReal:
             n += 1
             aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
             orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
+            orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
             time.sleep(self.a.espera)
             d = obj if not err else 1 - obj
             theta = float(np.clip(theta + (0.15 if d else -0.15), 0.1, 0.9))
+            orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
             seq, t_ack, _ = self.ortesis.mover(theta)
             orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
             e = self.eeg.epoca(t_ack)
@@ -239,7 +243,7 @@ class BackendReal:
             if len(y) >= self.a.min_errp and n % 10 == 0 or n == self.a.ensayos_errp:
                 self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y))
                 r = self._decidir_secuencial(np.array(y), self.detector.pred_cv, config.BA_MIN, n,
-                                             self.a.ensayos_errp,
+                                             self.a.ensayos_errp, self.a.min_errp,
                                              extra_ok=self.detector.espec >= config.ESPEC_MIN)
                 if r != 'seguir':
                     break
@@ -269,7 +273,8 @@ class BackendReal:
         sens = float(np.clip(self.detector.sens, 0.51, 0.99))
         espec = float(np.clip(self.detector.espec, 0.51, 0.99))
         return {'w0': self.decoder.w0, 'c0': self.decoder.c0, 'sens': sens, 'espec': espec,
-                'salida': 'calibrada', 'p_error_cal': self.detector.p_error_cal}
+                'salida': 'calibrada', 'p_error_cal': self.detector.p_error_cal,
+                'umbral': self.detector.umbral}
 
     # ---------------- lazo ----------------
     def cue(self, meta):
@@ -316,6 +321,7 @@ class Orquestador:
                            salida_detector=p['salida'], p_error_calibracion=p['p_error_cal'],
                            usar_sesgo=not self.a.sin_sesgo)
         self.agente = AgenteErrP(p['w0'], p['c0'], cfg)
+        self.umbral_errp = p['umbral']
         self.confianza = ConfianzaDetector(p['sens'], p['espec'])
         aviso(f"Agente '{self.a.modo}' listo (detector sens {p['sens']:.2f}, espec {p['espec']:.2f}, "
               f"salida {p['salida']}).")
@@ -333,7 +339,7 @@ class Orquestador:
 
         erroneo = dec.direccion != meta
         p_errp, art = self.b.errp(seq, t_ack, erroneo, dec.delta)
-        detectado = bool(np.isfinite(p_errp) and p_errp > 0.5)
+        detectado = bool(np.isfinite(p_errp) and p_errp > self.umbral_errp)
         fiab = self.confianza(erroneo, detectado, not art)
         sens_v, espec_v = self.confianza.vivo()
         info = self.agente.actualizar(p_errp, art, fiab if aprender else 0.0, sens_v, espec_v)

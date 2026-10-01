@@ -1,7 +1,7 @@
 """Pruebas automaticas, sin hardware. Correlas antes de cada commit.
 
 Uso:  python pruebas.py              pruebas rapidas (~1 min)
-      python pruebas.py --completa   ademas el lazo real con placa sintetica (~2 min)
+      python pruebas.py --completa   ademas el lazo real contra el cerebro sintetico (~5 min)
 """
 import argparse
 import csv
@@ -185,22 +185,39 @@ def modelos_hardware():
 
 
 @prueba
+def cerebro_sintetico():
+    """El gemelo del piloto produce MI decodificable y un ErrP con la forma y latencia correctas."""
+    import cerebro_sintetico as cs
+    import hardware as hw
+    X, y = cs.sesion_mi(40, semilla=3)
+    ba_mi = hw.DecoderIM().ajustar(X, y).ba
+    X, y = cs.sesion_errp(120, semilla=3)
+    t = np.arange(X.shape[2]) / cs.FS + config.EPOCA_ERRP[0]
+    dif = X[y == 1, config.CANALES_EEG.index('Cz')].mean(0) - X[y == 0, config.CANALES_EEG.index('Cz')].mean(0)
+    pe, ne = dif[np.argmin(abs(t - 0.36))], dif[np.argmin(abs(t - 0.25))]
+    det = hw.DetectorErrP().ajustar(X, y)
+    assert 0.65 < ba_mi < 1.0 and pe > 2 and ne < 0 and det.ba > 0.75, (ba_mi, pe, ne, det.ba)
+    return f'MI BA {ba_mi:.2f}; ErrP Pe {pe:+.1f} uV, Ne {ne:+.1f} uV; detector BA {det.ba:.2f} (espec {det.espec:.2f})'
+
+
+@prueba
 def lazo_real_sintetico():
-    puente = subprocess.Popen([sys.executable, 'puente_lsl.py'], cwd=config.RAIZ,
+    puente = subprocess.Popen([sys.executable, 'cerebro_sintetico.py'], cwd=config.RAIZ,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         time.sleep(2)
         r = subprocess.run([sys.executable, 'orquestador.py', 'real', '--ortesis-sim', '--forzar',
-                            '--ensayos_mi', '12', '--min_mi', '12', '--duracion_mi', '2.5',
-                            '--espera', '0.2', '--ensayos_errp', '20', '--min_errp', '20',
+                            '--ensayos_mi', '24', '--min_mi', '24', '--duracion_mi', '2.5',
+                            '--espera', '0.3', '--ensayos_errp', '60', '--min_errp', '60',
                             '--seg_revision', '3',
                             '--pasos_estatico', '5', '--pasos_adaptativo', '10'],
-                           cwd=config.RAIZ, capture_output=True, text=True, timeout=240)
+                           cwd=config.RAIZ, capture_output=True, text=True, timeout=400)
         assert r.returncode == 0, r.stderr[-1500:]
         assert 'EVALUACION' in r.stdout and '[CP3]' in r.stdout, r.stdout[-1500:]
     finally:
         puente.terminate()
-    return 'calibraciones + lazo con placa sintetica y ortesis simulada'
+    cps = [l for l in r.stdout.splitlines() if l.startswith('[CP')]
+    return 'cerebro sintetico + ortesis simulada: ' + ' | '.join(c.split(']')[0][1:] + (' GO' if 'GO' in c and 'NO GO' not in c else ' NO GO') for c in cps)
 
 
 def main():
@@ -209,7 +226,7 @@ def main():
     a = ap.parse_args()
     print('Pruebas ortesis-bci')
     for p in (contrato, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
-              maquina_estados, orquestador_sim, modelos_hardware):
+              maquina_estados, orquestador_sim, modelos_hardware, cerebro_sintetico):
         p()
     if a.completa:
         lazo_real_sintetico()

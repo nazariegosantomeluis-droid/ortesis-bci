@@ -64,6 +64,7 @@ class ConfigAgente:
     espec: float = config.ESPEC
     salida_detector: str = 'binaria'        # 'binaria' | 'calibrada'
     p_error_calibracion: float = 0.3        # tasa de errores en CAL_ERRP (para 'calibrada')
+    umbral_detector: float = 0.5            # p_errp > umbral = "detecto error" (para 'binaria')
     # politica: paso informativo
     ganancia: float = 0.20
     paso_max: float = config.PASO_MAX
@@ -146,7 +147,7 @@ class AgenteErrP:
             return float(sigmoide(a_priori + fiabilidad * llr))
         s = c.sens if sens is None else sens
         e = c.espec if espec is None else espec
-        llr = np.log(s / (1 - e)) if p_errp > 0.5 else np.log((1 - s) / e)
+        llr = np.log(s / (1 - e)) if p_errp > c.umbral_detector else np.log((1 - s) / e)
         return float(sigmoide(a_priori + llr))
 
     # ------------------------------------------------------------ aprendizaje

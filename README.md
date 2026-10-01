@@ -8,7 +8,7 @@
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 8/8 pruebas pasaron
+python pruebas.py                    # debe decir 9/9 pruebas pasaron
 ```
 
 ## Archivos
@@ -21,6 +21,7 @@ python pruebas.py                    # debe decir 8/8 pruebas pasaron
 | `orquestador.py` | Máquina de estados, calibraciones, checkpoints go/no go, lazo, CSV. Backends `sim` y `real`. |
 | `hardware.py` | EEG por LSL, órtesis por USB (o simulada), decoder de MI con recentrado y detector de ErrP calibrado. |
 | `puente_lsl.py` | BrainFlow → LSL: placa sintética, Cyton o playback. Mide impedancias. |
+| `cerebro_sintetico.py` | **Gemelo digital del piloto**: publica EEG por LSL que *reacciona* al lazo (ERD al imaginar, ErrP cuando la órtesis se equivoca). Reemplaza al casco para ensayar. |
 | `tablero.py` | Tablero en vivo de 5 paneles. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
@@ -39,7 +40,7 @@ python pruebas.py                    # debe decir 8/8 pruebas pasaron
 **Señal (`hardware.py`, `puente_lsl.py`)**
 
 - **Recentrado riemanniano no supervisado.** El decoder de MI se re-centra solo con cada ventana. En la prueba, tras mezclar canales pasa de 50 % a 98 % de exactitud sin recalibrar.
-- **Detector de ErrP con prototipos riemannianos y probabilidades calibradas**, más un detector de rareza que marca épocas fuera de distribución aunque no rebasen el umbral de amplitud.
+- **Detector de ErrP de dos vistas fusionadas** (temporal con LDA encogido + geométrica de Riemann), con probabilidades calibradas, umbral de Neyman-Pearson (especificidad ≥ 0.90) y detector de rareza para épocas fuera de distribución.
 - **Calibración secuencial.** Se detiene sola cuando el intervalo de confianza de la exactitud ya decide el checkpoint, y ahorra minutos de piloto.
 - **Impedancias reales del Cyton** (lead-off a 31.25 Hz) para el checkpoint 1.
 
@@ -52,6 +53,18 @@ Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simu
 | **Bayes (el nuestro)** | **0.168** | **0.211** | **0.177** |
 
 Con el detector de ErrP degradado a propósito, el aprendizaje baja a menos del 10 % y se congela la mayor parte de la falla. Los congelamientos en falso son de 1 %.
+
+## Gemelo digital del piloto
+
+`cerebro_sintetico.py` sustituye al casco. Escucha las señales y los pasos del orquestador y responde como una persona: desincroniza mu/beta sobre C3 al imaginar cerrar, genera un ErrP fronto-central (Ne ≈ 250 ms, Pe ≈ 350 ms) cuando la órtesis va al lado contrario, parpadea y, opcionalmente, se cansa. Con él se valida el camino **real** completo con verdad conocida.
+
+Corrida completa (`orquestador.py real --ortesis-sim` contra el cerebro sintético): CP1, CP2 (MI BA 0.83), CP3 (ErrP BA 0.90) y CP4 en **GO**. Tras la perturbación, el agente tuvo un error de **0.14**; el decoder sin aprender, de 0.47.
+
+```bash
+python cerebro_sintetico.py --banco          # decoder y detector offline, en segundos
+python cerebro_sintetico.py                  # terminal 1 (en lugar de puente_lsl.py)
+python cerebro_sintetico.py --erd 0.15 --errp 4 --fatiga 0.5   # piloto difícil
+```
 
 ## Probar sin hardware
 
