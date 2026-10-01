@@ -12,6 +12,7 @@ Uso:  python tablero.py                     (arrancalo antes o despues del orque
 import argparse
 import json
 import sys
+import threading
 from collections import deque
 
 import numpy as np
@@ -77,22 +78,36 @@ class Tablero(QtWidgets.QWidget):
 
         self.d = {k: deque(maxlen=N) for k in
                   ('paso', 'p', 'b', 'ang', 'meta', 'ph', 'err', 'es', 'beta', 'sd', 'ev', 'fi')}
-        self.inlet = None
-        self.meta = 0
+        self.inlet, self._encontrado, self._buscando = None, None, False
         self._conectar()
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._actualizar)
         self.timer.start(150)
 
     def _conectar(self):
-        s = resolve_byprop('name', 'Estado', timeout=0.2)
-        if s:
-            self.inlet = StreamInlet(s[0], max_buflen=60)
-            self.lbl_estado.setText('Conectado al orquestador')
+        """Busca el flujo 'Estado' en un hilo aparte: en Windows, con varias tarjetas
+        de red, el descubrimiento de LSL puede tardar mas de lo que la ventana aguanta
+        congelada, asi que la ventana nunca se bloquea esperando."""
+        if self._buscando:
+            return
+        self._buscando = True
+
+        def buscar():
+            try:
+                s = resolve_byprop('name', 'Estado', timeout=3.0)
+                if s:
+                    self._encontrado = StreamInlet(s[0], max_buflen=60)
+            finally:
+                self._buscando = False
+        threading.Thread(target=buscar, daemon=True).start()
 
     def _actualizar(self):
         if self.inlet is None:
-            self._conectar()
+            if self._encontrado is not None:
+                self.inlet = self._encontrado
+                self.lbl_estado.setText('Conectado al orquestador')
+            else:
+                self._conectar()
             return
         nuevos = False
         while True:
@@ -143,6 +158,11 @@ class Tablero(QtWidgets.QWidget):
     def _dibujar(self):
         d = {k: np.array(v, dtype=float) for k, v in self.d.items()}
         x = d['paso']
+        if len(x):
+            # modo "seguir": el eje x siempre muestra los ultimos pasos, aunque alguien
+            # haya hecho zoom o scroll con el mouse (eso apaga el auto-rango de pyqtgraph)
+            self.p[0].setXRange(max(x[0], x[-1] - N), x[-1] + 1, padding=0.02)
+            self.p[4].enableAutoRange(axis='y')
         self.c_p.setData(x, d['p'])
         self.c_b.setData(x, d['b'])
         self.c_ang.setData(x, d['ang'])
