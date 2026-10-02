@@ -11,6 +11,14 @@ Uso
   python orquestador.py real --puerto COM4 --saltar-calibracion   usa modelos guardados
 
 Antes de 'real': puente_lsl.py corriendo y LabRecorder grabando.
+
+Resiliencia: antes de cada paso el Vigilante (salud.py) revisa EEG, ortesis, reloj y
+detector. Escalera de degradacion:
+  1. todo bien: lazo normal
+  2. detector poco fiable o reloj dudoso: el lazo sigue, el agente no aprende
+  3. EEG perdido o canal despegado: PAUSA_SEGURA, la ortesis se abre despacio
+  4. ortesis perdida: PAUSA_SEGURA sin poder moverla; se registra, se avisa y se reconecta
+De la pausa se sale sola tras 3 s continuos de salud en VERDE, al estado previo.
 """
 from __future__ import annotations
 
@@ -26,6 +34,7 @@ from pylsl import StreamOutlet, local_clock
 
 import config
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, sigmoide
+from salud import Vigilante
 
 
 def aviso(txt):
@@ -58,8 +67,10 @@ class Salidas:
         self.marc = StreamOutlet(config.crear_info('Marcadores'))
         self.paso = StreamOutlet(config.crear_info('Paso'))
         self.est = StreamOutlet(config.crear_info('Estado'))
+        self.marcadores = []                       # copia local, para evaluar y probar
 
     def marcador(self, texto, t=None):
+        self.marcadores.append(texto)
         self.marc.push_sample([texto], t if t is not None else local_clock())
 
     def publicar_paso(self, dec):
@@ -83,8 +94,26 @@ def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
 
 
 # ======================================================================
+# Interfaz de un backend (la usan Orquestador.paso, revisar_salud y pausa_segura):
+#   preparar(orq) -> dict | None     calibra y devuelve lo que necesita el agente
+#   cue(meta)                        presenta la meta al piloto
+#   phi(meta) -> rasgos | None       None = no hay ventana de EEG valida (no se decide)
+#   mover(fraccion) -> (seq, t_ack | None, latencia_ms)      nunca lanza
+#   errp(seq, t_ack, erroneo, delta) -> (p_errp, artefacto, excluido)
+#   lecturas() -> {'eeg', 'ortesis', 'reloj_ms'}             para el Vigilante
+#   posicion_segura() -> igual que mover(), despacio y a config.POSICION_SEGURA
+#   reloj() -> s ; esperar(dt) ; fin_paso() ; cerrar()
 class BackendSim:
-    """Piloto sintetico del simulador."""
+    """Piloto sintetico del simulador.
+
+    Lleva un reloj virtual (un ciclo por paso, lo que dure cada espera de la pausa),
+    para que las fallas simuladas y la pausa segura se prueben en segundos y de
+    forma determinista. `fallas` programa fallas a mano:
+      {'corte_eeg': [(t0, dur)], 'canal': [(t0, dur, electrodo, motivo)],
+       'rafaga_parpadeos': [(t0, dur)], 'ack_perdido': {seq}, 'pico_latencia': {seq: ms}}
+    """
+
+    EPOCA_S = config.EPOCA_ERRP[1]
 
     def __init__(self, a):
         from simulador_lazo import PilotoSimulado, calibrar
@@ -93,6 +122,9 @@ class BackendSim:
         self.w0, self.c0 = calibrar(mk(10_000 + a.semilla))
         self.piloto = mk(a.semilla + 1)
         self.a, self.seq, self.t = a, 0, 0
+        self.t_virtual, self.fallas, self.caos = 0.0, {}, None
+        self.acks_perdidos, self.ultima_latencia = 0, 0.0
+        self.epocas_en_corte = []                  # seq de las epocas que tocaron un corte de EEG
 
     def preparar(self, orq):
         orq.fsm.ir_a('CAL_MI')
@@ -100,10 +132,47 @@ class BackendSim:
         return {'w0': self.w0, 'c0': self.c0, 'sens': self.a.sens, 'espec': self.a.espec,
                 'salida': 'binaria', 'p_error_cal': 0.3, 'umbral': 0.5}
 
+    # ---------------- reloj virtual y fallas ----------------
+    def reloj(self):
+        return self.t_virtual
+
+    def esperar(self, dt):
+        self.t_virtual += dt
+        if self.a.ciclo > 0:
+            time.sleep(dt)
+
+    def fin_paso(self):
+        self.t_virtual += config.CICLO_S
+
+    def _activa(self, tipo, t=None):
+        """La falla por tiempo de ese tipo que esta activa en t (por defecto ahora), o None."""
+        t = self.t_virtual if t is None else t
+        for f in self.fallas.get(tipo, []):
+            if f[0] <= t < f[0] + f[1]:
+                return f
+        return self.caos.activo(tipo, t) if self.caos else None
+
+    def _por_paso(self, tipo, seq):
+        if tipo == 'ack_perdido':
+            return seq in self.fallas.get(tipo, ()) or bool(self.caos and self.caos.por_paso(tipo, seq))
+        return self.fallas.get(tipo, {}).get(seq) or (self.caos.por_paso(tipo, seq) if self.caos else None)
+
+    def lecturas(self):
+        corte, canal = self._activa('corte_eeg'), self._activa('canal')
+        eeg = {'edad_s': self.t_virtual - corte[0] if corte else 0.02,
+               'tasa_hz': float(config.FLUJOS['EEG'][2]),
+               'canales': {canal[2]: canal[3]} if canal and not corte else {}}
+        return {'eeg': eeg, 'reloj_ms': 0.0,
+                'ortesis': {'puerto_ok': True, 'acks_perdidos': self.acks_perdidos,
+                            'latencia_ms': self.ultima_latencia}}
+
+    # ---------------- lazo ----------------
     def cue(self, meta):
         pass
 
     def phi(self, meta):
+        if self._activa('corte_eeg') or self._activa('canal'):
+            return None                            # sin consumir aleatorios del piloto
         f = self.a.falla
         if f:
             self.piloto.detector_degradado(f[0] <= self.t < f[1])
@@ -112,10 +181,25 @@ class BackendSim:
 
     def mover(self, fraccion):
         self.seq += 1
-        return self.seq, local_clock(), 0.0
+        if self._por_paso('ack_perdido', self.seq):
+            self.acks_perdidos += 1
+            return self.seq, None, float('nan')
+        self.acks_perdidos = 0
+        self.ultima_latencia = float(self._por_paso('pico_latencia', self.seq) or 0.0)
+        return self.seq, local_clock(), self.ultima_latencia
+
+    def posicion_segura(self):
+        return self.mover(config.POSICION_SEGURA)
 
     def errp(self, seq, t_ack, erroneo, delta):
-        return self.piloto.errp(erroneo, delta)
+        p, art = self.piloto.errp(erroneo, delta)  # siempre: consumo fijo de aleatorios
+        momentos = [self.t_virtual + d for d in (0.0, self.EPOCA_S / 2, self.EPOCA_S)]
+        if any(self._activa('corte_eeg', t) for t in momentos):
+            self.epocas_en_corte.append(seq)
+            return float('nan'), True, 'epoca_invalida'
+        if any(self._activa('canal', t) or self._activa('rafaga_parpadeos', t) for t in momentos):
+            return p, True, ''                     # la epoca existe, pero es un artefacto
+        return p, art, ''
 
     def cerrar(self):
         pass
@@ -131,10 +215,10 @@ class BackendReal:
         self.eeg = hw.EntradaEEG()
         self.ortesis = hw.OrtesisSimulada() if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
         self.angulo = 0.5
+        self.decoder = self.detector = None
 
     # ---------------- checkpoint 1 ----------------
     def revisar(self, orq):
-        import json
         filas_z, fuente = None, ''
         if config.IMPEDANCIAS_JSON.exists():
             dat = json.loads(config.IMPEDANCIAS_JSON.read_text())
@@ -154,7 +238,7 @@ class BackendReal:
             for f in filas:
                 aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%} | "
                       f"saturado {f['saturado']:4.0%} | {'bien' if f['ok'] else 'REVISAR'}")
-            ok_senal = all(f['ok'] for f in filas)
+            ok_senal = bool(filas) and all(f['ok'] for f in filas)
             txt_senal = f'calidad de senal ok {sum(f["ok"] for f in filas)}/{len(filas)}'
         aviso('Midiendo latencia de la ortesis (20 pasos)...')
         for k in range(20):
@@ -174,6 +258,20 @@ class BackendReal:
         xf = self.hw.filtrar(x, config.BANDA_MI, self.eeg.fs)
         return xf[:, -int(config.VENTANA_MI * self.eeg.fs):]
 
+    def _ensayo_con_reintentos(self, tomar, que):
+        """tomar() presenta el ensayo y devuelve su dato, o None si el EEG o la ortesis
+        fallaron. Un ensayo afectado se repite como maximo config.CAL_REPETICIONES_MAX
+        veces; despues se avisa y la calibracion sigue con el siguiente."""
+        for k in range(config.CAL_REPETICIONES_MAX + 1):
+            dato = tomar()
+            if dato is not None:
+                return dato
+            if k < config.CAL_REPETICIONES_MAX:
+                aviso(f'    {que} afectado por una falla: se repite ({k + 1}/{config.CAL_REPETICIONES_MAX})')
+        aviso(f'    AVISO: {que} descartado tras {config.CAL_REPETICIONES_MAX} repeticiones; '
+              f'la calibracion sigue')
+        return None
+
     def _decidir_secuencial(self, y, pred, umbral, n, n_max, n_min, extra_ok=True):
         """GO si el limite inferior del IC 90% de la BA ya supera el umbral; NO GO si el
         superior ya quedo abajo; si no, seguir juntando ensayos."""
@@ -187,31 +285,40 @@ class BackendReal:
             return 'nogo'
         return 'go' if n >= n_max and lo >= umbral else ('fin' if n >= n_max else 'seguir')
 
+    @staticmethod
+    def _ajustable(y):
+        """Hay ensayos de las dos clases para ajustar con validacion cruzada."""
+        return len(y) >= 4 and np.bincount(y, minlength=2).min() >= 2
+
     def calibrar_mi(self, orq):
         rng = np.random.default_rng()
         X, y = [], []
         for k in range(self.a.ensayos_mi):
-            clase = int(rng.permutation([0, 1])[0]) if k % 2 == 0 else 1 - y[-1]   # pares balanceados
-            aviso(f'[{k + 1}] preparate...')
-            time.sleep(self.a.espera)
-            orq.salidas.marcador(config.CUE_CERRAR if clase else config.CUE_RELAJA)
-            orq.salidas.estado(tipo='cue', meta=1 if clase else -1)
-            aviso('    >>> CERRAR: imagina que cierras la mano' if clase
-                  else '    >>> RELAJA: imagina que abres y relajas la mano')
-            time.sleep(self.a.duracion_mi)
-            v = self._ventana_mi()
-            if v is None:
-                aviso('    ensayo descartado: el EEG no estaba disponible')
-                continue
-            X.append(v)
-            y.append(clase)
+            clase = 1 - y[-1] if (k % 2 and y) else int(rng.permutation([0, 1])[0])   # pares balanceados
+
+            def tomar():
+                aviso(f'[{k + 1}] preparate...')
+                time.sleep(self.a.espera)
+                orq.salidas.marcador(config.CUE_CERRAR if clase else config.CUE_RELAJA)
+                orq.salidas.estado(tipo='cue', meta=1 if clase else -1)
+                aviso('    >>> CERRAR: imagina que cierras la mano' if clase
+                      else '    >>> RELAJA: imagina que abres y relajas la mano')
+                time.sleep(self.a.duracion_mi)
+                return self._ventana_mi()
+            v = self._ensayo_con_reintentos(tomar, 'ensayo de MI')
+            if v is not None:
+                X.append(v)
+                y.append(clase)
             n = k + 1
-            if n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi:
+            if (n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi) and self._ajustable(y):
                 self.decoder = self.hw.DecoderIM().ajustar(np.array(X), np.array(y))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
                                              config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
                 if r != 'seguir':
                     break
+        if self.decoder is None:
+            aviso('No se pudo calibrar MI: no quedaron ensayos validos.')
+            return False
         np.savez(config.RESULTADOS / f'calibracion_mi_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
         self.hw.guardar(self.decoder, 'decoder_im.pkl')
         return checkpoint(orq.salidas, 2, self.decoder.ba >= config.MI_EXACTITUD_MIN,
@@ -227,36 +334,42 @@ class BackendReal:
             b = [(obj, i < n_err) for obj in (0, 1) for i in range(10)]
             return [b[i] for i in rng.permutation(len(b))]
 
-        plan, theta, X, y, n = [], 0.5, [], [], 0
-        self.ortesis.mover(theta)
+        plan, X, y, n = [], [], [], 0
+        theta = [0.5]
+        self.ortesis.mover(theta[0])
         while n < self.a.ensayos_errp:
             if not plan:
                 plan = bloque()
             obj, err = plan.pop()
             n += 1
-            aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
-            orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
-            orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
-            time.sleep(self.a.espera)
-            d = obj if not err else 1 - obj
-            theta = float(np.clip(theta + (0.15 if d else -0.15), 0.1, 0.9))
-            orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
-            seq, t_ack, _ = self.ortesis.mover(theta)
-            if t_ack is None:
-                aviso('    ensayo descartado: la ortesis no confirmo el movimiento')
-                continue
-            orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
-            e = self.eeg.epoca(t_ack)
+
+            def tomar():
+                aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
+                orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
+                orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
+                time.sleep(self.a.espera)
+                d = obj if not err else 1 - obj
+                theta[0] = float(np.clip(theta[0] + (0.15 if d else -0.15), 0.1, 0.9))
+                orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
+                seq, t_ack, _ = self.ortesis.mover(theta[0])
+                if t_ack is None:
+                    return None                    # sin ACK no se sabe cuando empezo el movimiento
+                orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
+                return self.eeg.epoca(t_ack)
+            e = self._ensayo_con_reintentos(tomar, 'ensayo de ErrP')
             if e is not None:
                 X.append(e)
                 y.append(int(err))
-            if len(y) >= self.a.min_errp and n % 10 == 0 or n == self.a.ensayos_errp:
+            if (len(y) >= self.a.min_errp and n % 10 == 0 or n == self.a.ensayos_errp) and self._ajustable(y):
                 self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y))
                 r = self._decidir_secuencial(np.array(y), self.detector.pred_cv, config.BA_MIN, n,
                                              self.a.ensayos_errp, self.a.min_errp,
                                              extra_ok=self.detector.espec >= config.ESPEC_MIN)
                 if r != 'seguir':
                     break
+        if self.detector is None:
+            aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
+            return False
         np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
         self.hw.guardar(self.detector, 'detector_errp.pkl')
         d = self.detector
@@ -286,13 +399,31 @@ class BackendReal:
                 'salida': 'calibrada', 'p_error_cal': self.detector.p_error_cal,
                 'umbral': self.detector.umbral}
 
+    # ---------------- salud ----------------
+    def reloj(self):
+        return local_clock()
+
+    def esperar(self, dt):
+        time.sleep(dt)
+
+    def fin_paso(self):
+        pass
+
+    def lecturas(self):
+        eeg = self.eeg.lecturas()
+        return {'eeg': eeg, 'reloj_ms': eeg['reloj_ms'], 'ortesis': self.ortesis.lecturas()}
+
+    def posicion_segura(self):
+        return self.ortesis.mover(config.POSICION_SEGURA, config.PAUSA_DURACION_MS)
+
     # ---------------- lazo ----------------
     def cue(self, meta):
         aviso('    >>> CERRAR' if meta > 0 else '    >>> RELAJA')
         time.sleep(config.VENTANA_MI)            # que la ventana ya contenga imaginacion
 
     def phi(self, meta):
-        return self.decoder.phi(self._ventana_mi())
+        v = self._ventana_mi()
+        return None if v is None else self.decoder.phi(v)
 
     def mover(self, fraccion):
         return self.ortesis.mover(fraccion)
@@ -300,8 +431,8 @@ class BackendReal:
     def errp(self, seq, t_ack, erroneo, delta):
         e = self.eeg.epoca(t_ack)
         if e is None:
-            return float('nan'), True
-        return self.detector.p_error(e), self.detector.artefacto(e)
+            return float('nan'), True, 'epoca_invalida'
+        return self.detector.p_error(e), self.detector.artefacto(e), ''
 
     def cerrar(self):
         self.ortesis.cerrar()
@@ -317,8 +448,15 @@ class Orquestador:
         self.fsm = MaquinaEstados(self.salidas)
         self.angulo, self.filas, self.desplazamiento = 0.5, [], 0.0
         self.t_perturbacion = None
+        self.vigilante = Vigilante()
+        self.avisos_salud = []                       # lo que se dijo en consola sobre la salud
+        self.excluidos, self.error_post = {}, None   # los llena evaluar()
         config.RESULTADOS.mkdir(exist_ok=True)
-        self.ruta_csv = config.RESULTADOS / datetime.now().strftime(f'sesion_{a.backend}_%Y%m%d_%H%M%S.csv')
+        base = datetime.now().strftime(f'sesion_{a.backend}_%Y%m%d_%H%M%S')
+        self.ruta_csv, k = config.RESULTADOS / f'{base}.csv', 1
+        while self.ruta_csv.exists():                # dos sesiones en el mismo segundo no se pisan
+            k += 1
+            self.ruta_csv = config.RESULTADOS / f'{base}_{k}.csv'
         self.f_csv = open(self.ruta_csv, 'w', newline='')
         self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
         self.csv.writeheader()
@@ -338,21 +476,103 @@ class Orquestador:
         self.fsm.ir_a('LAZO_ESTATICO')
         return True
 
+    # ---------------- salud y pausa segura ----------------
+    def revisar_salud(self):
+        """Lee a los subsistemas, publica cada cambio de semaforo (marcador, consola y
+        flujo Estado) y devuelve el motivo de pausa: None, 'eeg', 'canal' u 'ortesis'."""
+        l = self.b.lecturas()
+        cambios = self.vigilante.actualizar(
+            self.b.reloj(), eeg=l['eeg'], ortesis=l['ortesis'], reloj_ms=l['reloj_ms'],
+            detector={'fiabilidad': self.confianza.fiabilidad_bruta, 'congelado': self.confianza.congelado})
+        for sub, color in cambios:
+            self.salidas.marcador(config.m_salud(sub, color))
+            detalle = self.vigilante.detalle[sub]
+            txt = f'  [salud] {sub}: {color}' + (f' ({detalle})' if detalle else '')
+            aviso(txt)
+            self.avisos_salud.append(txt)
+        if cambios:
+            self.publicar_salud()
+        return self.vigilante.motivo_pausa()
+
+    def publicar_salud(self, motivo=None):
+        self.salidas.estado(tipo='salud', estado=self.fsm.estado, colores=self.vigilante.colores,
+                            detalle=self.vigilante.detalle, motivo=motivo, escalon=self.vigilante.escalon())
+
+    def pausa_segura(self, motivo):
+        """Protege al piloto y espera a que la salud vuelva. El agente no aprende aqui."""
+        previo = self.fsm.estado
+        self.fsm.ir_a('PAUSA_SEGURA')
+        detalle = self.vigilante.detalle['ortesis' if motivo == 'ortesis' else 'eeg']
+        txt = f'  [PAUSA SEGURA] motivo: {motivo} ({detalle}). El agente no aprende; la sesion sigue viva.'
+        aviso(txt)
+        self.avisos_salud.append(txt)
+        seq = ''
+        if motivo != 'ortesis':                      # con la ortesis perdida no hay a quien mover
+            seq, _, _ = self.b.posicion_segura()
+            self.angulo = config.POSICION_SEGURA
+        self.registrar_fila(seq=seq, excluido=f'pausa:{motivo}')
+        self.publicar_salud(motivo)
+        t_aviso = t_sondeo = self.b.reloj()
+        while True:
+            self.b.esperar(0.1)
+            self.revisar_salud()
+            t = self.b.reloj()
+            if self.vigilante.colores['ortesis'] != config.VERDE and t - t_sondeo >= 1.0:
+                self.b.posicion_segura()             # sondeo: confirma que la ortesis responde
+                self.angulo, t_sondeo = config.POSICION_SEGURA, t
+            if self.vigilante.listo_para_reanudar(t):
+                break
+            if t - t_aviso >= 5.0:
+                sigue = self.vigilante.motivo_pausa()
+                donde = self.vigilante.detalle['ortesis' if sigue == 'ortesis' else 'eeg']
+                aviso(f'  [PAUSA SEGURA] sigue: {sigue} ({donde})' if sigue
+                      else '  [PAUSA SEGURA] salud recuperada: esperando VERDE continuo')
+                self.publicar_salud(sigue or motivo)
+                t_aviso = t
+        aviso(f'  [PAUSA SEGURA] {config.SALUD["verde_para_reanudar_s"]:.0f} s de salud en VERDE: '
+              f'se reanuda {previo}')
+        self.fsm.ir_a(previo)
+        self.publicar_salud()
+
+    # ---------------- registro ----------------
+    def registrar_fila(self, **campos):
+        """Escribe una fila del CSV con el esquema del contrato (lo que falte queda vacio)."""
+        fila = {c: '' for c in config.COLUMNAS_CSV}
+        fila.update(t_iso=datetime.now().isoformat(timespec='milliseconds'),
+                    t_lsl=round(local_clock(), 4), estado=self.fsm.estado,
+                    angulo=round(self.angulo, 3), beta=round(self.agente.beta, 4),
+                    varianza_beta=round(self.agente.var, 4), salud=self.vigilante.codigo())
+        fila.update(campos)
+        self.csv.writerow(fila)
+        self.f_csv.flush()
+        self.filas.append(fila)
+        return fila
+
     # ---------------- un paso ----------------
     def paso(self, meta, aprender):
+        """Un paso del lazo. Devuelve False, sin decidir ni mover, si no hay EEG valido."""
         t0 = time.perf_counter()
-        dec = self.agente.decidir(self.b.phi(meta), self.desplazamiento)
+        phi = self.b.phi(meta)
+        if phi is None:
+            return False
+        dec = self.agente.decidir(phi, self.desplazamiento)
         self.salidas.publicar_paso(dec)
         self.angulo = float(np.clip(self.angulo + dec.delta, 0, 1))
         seq, t_ack, lat = self.b.mover(self.angulo)
-        self.salidas.marcador(config.m_paso_ack(seq), t_ack)   # estampado a la hora del ACK
-
         erroneo = dec.direccion != meta
-        p_errp, art = self.b.errp(seq, t_ack, erroneo, dec.delta)
+
+        if t_ack is None:                            # sin ACK no hay instante del movimiento: sin epoca
+            p_errp, art, excluido, t_ack = float('nan'), True, 'sin_ack', local_clock()
+        else:
+            self.salidas.marcador(config.m_paso_ack(seq), t_ack)   # estampado a la hora del ACK
+            p_errp, art, excluido = self.b.errp(seq, t_ack, erroneo, dec.delta)
+        valido = not excluido
         detectado = bool(np.isfinite(p_errp) and p_errp > self.umbral_errp)
-        fiab = self.confianza(erroneo, detectado, not art)
+        fiab = self.confianza(erroneo, detectado, valido and not art)
         sens_v, espec_v = self.confianza.vivo()
-        info = self.agente.actualizar(p_errp, art, fiab if aprender else 0.0, sens_v, espec_v)
+        # escalon 2: con el reloj en ROJO la epoca puede estar desalineada; no se aprende de ella
+        aprende = aprender and valido and self.vigilante.colores['reloj'] != config.ROJO
+        info = self.agente.actualizar(p_errp, art or not valido, fiab if aprende else 0.0, sens_v, espec_v)
 
         if self.fsm.estado in ('LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO'):
             if self.confianza.congelado and self.fsm.estado == 'LAZO_ADAPTATIVO':
@@ -361,32 +581,30 @@ class Orquestador:
                 self.fsm.ir_a('LAZO_ADAPTATIVO')
 
         P_hat = info['P_hat']
-        fila = {
-            't_iso': datetime.now().isoformat(timespec='milliseconds'), 't_lsl': round(t_ack, 4),
-            'seq': seq, 'estado': self.fsm.estado, 'meta': meta, 'angulo': round(self.angulo, 3),
-            'p_prima': round(dec.p_prima, 4), 'direccion': dec.direccion, 'delta': round(dec.delta, 3),
-            'P_hat': '' if not np.isfinite(P_hat) else round(P_hat, 4), 'artefacto': int(art),
-            'fiabilidad': round(fiab, 3), 'beta': round(info['beta'], 4),
-            'varianza_beta': round(info['varianza'], 4), 'sens_viva': round(sens_v, 3),
-            'espec_viva': round(espec_v, 3), 'cambio': info['cambio'], 'explorando': int(dec.explorando),
-            'error_verdadero': int(erroneo), 'error_sombra': int(dec.direccion_sombra != meta),
-            'latencia_ack_ms': round(lat, 2), 'salud': '', 'excluido': '',
-        }
-        self.csv.writerow(fila)
-        self.f_csv.flush()
-        self.filas.append(fila)
+        fila = self.registrar_fila(
+            t_lsl=round(t_ack, 4), seq=seq, meta=meta, p_prima=round(dec.p_prima, 4),
+            direccion=dec.direccion, delta=round(dec.delta, 3),
+            P_hat='' if not np.isfinite(P_hat) else round(P_hat, 4), artefacto=int(art),
+            fiabilidad=round(fiab, 3), beta=round(info['beta'], 4),
+            varianza_beta=round(info['varianza'], 4), sens_viva=round(sens_v, 3),
+            espec_viva=round(espec_v, 3), cambio=info['cambio'], explorando=int(dec.explorando),
+            error_verdadero=int(erroneo), error_sombra=int(dec.direccion_sombra != meta),
+            latencia_ack_ms='' if not np.isfinite(lat) else round(lat, 2), excluido=excluido)
         self.salidas.estado(
             tipo='paso', paso=len(self.filas), estado=self.fsm.estado, meta=meta,
             angulo=self.angulo, p_crudo=float(sigmoide(dec.z)), b=self.agente.umbral_b,
             p_prima=dec.p_prima, P_hat=None if not np.isfinite(P_hat) else P_hat,
             error=int(erroneo), error_sombra=fila['error_sombra'], beta=info['beta'],
             sd_beta=float(np.sqrt(info['varianza'])), youden=self.confianza.youden,
-            fiabilidad=fiab, congelado=self.confianza.congelado, cambio=info['cambio'], latencia_ms=lat,
-            perturbado=self.desplazamiento != 0)
+            fiabilidad=fiab, congelado=self.confianza.congelado, cambio=info['cambio'],
+            latencia_ms=None if not np.isfinite(lat) else lat,
+            perturbado=self.desplazamiento != 0, salud=self.vigilante.colores, excluido=excluido)
 
+        self.b.fin_paso()
         espera = self.a.ciclo - (time.perf_counter() - t0)
         if espera > 0:
             time.sleep(espera)
+        return True
 
     def bloque(self, n_pasos, aprender, perturbar_en=None):
         rng = np.random.default_rng(self.a.semilla + 7)
@@ -396,9 +614,7 @@ class Orquestador:
                 if not orden:
                     orden = list(rng.permutation([1, -1]))
                 meta = int(orden.pop())
-                self.salidas.marcador(config.CUE_CERRAR if meta > 0 else config.CUE_RELAJA)
-                self.salidas.estado(tipo='cue', meta=meta)
-                self.b.cue(meta)
+                self.presentar(meta)
             if perturbar_en is not None and t == perturbar_en:
                 previo = self.fsm.estado
                 self.fsm.ir_a('PERTURBACION')
@@ -407,17 +623,40 @@ class Orquestador:
                 self.t_perturbacion = len(self.filas)
                 self.beta_pre = self.agente.beta
                 self.fsm.ir_a(previo)
-            self.paso(meta, aprender)
+            while True:                              # las pausas no consumen pasos del bloque
+                motivo = self.revisar_salud()
+                if motivo is None:
+                    if self.paso(meta, aprender):
+                        break
+                    motivo = self.revisar_salud() or 'eeg'   # el EEG fallo justo al decidir
+                self.pausa_segura(motivo)
+                self.presentar(meta)                 # el ensayo se retoma con su cue
+
+    def presentar(self, meta):
+        self.salidas.marcador(config.CUE_CERRAR if meta > 0 else config.CUE_RELAJA)
+        self.salidas.estado(tipo='cue', meta=meta)
+        self.b.cue(meta)
 
     # ---------------- evaluacion ----------------
     def evaluar(self):
         if not self.filas:
             return
-        e = np.array([f['error_verdadero'] for f in self.filas])
-        s = np.array([f['error_sombra'] for f in self.filas])
-        est = np.array([f['estado'] for f in self.filas])
-        lat = np.array([f['latencia_ack_ms'] for f in self.filas])
+        self.excluidos = {}
+        for f in self.filas:
+            if f['excluido']:
+                self.excluidos[f['excluido']] = self.excluidos.get(f['excluido'], 0) + 1
+        validas = [f for f in self.filas if not f['excluido']]   # el analisis ignora los excluidos
         aviso('\n=== EVALUACION ===')
+        desglose = ', '.join(f'{m} {n}' for m, n in self.excluidos.items())
+        aviso(f'  excluidos del analisis: {sum(self.excluidos.values())} de {len(self.filas)} filas'
+              + (f' ({desglose})' if desglose else ''))
+        if not validas:
+            aviso(f'  CSV: {self.ruta_csv}')
+            return
+        e = np.array([f['error_verdadero'] for f in validas])
+        s = np.array([f['error_sombra'] for f in validas])
+        est = np.array([f['estado'] for f in validas])
+        lat = np.array([f['latencia_ack_ms'] for f in validas], dtype=float)
         for nombre in ('LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO'):
             m = est == nombre
             if m.any():
@@ -426,24 +665,29 @@ class Orquestador:
         if self.a.backend == 'real':
             aviso(f'  latencia ACK: {lat.mean():.1f} +- {lat.std():.1f} ms')
         if self.t_perturbacion is not None:
-            tp = self.t_perturbacion
-            beta = np.array([f['beta'] for f in self.filas[tp:]])
-            meta_beta = self.beta_pre + 0.7 * config.PERTURBACION_LOGITS
-            idx = np.flatnonzero(beta >= meta_beta)
-            if idx.size:
-                n_rec = idx[0] + 1
-                if self.a.backend == 'real':        # tiempo real medido con los ACK
-                    seg = self.filas[tp + idx[0]]['t_lsl'] - self.filas[tp]['t_lsl']
-                else:                               # simulacion: al ritmo nominal del lazo
-                    seg = n_rec * config.CICLO_S
+            tp = sum(1 for f in self.filas[:self.t_perturbacion] if not f['excluido'])
+            if tp < len(validas):
                 k2 = tp + int(config.RECUPERACION_MAX_S / config.CICLO_S)
-                checkpoint(self.salidas, 4, seg <= config.RECUPERACION_MAX_S,
-                           f'recuperacion (beta al 70% de la perturbacion) en {n_rec} pasos '
-                           f'= {seg:.0f} s; error ~2 min tras perturbar: agente {e[tp:k2].mean():.2f} '
-                           f'vs sombra {s[tp:k2].mean():.2f}', False, informativo=True)
-            else:
-                checkpoint(self.salidas, 4, False, 'no se recupero dentro del bloque', False,
-                           informativo=True)
+                self.error_post = {'agente': float(e[tp:k2].mean()), 'sombra': float(s[tp:k2].mean())}
+                beta = np.array([f['beta'] for f in validas[tp:]])
+                meta_beta = self.beta_pre + 0.7 * config.PERTURBACION_LOGITS
+                idx = np.flatnonzero(beta >= meta_beta)
+                if idx.size:
+                    n_rec = idx[0] + 1
+                    if self.a.backend == 'real':        # tiempo real medido con los ACK (incluye pausas)
+                        seg = validas[tp + idx[0]]['t_lsl'] - validas[tp]['t_lsl']
+                    else:                               # simulacion: al ritmo nominal del lazo
+                        seg = n_rec * config.CICLO_S
+                    checkpoint(self.salidas, 4, seg <= config.RECUPERACION_MAX_S,
+                               f'recuperacion (beta al 70% de la perturbacion) en {n_rec} pasos '
+                               f'= {seg:.0f} s; error ~2 min tras perturbar: agente '
+                               f'{self.error_post["agente"]:.2f} vs sombra {self.error_post["sombra"]:.2f}',
+                               False, informativo=True)
+                else:
+                    checkpoint(self.salidas, 4, False,
+                               f'no se recupero dentro del bloque; error tras perturbar: agente '
+                               f'{self.error_post["agente"]:.2f} vs sombra {self.error_post["sombra"]:.2f}',
+                               False, informativo=True)
         aviso(f'  beta final = {self.filas[-1]["beta"]}  |  cambios detectados = {self.agente.n_cambios}'
               f'  |  detector vivo: sens {self.confianza.sens:.2f}, espec {self.confianza.espec:.2f}')
         aviso(f'  CSV: {self.ruta_csv}')
@@ -493,10 +737,9 @@ def argumentos(argv=None):
     return a
 
 
-def main(argv=None):
-    a = argumentos(argv)
-    backend = BackendSim(a) if a.backend == 'sim' else BackendReal(a)
-    orq = Orquestador(backend, a)
+def correr(orq, a):
+    """La sesion completa. Pase lo que pase (incluido Ctrl+C dentro de una pausa segura)
+    termina en EVALUACION, con el resumen impreso y el CSV cerrado."""
     try:
         if orq.preparar():
             aviso(f'Bloque LAZO_ESTATICO ({a.pasos_estatico} pasos)...')
@@ -514,6 +757,12 @@ def main(argv=None):
             orq.fsm.ir_a('EVALUACION')
         orq.evaluar()
         orq.cerrar()
+
+
+def main(argv=None):
+    a = argumentos(argv)
+    backend = BackendSim(a) if a.backend == 'sim' else BackendReal(a)
+    correr(Orquestador(backend, a), a)
 
 
 if __name__ == '__main__':

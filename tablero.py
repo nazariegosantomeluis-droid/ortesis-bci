@@ -150,8 +150,9 @@ class Tablero(QtWidgets.QWidget):
                                                pen=pg.mkPen('r', width=1, style=QtCore.Qt.DotLine)))
                 self._pert_marcada = True
             congel = ' · APRENDIZAJE CONGELADO' if e['congelado'] else ''
+            ack = 'sin ACK' if e['latencia_ms'] is None else f"ACK {e['latencia_ms']:.1f} ms"
             self.lbl_estado.setText(f"{e['estado']} · paso {e['paso']} · beta {e['beta']:+.2f} · "
-                                    f"ACK {e['latencia_ms']:.1f} ms{congel}")
+                                    f"{ack}{congel}")
             self.lbl_estado.setStyleSheet('font-size:16px;font-weight:bold;padding:4px;' +
                                           ('color:#d62728;' if e['congelado'] else ''))
 

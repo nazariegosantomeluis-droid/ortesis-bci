@@ -207,6 +207,81 @@ def orquestador_sim():
     return f'{len(filas)} filas con el esquema del contrato'
 
 
+def _backend_con_fallas(orquestador, a, fallas, cortar_en_tic=None):
+    """BackendSim con fallas programadas a mano y un tope de tics, para que una pausa
+    que no termina sea una falla de la prueba y no un cuelgue."""
+    class ConFallas(orquestador.BackendSim):
+        tics = 0
+
+        def esperar(self, dt):
+            self.tics += 1
+            if cortar_en_tic is not None and self.tics >= cortar_en_tic:
+                raise KeyboardInterrupt
+            assert self.tics < 5000, 'la pausa segura no termina'
+            super().esperar(dt)
+    b = ConFallas(a)
+    b.fallas = fallas
+    return b
+
+
+@prueba
+def pausa_segura():
+    import orquestador
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '20',
+                                '--pasos_adaptativo', '60', '--sin_perturbacion'])
+    # corte de EEG de 4 s que empieza a media epoca (t=59 s); el movimiento a posicion segura
+    # de esa pausa (seq 30) sale con pico de latencia; C3 plano 5 s en t=100 s; 3 ACK perdidos
+    b = _backend_con_fallas(orquestador, a, {
+        'corte_eeg': [(59.0, 4.0)], 'canal': [(100.0, 5.0, 'C3', 'plano')],
+        'ack_perdido': {70, 71, 72}, 'pico_latencia': {10: 150.0, 30: 200.0}})
+    orq = orquestador.Orquestador(b, a)
+    orquestador.correr(orq, a)
+    filas = orq.filas
+    assert list(filas[0]) == config.COLUMNAS_CSV
+    pausas = [f for f in filas if f['estado'] == 'PAUSA_SEGURA']
+    assert [f['excluido'] for f in pausas] == ['pausa:eeg', 'pausa:canal', 'pausa:ortesis'], pausas
+    lazo = [f for f in filas if f['estado'] != 'PAUSA_SEGURA']
+    assert len(lazo) == 80                                   # las pausas no consumen pasos
+    motivos = [f['excluido'] for f in lazo if f['excluido']]
+    assert motivos == ['epoca_invalida', 'sin_ack', 'sin_ack', 'sin_ack'], motivos
+    # el agente no aprende en pausa ni en pasos excluidos: beta igual a la fila anterior
+    for i, f in enumerate(filas):
+        if f['excluido'] and i:
+            assert f['beta'] == filas[i - 1]['beta'], (i, f)
+        assert len(f['salud']) == 4 and set(f['salud']) <= set('VAR'), f
+    assert orq.fsm.estado == 'EVALUACION'
+    estados = [e for _, e in orq.fsm.historial]
+    for i, e in enumerate(estados):
+        if e == 'PAUSA_SEGURA':
+            assert estados[i - 1] == estados[i + 1], estados   # regresa al estado previo
+    marc = orq.salidas.marcadores
+    for m in ('salud:eeg:ROJO', 'salud:eeg:VERDE', 'salud:ortesis:AMARILLO', 'salud:ortesis:ROJO',
+              'bloque:PAUSA_SEGURA'):
+        assert m in marc, m
+    assert 'C3 plano' in ' '.join(orq.avisos_salud)          # dice que electrodo y por que
+    assert orq.excluidos == {'pausa:eeg': 1, 'pausa:canal': 1, 'pausa:ortesis': 1,
+                             'epoca_invalida': 1, 'sin_ack': 3}, orq.excluidos
+    # Ctrl+C dentro de una pausa que no termina: llega a EVALUACION y cierra el CSV
+    b2 = _backend_con_fallas(orquestador, a, {'corte_eeg': [(10.0, 1e9)]}, cortar_en_tic=3)
+    orq2 = orquestador.Orquestador(b2, a)
+    orquestador.correr(orq2, a)
+    assert orq2.fsm.estado == 'EVALUACION' and orq2.f_csv.closed
+    assert orq2.filas[-1]['excluido'] == 'pausa:eeg'
+    return f'3 pausas (eeg, canal, ortesis) con regreso al estado previo; excluidos {orq.excluidos}'
+
+
+@prueba
+def calibracion_repeticiones():
+    import orquestador
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)   # sin hardware
+    intentos = []
+    assert b._ensayo_con_reintentos(lambda: intentos.append(1), 'ensayo') is None
+    assert len(intentos) == 1 + config.CAL_REPETICIONES_MAX
+    cuenta = iter([None, None, 'dato'])
+    assert b._ensayo_con_reintentos(lambda: next(cuenta), 'ensayo') == 'dato'
+    return f'maximo {config.CAL_REPETICIONES_MAX} repeticiones por ensayo y aviso'
+
+
 # ------------------------------------------------------------ hardware (sin hardware)
 @prueba
 def modelos_hardware():
@@ -482,7 +557,13 @@ def lazo_real_sintetico():
     finally:
         puente.terminate()
     cps = [l for l in r.stdout.splitlines() if l.startswith('[CP')]
-    return 'cerebro sintetico + ortesis simulada: ' + ' | '.join(c.split(']')[0][1:] + (' GO' if 'GO' in c and 'NO GO' not in c else ' NO GO') for c in cps)
+    pausas = r.stdout.count('[PAUSA SEGURA] motivo')
+    excluidos = next(l.strip() for l in r.stdout.splitlines() if 'excluidos del analisis' in l)
+    assert pausas == 0, f'{pausas} pausas seguras en una corrida sin fallas:\n' + '\n'.join(
+        l for l in r.stdout.splitlines() if '[salud]' in l or 'PAUSA' in l)
+    return ('cerebro sintetico + ortesis simulada: ' + ' | '.join(
+        c.split(']')[0][1:] + (' GO' if 'GO' in c and 'NO GO' not in c else ' NO GO') for c in cps)
+        + f'; sin pausas en falso; {excluidos}')
 
 
 def main():
@@ -491,7 +572,8 @@ def main():
     a = ap.parse_args()
     print('Pruebas ortesis-bci')
     for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
-              maquina_estados, orquestador_sim, modelos_hardware, senal_valida,
+              maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones,
+              modelos_hardware, senal_valida,
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, puente_reconecta,
               cerebro_sintetico):
         p()
