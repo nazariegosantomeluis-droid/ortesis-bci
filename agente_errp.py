@@ -162,7 +162,11 @@ class AgenteErrP:
         return float(sigmoide(a_priori + llr))
 
     # ------------------------------------------------------------ aprendizaje
-    def actualizar(self, p_errp, artefacto=False, fiabilidad=1.0, sens=None, espec=None) -> dict:
+    def actualizar(self, p_errp, artefacto=False, fiabilidad=1.0, sens=None, espec=None, peso=None) -> dict:
+        """fiabilidad: cuanto se le cree al detector AHORA; con ella se calcula P_hat.
+        peso: cuanto se aprende de este paso (0 = nada). Por defecto, igual a la fiabilidad.
+        Van separados para que P_hat siga diciendo lo que vio el detector cuando no se
+        aprende (bloque estatico, aprendizaje congelado)."""
         if self._pendiente is None:
             raise RuntimeError('llama a decidir() antes de actualizar()')
         dec, self._pendiente = self._pendiente, None
@@ -172,8 +176,8 @@ class AgenteErrP:
         if p_errp is None or not np.isfinite(p_errp) or artefacto:
             return info
 
-        fiab = float(np.clip(fiabilidad, 0, 1))
-        P_hat = self.prob_error(p_errp, sens, espec, fiab)
+        P_hat = self.prob_error(p_errp, sens, espec, float(np.clip(fiabilidad, 0, 1)))
+        fiab = float(np.clip(fiabilidad if peso is None else peso, 0, 1))   # de aqui en adelante: cuanto aprender
         info['P_hat'] = P_hat
         q = (1 - P_hat) if dec.direccion > 0 else P_hat     # P(la intencion era cerrar)
         g = q - dec.p_prima                                  # residuo (innovacion)

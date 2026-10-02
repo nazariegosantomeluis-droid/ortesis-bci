@@ -36,7 +36,7 @@ VENTANA = 20     # para el error movil
 class Tablero(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('ortesis-bci · tablero')
+        self.setWindowTitle('ortesis-bci · Tablero')
         self.resize(1200, 900)
         pg.setConfigOptions(antialias=True, background='w', foreground='k')
         lay = QtWidgets.QVBoxLayout(self)

@@ -32,6 +32,34 @@ Orden de los 17 canales del flujo combinado, unidades del EEG, contador de 1 en 
 6. **Brecha calibración → lazo:** en `resultados/sesion_real_20261002_114317.csv`, MI con BA 0.88 en calibración contra 0.37 de error en el bloque estático; ErrP con especificidad 0.96 calibrada contra 0.72 en vivo. Investigar (recentrado en línea, tiempos de ventana calibración contra lazo, paso fijo de 0.15 en `CAL_ERRP` contra pasos variables) y **reportar la causa antes de corregir**.
 7. **Alcance:** P0 más Tarea 2 mínima. De la Tarea 3 solo corregir que la órtesis casi nunca cierra completa. Transferencia con PhysioNet: fuera. Si hay que recortar dentro del P0, lo primero que sale es el semáforo PILOTO.
 
+### Riesgos del domingo
+
+- **Detector de ErrP entre 0.70 y 0.75.** El montaje del Unicorn tiene 3 electrodos fronto-centrales (Fz, Cz, Pz) en lugar de 5; en el gemelo el detector bajó unos puntos. El umbral del CP3 (`config.BA_MIN`) **se queda en 0.75** por decisión de Luis; solo la prueba del gemelo acepta 0.70. Si el detector real queda entre 0.70 y 0.75, el CP3 dará NO GO: tener listo el plan B.
+- **Nada se ha probado con el casco.** `verificar_unicorn.py` es lo primero que se corre el domingo.
+- **El equipo se suspende por inactividad y al cerrar la tapa.** Desactivar la suspensión antes de la demo.
+
+### Brecha calibración → lazo: causa medida (2 de octubre, tarde; cifras del gemelo)
+
+Scripts en `estudios/`. **Reportado a Luis; pendiente de su decisión antes de corregir.**
+
+- **Descartado:** el recentrado en línea y las respuestas cerebrales a cada movimiento dentro de la ventana de MI (ablaciones: ±0.01 de error); el traslape de épocas de ErrP con un paso cada 0.87 s contra 2.5 s (especificidad 0.95 contra 0.96); una carrera en el gemelo entre el flujo `Paso` y el ACK (0 de 220 movimientos juzgados con la dirección equivocada).
+- **MI:** (1) la BA que reporta la calibración secuencial es optimista: 0.84 reportada contra 0.80 real (+0.04 de error; +0.06 si para a los 24 ensayos); (2) el primer paso de cada ensayo falla más (0.25 contra 0.18), porque su ventana empieza con la señal e incluye la transición; esperar 2 s más lo baja a 0.12; (3) un bloque estático de 30 pasos tiene desviación de 0.08: el peor de 10 bloques da 0.33. Sesión real de 150 pasos con el montaje nuevo: BA 0.83 en calibración, error 0.20 en el lazo. El 0.37 de la sesión de las 11:43 queda en la cola de ese ruido; la subida de `p'` paso a paso no se reprodujo ni en 300 pasos sin LSL ni en 150 en vivo.
+- **ErrP:** la causa es la calibración secuencial. Con el montaje del Unicorn solo 2 de 16 sujetos dan GO, a las 40 a 60 épocas, y lo hacen por suerte: reportan BA 0.87 y especificidad 0.90, y en épocas nuevas dan 0.69 y 0.81. Otros 11 de 16 reciben un NO GO temprano a las 60 épocas, aunque con 120 llegarían a una BA real de 0.72. Con 120 épocas lo reportado coincide con lo real (0.74 contra 0.75). Además, `espec_viva` tiene memoria corta (~14 aciertos) y fluctúa ±0.1.
+- **No se pudo probar con el gemelo:** paso fijo de 0.15 en `CAL_ERRP` contra pasos variables en el lazo (el gemelo no hace depender el ErrP del tamaño del paso). Requiere una persona.
+- **Bug de `P_hat`:** corregido. `actualizar()` separa la fiabilidad (con la que se calcula `P_hat`) del peso de aprendizaje.
+
+### Orden acordado tras el commit 5 (2 de octubre, tarde)
+
+1. Brecha calibración → lazo: ablaciones en el gemelo, reportar la causa con números antes de corregir; el bug de `P_hat` se corrige en el mismo bloque.
+2. Repetir las cifras de lazo y caos del README con el montaje nuevo.
+3. CP1 robusto y sin impedancias.
+4. Rechazo por movimiento de cabeza.
+5. Selección de canales por validación cruzada.
+6. Pérdidas de Bluetooth como tipo de caos.
+7. Tarea 2 mínima.
+8. Corrección para que la órtesis cierre completa.
+9. Semáforo PILOTO, solo si alcanza.
+
 ### P0, en orden de commits (rama `p0-unicorn`)
 
 - [x] 1. Contrato: montaje, papeles, flujo `IMU`, fuentes de EEG; gemelo con la topografía del montaje.

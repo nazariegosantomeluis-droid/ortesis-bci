@@ -165,6 +165,43 @@ def agente_basico():
 
 
 @prueba
+def p_hat_refleja_errp():
+    """P_hat dice lo que vio el detector aunque el agente no este aprendiendo (bloque estatico,
+    aprendizaje congelado, reloj en ROJO). Antes, con salida calibrada, quedaba igual al prior."""
+    import orquestador
+    from agente_errp import AgenteErrP, ConfigAgente
+    ag = AgenteErrP(np.ones(3), 0.0, ConfigAgente(salida_detector='calibrada', p_error_calibracion=0.3))
+    prior = ag.prior
+    ag.decidir(np.zeros(3))
+    alto = ag.actualizar(0.95, False, fiabilidad=1.0, peso=0.0)          # el detector vio un error claro
+    assert alto['P_hat'] > prior + 0.3 and ag.beta == 0.0 and not alto['usada'], alto
+    ag.decidir(np.zeros(3))
+    bajo = ag.actualizar(0.05, False, fiabilidad=1.0, peso=0.0)
+    assert bajo['P_hat'] < prior - 0.05 and ag.beta == 0.0, bajo
+    ag.decidir(np.zeros(3))
+    dudoso = ag.actualizar(0.95, False, fiabilidad=0.4, peso=0.0)        # detector poco fiable: se le cree menos
+    assert ag.prior < dudoso['P_hat'] < alto['P_hat'], dudoso
+    ag.decidir(np.zeros(3))
+    assert ag.actualizar(0.95, False, fiabilidad=1.0)['usada'] and ag.beta != 0.0    # sin peso: aprende como siempre
+
+    # en el orquestador: bloque estatico con salida calibrada
+    class Calibrada(orquestador.BackendSim):
+        def preparar(self, orq):
+            return dict(super().preparar(orq), salida='calibrada')
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '60', '--pasos_adaptativo', '10',
+                                '--sin_perturbacion'])
+    orq = orquestador.Orquestador(Calibrada(a), a)
+    orquestador.correr(orq, a)
+    est = [f for f in orq.filas if f['estado'] == 'LAZO_ESTATICO' and f['P_hat'] != '']
+    ph = np.array([f['P_hat'] for f in est]); err = np.array([f['error_verdadero'] for f in est])
+    assert len(est) > 40 and ph.std() > 0.1, ph.std()
+    assert ph[err == 1].mean() > ph[err == 0].mean() + 0.08, (ph[err == 1].mean(), ph[err == 0].mean())
+    assert len({f['beta'] for f in orq.filas if f['estado'] == 'LAZO_ESTATICO'}) == 1      # y aun asi no aprende
+    return (f'bloque estatico: P_hat {ph[err == 1].mean():.2f} en errores y {ph[err == 0].mean():.2f} en aciertos, '
+            f'sin aprender')
+
+
+@prueba
 def agente_aprende():
     import simulador_lazo as S
     M = {m: np.array([S.metricas(S.correr(m, s), 300) for s in range(12)]).mean(0)
@@ -1335,7 +1372,7 @@ def main():
     ap.add_argument('--completa', action='store_true')
     a = ap.parse_args()
     print('Pruebas ortesis-bci')
-    for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
+    for p in (contrato, vigilante, retroceso, agente_basico, p_hat_refleja_errp, agente_aprende, agente_sin_sesgo, confianza_detector,
               maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones, deriva_reloj,
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               instantanea_estado, reanudar,

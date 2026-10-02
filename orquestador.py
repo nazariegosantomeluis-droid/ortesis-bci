@@ -737,7 +737,9 @@ class Orquestador:
         sens_v, espec_v = self.confianza.vivo()
         # escalon 2: con el reloj en ROJO la epoca puede estar desalineada; no se aprende de ella
         aprende = aprender and valido and self.vigilante.colores['reloj'] != config.ROJO
-        info = self.agente.actualizar(p_errp, art or not valido, fiab if aprende else 0.0, sens_v, espec_v)
+        # P_hat se calcula con la fiabilidad real del detector; el peso decide si se aprende
+        info = self.agente.actualizar(p_errp, art or not valido, self.confianza.fiabilidad_bruta, sens_v, espec_v,
+                                      peso=fiab if aprende else 0.0)
 
         if self.fsm.estado in ('LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO'):
             if self.confianza.congelado and self.fsm.estado == 'LAZO_ADAPTATIVO':
