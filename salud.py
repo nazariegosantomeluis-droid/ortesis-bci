@@ -88,8 +88,9 @@ class Vigilante:
         c_edad = self._nivel(e['edad_s'], 'eeg_edad_amarillo_s', 'eeg_edad_rojo_s')
         if c_edad != V:
             return self._poner('eeg', c_edad, f"sin muestras hace {e['edad_s']:.1f} s")
+        # solo cuenta el deficit: una rafaga de muestras atrasadas que llegan juntas no es una falla
         nominal = config.FLUJOS['EEG'][2]
-        c_tasa = self._nivel(abs(e['tasa_hz'] - nominal) / nominal, 'eeg_tasa_amarillo', 'eeg_tasa_rojo')
+        c_tasa = self._nivel(max(0.0, nominal - e['tasa_hz']) / nominal, 'eeg_tasa_amarillo', 'eeg_tasa_rojo')
         self._poner('eeg', c_tasa, f"tasa {e['tasa_hz']:.0f} Hz")
 
     def _ortesis(self, o):

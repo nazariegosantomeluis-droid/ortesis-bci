@@ -87,6 +87,10 @@ def vigilante():
     v.actualizar(6.0, eeg={**bien_eeg, 'canales': {'C3': 'plano', 'Fz': 'ruidoso'}})
     assert v.motivo_pausa() == 'canal' and 'C3 plano' in v.detalle['eeg'] and 'Fz ruidoso' in v.detalle['eeg']
     v.actualizar(7.0, eeg=bien_eeg)
+    # tasa real: solo cuenta el deficit (una rafaga de muestras atrasadas no es una falla)
+    for tasa, color in ((400.0, config.VERDE), (215.0, A), (180.0, R), (250.0, config.VERDE)):
+        v.actualizar(7.5, eeg={**bien_eeg, 'tasa_hz': tasa})
+        assert v.colores['eeg'] == color, (tasa, v.colores['eeg'])
     # ortesis: 1 ACK perdido amarillo, 3 rojo, pico de latencia amarillo, puerto caido rojo
     v.actualizar(8.0, ortesis={**bien_ort, 'acks_perdidos': 1})
     assert v.colores['ortesis'] == A and v.motivo_pausa() is None
@@ -629,6 +633,48 @@ def reconexion_eeg():
 
 
 @prueba
+def dos_flujos_eeg():
+    """Dos flujos con el mismo nombre en la red (por ejemplo, un gemelo olvidado en otra
+    terminal): EntradaEEG elige el mas reciente y NO salta al otro mientras el suyo viva."""
+    import threading
+    import hardware as hw
+    from pylsl import StreamInfo, StreamOutlet, local_clock
+    fs, nombre = 250, 'EEG_prueba2'
+    viejo = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
+    time.sleep(0.3)
+    nuevo = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
+    pub = {'vivo': True, 'callado': False, 't': local_clock()}
+
+    def publicar():                            # el viejo vale 1000 uV, el nuevo 0: asi se distinguen
+        while pub['vivo']:
+            n = int((local_clock() - pub['t']) * fs)
+            if n > 0:
+                pub['t'] += n / fs
+                viejo.push_chunk(np.full((n, 8), 1000.0).tolist(), pub['t'])
+                if not pub['callado']:
+                    nuevo.push_chunk(np.zeros((n, 8)).tolist(), pub['t'])
+            time.sleep(0.02)
+    threading.Thread(target=publicar, daemon=True).start()
+    eeg = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre)
+    try:
+        time.sleep(1.5)
+        assert eeg._crudo(1.0)[0].max() == 0.0, 'debio elegir el flujo mas reciente'
+        pub['callado'] = True                  # su flujo enmudece 2.5 s, pero sigue vivo
+        time.sleep(2.5)
+        assert eeg.lecturas()['edad_s'] > 1.0
+        pub['callado'] = False
+        time.sleep(2.5)
+        x, _ = eeg._crudo(1.0)
+        assert eeg.reconexiones == 0 and x.max() == 0.0, (eeg.reconexiones, x.max())
+        assert eeg.lecturas()['edad_s'] < 0.5
+        assert 200 < eeg.lecturas()['tasa_hz'] < 300, eeg.lecturas()['tasa_hz']   # tasa por muestras llegadas
+    finally:
+        pub['vivo'] = False
+        eeg.cerrar()
+    return 'elige el flujo mas reciente y no salta al otro mientras el suyo sigue publicado'
+
+
+@prueba
 def puente_reconecta():
     """La reconexion de la placa en puente_lsl.py, con la placa sintetica de BrainFlow.
     NO sustituye la prueba con el Cyton real."""
@@ -726,7 +772,7 @@ def main():
               maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones,
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               modelos_hardware, senal_valida,
-              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, puente_reconecta,
+              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, dos_flujos_eeg, puente_reconecta,
               cerebro_sintetico):
         p()
     if a.completa:

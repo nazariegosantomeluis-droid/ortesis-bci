@@ -100,11 +100,16 @@ class EntradaEEG:
     exponencial. Un flujo que vuelve es una instancia nueva y su desfase de reloj
     puede ser otro: al reconectar se vacia el buffer (ninguna ventana ni epoca
     mezcla los dos lados del hueco) y se reinicia la linea base del reloj.
+
+    Si hay VARIOS flujos con el mismo nombre en la red (un gemelo olvidado en otra
+    terminal, por ejemplo) se avisa, se usa el mas reciente y nunca se salta a otro
+    mientras el propio siga publicado, aunque enmudezca un rato.
     """
 
     def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG'):
         self.nombre, self._segundos = nombre, segundos
         self._uid, self.reconexiones = None, 0
+        self._llegadas = deque(maxlen=2000)       # (instante de llegada, muestras): tasa real
         self.inlet = self._resolver(timeout)
         if self.inlet is None:
             raise RuntimeError(f"No encontre el flujo '{nombre}'. ¿Esta corriendo puente_lsl.py?")
@@ -118,14 +123,22 @@ class EntradaEEG:
         self._hilo = threading.Thread(target=self._leer, daemon=True)
         self._hilo.start()
 
-    def _resolver(self, timeout):
-        """Entrada nueva al flujo, o None si no aparece o es la misma instancia que ya se tiene."""
+    def _resolver(self, timeout=None):
+        """Entrada nueva al flujo, o None si no aparece o si la instancia actual sigue
+        publicada. timeout=None: una sola busqueda de 1 s (reconexion)."""
         from pylsl import StreamInlet, resolve_byprop, proc_clocksync, proc_dejitter
-        s = resolve_byprop('name', self.nombre, timeout=timeout)
-        if not s or s[0].uid() == self._uid:
-            return None
-        self._uid, self.fs = s[0].uid(), float(s[0].nominal_srate())
-        return StreamInlet(s[0], max_buflen=int(self._segundos) + 5,
+        if timeout is not None and not resolve_byprop('name', self.nombre, timeout=timeout):
+            return None                           # al arrancar: esperar a que aparezca alguno
+        s = resolve_byprop('name', self.nombre, minimum=16, timeout=1.0)   # 1 s completo: verlos TODOS
+        if not s or self._uid in {x.uid() for x in s}:
+            return None                           # el flujo propio sigue vivo: no se cambia por otro
+        elegido = max(s, key=lambda x: x.created_at())
+        if len(s) > 1:
+            print(f"  AVISO: hay {len(s)} flujos '{self.nombre}' en la red ("
+                  + ', '.join(f'{x.hostname()} {x.uid()[:8]}' for x in s)
+                  + f'). Uso el mas reciente ({elegido.uid()[:8]}); cierra los demas.', flush=True)
+        self._uid, self.fs = elegido.uid(), float(elegido.nominal_srate())
+        return StreamInlet(elegido, max_buflen=int(self._segundos) + 5,
                            processing_flags=proc_clocksync | proc_dejitter, recover=False)
 
     def _reiniciar_reloj(self):
@@ -136,7 +149,7 @@ class EntradaEEG:
         """Un intento de volver a resolver el flujo; los intentos se espacian con retroceso."""
         if time.monotonic() < self._proximo_intento:
             return
-        nueva = self._resolver(1.0)
+        nueva = self._resolver()
         if nueva is None:
             self._proximo_intento = time.monotonic() + self._retroceso.siguiente()
             return
@@ -168,6 +181,7 @@ class EntradaEEG:
                     self._x.extend(datos)
                     self._t.extend(ts)
                     self._lag.append(local_clock() - ts[-1])
+                    self._llegadas.append((ahora, len(ts)))
                     self._t_llegada = ahora
             elif time.monotonic() - self._t_llegada > rojo:
                 self._reconectar()                # mudo: quiza es otra instancia la que publica ahora
@@ -202,6 +216,8 @@ class EntradaEEG:
         x, t = self._crudo(u['ventana_canales_s'])
         with self._lock:
             lag = np.array(self._lag)
+            desde = time.monotonic() - u['ventana_canales_s']
+            llegadas = sum(n for cuando, n in self._llegadas if cuando > desde)
         if t.size == 0:
             return {'edad_s': edad, 'tasa_hz': 0.0, 'canales': {}, 'reloj_ms': 0.0}
         if self._lag_base is None and lag.size >= u['reloj_lecturas_base']:
@@ -209,7 +225,7 @@ class EntradaEEG:
         deriva = 0.0 if self._lag_base is None else (float(np.median(lag[-20:])) - self._lag_base) * 1000
         fresco = edad <= u['eeg_edad_rojo_s']
         return {'edad_s': edad,
-                'tasa_hz': float((t > t[-1] - u['ventana_canales_s']).sum() / u['ventana_canales_s']),
+                'tasa_hz': llegadas / u['ventana_canales_s'],     # muestras que de verdad llegaron
                 'canales': revisar_canales(x, self.fs) if fresco else {},
                 'reloj_ms': deriva}
 
