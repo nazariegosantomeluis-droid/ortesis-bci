@@ -60,7 +60,7 @@ python pruebas.py                    # debe decir 33/33 pruebas pasaron
 
 - **Recentrado riemanniano no supervisado.** El decoder de MI se re-centra solo con cada ventana. En la prueba, tras mezclar canales pasa de 50 % a 98 % de exactitud sin recalibrar.
 - **Detector de ErrP de dos vistas fusionadas** (temporal con LDA encogido + geométrica de Riemann), con probabilidades calibradas, umbral de Neyman-Pearson (especificidad ≥ 0.90) y detector de rareza para épocas fuera de distribución.
-- **Calibración secuencial.** Se detiene sola cuando el intervalo de confianza de la exactitud ya decide el checkpoint, y ahorra minutos de piloto.
+- **Calibración honesta.** MI se detiene sola cuando el intervalo de confianza ya decide (mínimo 36 ensayos); el detector de ErrP usa siempre 120 épocas con el umbral elegido por validación anidada (ver el hallazgo de la maldición del ganador).
 - **Hora por contador.** La hora de cada muestra se reconstruye con el contador del casco, sin el jitter de llegada por Bluetooth; una pérdida queda como un hueco visible.
 
 Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simulador_lazo.py --semillas 30`; medidos en Windows 11 con Python 3.11 el 2 de octubre de 2026):
@@ -86,6 +86,24 @@ python cerebro_sintetico.py --erd 0.15 --errp 4 --fatiga 0.5   # piloto difícil
 python cerebro_sintetico.py --perdidas-bt 20                   # 20 pérdidas de Bluetooth por minuto
 python cerebro_sintetico.py --formato unicornlsl               # publica como la app UnicornLSL de g.tec
 ```
+
+## Hallazgo: la calibración secuencial inflaba la exactitud (maldición del ganador)
+
+**El síntoma.** En una sesión contra el gemelo, el detector de ErrP se calibró con especificidad 0.96 y en el lazo vivía en 0.72; el decoder de MI se calibró con BA 0.88 y el bloque estático tuvo 0.37 de error.
+
+**Cómo lo encontró el gemelo.** Con ablaciones y sin LSL (`estudios/`) se descartó una a una cada sospecha: el recentrado en línea (±0.01 de error), las respuestas cerebrales a cada movimiento dentro de la ventana de MI (±0.01), el traslape de épocas con un paso cada 0.87 s (especificidad 0.95 contra 0.96 con 2.5 s) y una carrera entre mensajes en el gemelo (0 de 220 movimientos mal juzgados). Lo que sí apareció fue medir lo reportado en calibración contra lo real **en épocas nuevas** (16 sujetos del gemelo, montaje del Unicorn):
+
+| Calibración del detector de ErrP | Sujetos | Reportado: sens / espec / BA | Real en épocas nuevas |
+|---|---|---|---|
+| Secuencial: GO temprano (40 a 60 épocas) | 2 de 16 | 0.84 / 0.90 / **0.87** | 0.56 / 0.81 / **0.69** |
+| Secuencial: NO GO temprano (60 épocas) | 11 de 16 | BA 0.57 | con 120 épocas habría sido 0.72 |
+| **Corregida: 120 épocas fijas y umbral anidado** | 16 de 16 | 0.51 / 0.89 / **0.70** | 0.56 / 0.89 / **0.73** |
+
+La parada secuencial revisaba cada 10 épocas y daba GO en cuanto el estimado salía alto: con pocos datos eso solo ocurre por suerte, y además el umbral de Neyman-Pearson se elegía sobre los mismos puntajes que se evaluaban. Es la maldición del ganador: se reporta el máximo de varios estimados ruidosos. En MI el efecto era menor (+0.02 de error con un mínimo de 24 ensayos; +0.00 con 36).
+
+**La corrección.** El detector de ErrP se calibra siempre con las 120 épocas, sin GO ni NO GO tempranos, y el umbral se elige dentro de cada pliegue (validación anidada): lo reportado queda a −0.02 ± 0.04 de lo real. MI exige al menos 36 ensayos. Además, el primer paso de cada ensayo fallaba más (0.22 contra 0.18) porque su ventana empezaba con la transición mental; esperar 1 s más tras la señal lo baja a 0.15. El resto del 0.37 era ruido: un bloque estático de 30 pasos tiene desviación de 0.08 (en vivo, con 150 pasos: BA 0.83 en calibración y 0.20 de error).
+
+**El costo honesto.** Con el montaje del Unicorn (3 electrodos fronto-centrales) y el ErrP del gemelo, la BA real del detector ronda 0.73 y el CP3 (0.75) dio GO en 1 de 16 sujetos. Antes "pasaba" por el sesgo. Son cifras del gemelo, no de una persona.
 
 ## Resiliencia: el lazo que no se cae
 
@@ -219,9 +237,9 @@ El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
 | CP | Dónde | Criterio | Si falla |
 |---|---|---|---|
-| 1 | IMPEDANCIAS | 8/8 electrodos ≤ 20 kΩ y jitter del ACK ≤ 15 ms | Más gel / revisar firmware antes de seguir |
-| 2 | CAL_MI | Exactitud balanceada MI ≥ 0.70 (se detiene sola al decidir) | Cambiar piloto o mano vs pies |
-| 3 | CAL_ERRP | BA ErrP ≥ 0.75 y especificidad ≥ 0.90 | Plan B: sesión grabada |
+| 1 | IMPEDANCIAS | Calidad de señal por canal (el Unicorn no mide impedancias) y latencia del ACK en 40 movimientos: MAD ≤ 15 ms, p95 ≤ 60 ms, ACK perdidos ≤ 10 % | Más gel / revisar firmware antes de seguir |
+| 2 | CAL_MI | Exactitud balanceada MI ≥ 0.70 (secuencial, mínimo 36 ensayos) | Cambiar piloto o mano vs pies |
+| 3 | CAL_ERRP | BA ErrP ≥ 0.75 y especificidad ≥ 0.90, con 120 épocas fijas y umbral anidado | Plan B: sesión grabada |
 | 4 | EVALUACION | Recuperación ≤ 120 s | Congelar y usar la ruta de 24 h |
 
 `--forzar` continúa aunque un checkpoint diga NO GO (solo para pruebas).
