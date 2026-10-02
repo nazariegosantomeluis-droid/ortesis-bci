@@ -103,12 +103,14 @@ class EntradaEEG:
 
     Si hay VARIOS flujos con el mismo nombre en la red (un gemelo olvidado en otra
     terminal, por ejemplo) se avisa, se usa el mas reciente y nunca se salta a otro
-    mientras el propio siga publicado, aunque enmudezca un rato.
+    mientras el propio siga publicado, aunque enmudezca un rato. Si el propio muere,
+    solo se acepta un flujo creado DESPUES que el: uno mas viejo ya fue descartado al
+    arrancar y no es la fuente que volvio.
     """
 
     def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG'):
         self.nombre, self._segundos = nombre, segundos
-        self._uid, self.reconexiones = None, 0
+        self._uid, self._creado, self.reconexiones = None, -np.inf, 0
         self._llegadas = deque(maxlen=2000)       # (instante de llegada, muestras): tasa real
         self.inlet = self._resolver(timeout)
         if self.inlet is None:
@@ -133,11 +135,14 @@ class EntradaEEG:
         if not s or self._uid in {x.uid() for x in s}:
             return None                           # el flujo propio sigue vivo: no se cambia por otro
         elegido = max(s, key=lambda x: x.created_at())
+        if elegido.created_at() <= self._creado:
+            return None                           # solo quedan flujos mas viejos que el propio: esperar
         if len(s) > 1:
             print(f"  AVISO: hay {len(s)} flujos '{self.nombre}' en la red ("
                   + ', '.join(f'{x.hostname()} {x.uid()[:8]}' for x in s)
                   + f'). Uso el mas reciente ({elegido.uid()[:8]}); cierra los demas.', flush=True)
-        self._uid, self.fs = elegido.uid(), float(elegido.nominal_srate())
+        self._uid, self._creado = elegido.uid(), elegido.created_at()
+        self.fs = float(elegido.nominal_srate())
         return StreamInlet(elegido, max_buflen=int(self._segundos) + 5,
                            processing_flags=proc_clocksync | proc_dejitter, recover=False)
 

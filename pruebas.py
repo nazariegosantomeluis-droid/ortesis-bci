@@ -735,7 +735,8 @@ def reconexion_eeg():
 @prueba
 def dos_flujos_eeg():
     """Dos flujos con el mismo nombre en la red (por ejemplo, un gemelo olvidado en otra
-    terminal): EntradaEEG elige el mas reciente y NO salta al otro mientras el suyo viva."""
+    terminal): EntradaEEG elige el mas reciente, NO salta al otro mientras el suyo viva y,
+    si el suyo muere, espera a uno mas nuevo en vez de conectarse al viejo."""
     import threading
     import hardware as hw
     from pylsl import StreamInfo, StreamOutlet, local_clock
@@ -743,16 +744,19 @@ def dos_flujos_eeg():
     viejo = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
     time.sleep(0.3)
     nuevo = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
-    pub = {'vivo': True, 'callado': False, 't': local_clock()}
+    pub = {'vivo': True, 'callado': False, 't': local_clock(), 'nuevo': nuevo, 'valor': 0.0}
+    del nuevo
+    candado = threading.Lock()
 
     def publicar():                            # el viejo vale 1000 uV, el nuevo 0: asi se distinguen
         while pub['vivo']:
-            n = int((local_clock() - pub['t']) * fs)
-            if n > 0:
-                pub['t'] += n / fs
-                viejo.push_chunk(np.full((n, 8), 1000.0).tolist(), pub['t'])
-                if not pub['callado']:
-                    nuevo.push_chunk(np.zeros((n, 8)).tolist(), pub['t'])
+            with candado:
+                n = int((local_clock() - pub['t']) * fs)
+                if n > 0:
+                    pub['t'] += n / fs
+                    viejo.push_chunk(np.full((n, 8), 1000.0).tolist(), pub['t'])
+                    if not pub['callado'] and pub['nuevo'] is not None:
+                        pub['nuevo'].push_chunk(np.full((n, 8), pub['valor']).tolist(), pub['t'])
             time.sleep(0.02)
     threading.Thread(target=publicar, daemon=True).start()
     eeg = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre)
@@ -768,10 +772,24 @@ def dos_flujos_eeg():
         assert eeg.reconexiones == 0 and x.max() == 0.0, (eeg.reconexiones, x.max())
         assert eeg.lecturas()['edad_s'] < 0.5
         assert 200 < eeg.lecturas()['tasa_hz'] < 300, eeg.lecturas()['tasa_hz']   # tasa por muestras llegadas
+        # su flujo muere: el viejo sigue ahi, pero ya fue descartado al arrancar; no se conecta a el
+        with candado:
+            pub['nuevo'] = None
+        time.sleep(4.0)
+        assert eeg.reconexiones == 0 and eeg.lecturas()['edad_s'] > 3.0, eeg.reconexiones
+        # aparece una instancia mas nueva (el puente o el gemelo que volvio): a esa si
+        with candado:
+            pub['valor'] = 7.0
+            pub['nuevo'] = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
+        t_fin = time.time() + 15
+        while eeg.reconexiones == 0 and time.time() < t_fin:
+            time.sleep(0.1)
+        time.sleep(1.0)
+        assert eeg.reconexiones == 1 and eeg._crudo(0.5)[0].max() == 7.0
     finally:
         pub['vivo'] = False
         eeg.cerrar()
-    return 'elige el flujo mas reciente y no salta al otro mientras el suyo sigue publicado'
+    return 'elige el mas reciente; no salta mientras el suyo viva; si muere, espera a uno mas nuevo'
 
 
 @prueba
