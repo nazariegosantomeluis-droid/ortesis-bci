@@ -14,6 +14,7 @@ import numpy as np
 from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos
 
 import config
+from salud import Retroceso
 
 
 # ============================ Senal ============================
@@ -24,48 +25,193 @@ def filtrar(x, banda, fs, red=config.RED_HZ):
     return sosfiltfilt(sos, sosfiltfilt(tf2sos(b, a), x, axis=-1), axis=-1)
 
 
+def revisar_canales(x, fs, u=None):
+    """{electrodo: motivo} de los canales que no sirven: 'saturado', 'plano' o 'ruidoso'.
+
+    x: canales x muestras en uV, crudo. Con menos de 1 s no opina."""
+    u = u or config.SALUD
+    malos = {}
+    if x.ndim != 2 or x.shape[1] < fs:
+        return malos
+    finito = np.nan_to_num(x)
+    rms = filtrar(finito, (1.0, 40.0), fs).std(axis=1)
+    for i in range(x.shape[0]):
+        nombre = config.CANALES_EEG[i] if i < len(config.CANALES_EEG) else f'ch{i}'
+        if np.abs(finito[i]).max() > u['canal_saturado_uv']:
+            malos[nombre] = 'saturado'
+        elif finito[i].std() < u['canal_plano_uv']:
+            malos[nombre] = 'plano'
+        elif rms[i] > u['canal_ruidoso_uv']:
+            malos[nombre] = 'ruidoso'
+    return malos
+
+
+def _sin_huecos(t, u=None):
+    """Las marcas de tiempo avanzan sin saltos (ni hacia adelante ni hacia atras)."""
+    u = u or config.SALUD
+    return len(t) < 2 or float(np.abs(np.diff(t)).max()) <= u['hueco_max_s']
+
+
+def ventana_valida(x, t, fs, edad_s, segundos, u=None):
+    """La ventana de los ultimos `segundos` es fresca, completa, continua y finita."""
+    u = u or config.SALUD
+    n = int(segundos * fs)
+    if x.ndim != 2 or x.shape[1] < n or len(t) < n or edad_s > u['eeg_edad_rojo_s']:
+        return False
+    return bool(np.isfinite(x[:, -n:]).all() and _sin_huecos(t[-n:], u))
+
+
+def cortar_epoca(x, t, t0, fs, antes=-config.EPOCA_ERRP[0], despues=config.EPOCA_ERRP[1],
+                 banda=config.BANDA_ERRP):
+    """Epoca filtrada y con linea base alrededor de t0, o None si no es de fiar.
+
+    La epoca se corta por TIEMPO: si el tramo [t0 - antes, t0 + despues] tiene un
+    hueco, valores no finitos o le faltan muestras, no hay epoca. El filtro de fase
+    cero se aplica solo al tramo continuo que la contiene, para que un corte
+    cercano no contamine la epoca."""
+    if x.ndim != 2 or x.shape[1] < fs:
+        return None
+    n = int(round((antes + despues) * fs))
+    i0 = int(np.searchsorted(t, t0 - antes))
+    if i0 + n > x.shape[1]:
+        return None
+    tramo = t[i0:i0 + n]
+    if abs(tramo[0] - (t0 - antes)) > 2.0 / fs or not _sin_huecos(tramo):
+        return None
+    saltos = np.flatnonzero(np.abs(np.diff(t)) > config.SALUD['hueco_max_s']) + 1
+    j0 = int(saltos[saltos <= i0].max()) if (saltos <= i0).any() else 0
+    j1 = int(saltos[saltos >= i0 + n].min()) if (saltos >= i0 + n).any() else x.shape[1]
+    seg = x[:, j0:j1]
+    if not np.isfinite(seg).all():
+        return None
+    e = filtrar(seg, banda, fs)[:, i0 - j0:i0 - j0 + n]
+    return e - e[:, :int(antes * fs)].mean(axis=1, keepdims=True)
+
+
 class EntradaEEG:
     """Lee el flujo 'EEG' de LSL en un hilo y guarda los ultimos segundos.
 
     Las marcas de tiempo quedan en el reloj local de LSL (clocksync + dejitter),
     el mismo reloj con el que se estampa el ACK de la ortesis. Asi la epoca del
     ErrP se corta con la misma base de tiempo que el movimiento.
+
+    Resiliencia: la entrada se crea con recover=False para ENTERARSE de que el
+    flujo se perdio. Si se pierde o enmudece, se vuelve a resolver con retroceso
+    exponencial. Un flujo que vuelve es una instancia nueva y su desfase de reloj
+    puede ser otro: al reconectar se vacia el buffer (ninguna ventana ni epoca
+    mezcla los dos lados del hueco) y se reinicia la linea base del reloj.
     """
 
-    def __init__(self, segundos=30.0, timeout=10.0):
-        from pylsl import StreamInlet, resolve_byprop, proc_clocksync, proc_dejitter
-        s = resolve_byprop('name', 'EEG', timeout=timeout)
-        if not s:
-            raise RuntimeError("No encontre el flujo 'EEG'. ¿Esta corriendo puente_lsl.py?")
-        self.inlet = StreamInlet(s[0], max_buflen=int(segundos) + 5,
-                                 processing_flags=proc_clocksync | proc_dejitter)
-        self.fs = float(s[0].nominal_srate())
+    def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG'):
+        self.nombre, self._segundos = nombre, segundos
+        self._uid, self.reconexiones = None, 0
+        self.inlet = self._resolver(timeout)
+        if self.inlet is None:
+            raise RuntimeError(f"No encontre el flujo '{nombre}'. ¿Esta corriendo puente_lsl.py?")
         n = int(segundos * self.fs)
         self._x, self._t = deque(maxlen=n), deque(maxlen=n)
+        self._lag, self._lag_base = deque(maxlen=200), None
+        self._t_llegada = time.monotonic()        # reloj de pared: no depende del desfase del flujo
+        self._retroceso, self._proximo_intento = Retroceso(), 0.0
         self._lock = threading.Lock()
         self._vivo = True
         self._hilo = threading.Thread(target=self._leer, daemon=True)
         self._hilo.start()
 
+    def _resolver(self, timeout):
+        """Entrada nueva al flujo, o None si no aparece o es la misma instancia que ya se tiene."""
+        from pylsl import StreamInlet, resolve_byprop, proc_clocksync, proc_dejitter
+        s = resolve_byprop('name', self.nombre, timeout=timeout)
+        if not s or s[0].uid() == self._uid:
+            return None
+        self._uid, self.fs = s[0].uid(), float(s[0].nominal_srate())
+        return StreamInlet(s[0], max_buflen=int(self._segundos) + 5,
+                           processing_flags=proc_clocksync | proc_dejitter, recover=False)
+
+    def _reiniciar_reloj(self):
+        self._lag.clear()
+        self._lag_base = None
+
+    def _reconectar(self):
+        """Un intento de volver a resolver el flujo; los intentos se espacian con retroceso."""
+        if time.monotonic() < self._proximo_intento:
+            return
+        nueva = self._resolver(1.0)
+        if nueva is None:
+            self._proximo_intento = time.monotonic() + self._retroceso.siguiente()
+            return
+        with self._lock:
+            self.inlet = nueva
+            self._x.clear()
+            self._t.clear()
+            self._reiniciar_reloj()
+        self.reconexiones += 1
+        self._retroceso.reiniciar()
+        self._proximo_intento = 0.0
+        print(f"  [eeg] flujo '{self.nombre}' recuperado (reconexion {self.reconexiones})", flush=True)
+
     def _leer(self):
+        from pylsl import local_clock
+        rojo = config.SALUD['eeg_edad_rojo_s']
         while self._vivo:
-            datos, ts = self.inlet.pull_chunk(timeout=0.05)
+            try:
+                datos, ts = self.inlet.pull_chunk(timeout=0.05)
+            except Exception:                     # flujo perdido: murio el puente o el gemelo
+                self._reconectar()
+                time.sleep(0.05)
+                continue
             if ts:
+                ahora = time.monotonic()
                 with self._lock:
+                    if ahora - self._t_llegada > rojo:
+                        self._reiniciar_reloj()   # vuelve tras un silencio: el retraso se mide de nuevo
                     self._x.extend(datos)
                     self._t.extend(ts)
+                    self._lag.append(local_clock() - ts[-1])
+                    self._t_llegada = ahora
+            elif time.monotonic() - self._t_llegada > rojo:
+                self._reconectar()                # mudo: quiza es otra instancia la que publica ahora
+
+    def edad(self):
+        """Segundos desde que llego la ultima muestra."""
+        return time.monotonic() - self._t_llegada
 
     def ultimo_t(self):
         with self._lock:
             return self._t[-1] if self._t else -np.inf
 
-    def ventana(self, segundos):
-        """(x canales x muestras en uV, t) de los ultimos `segundos`."""
+    def _crudo(self, segundos):
+        """(x canales x muestras en uV, t) de los ultimos `segundos`, sin validar."""
         n = int(segundos * self.fs)
         with self._lock:
             x = np.array(list(self._x)[-n:], dtype=float).T
             t = np.array(list(self._t)[-n:])
         return x, t
+
+    def ventana(self, segundos):
+        """(x, t) de los ultimos `segundos`, o (None, None) si no es fresca, completa y continua."""
+        x, t = self._crudo(segundos)
+        if not ventana_valida(x, t, self.fs, self.edad(), segundos):
+            return None, None
+        return x, t
+
+    def lecturas(self):
+        """Lo que el Vigilante necesita: edad, tasa real, canales malos y deriva del reloj (ms)."""
+        u = config.SALUD
+        edad = self.edad()
+        x, t = self._crudo(u['ventana_canales_s'])
+        with self._lock:
+            lag = np.array(self._lag)
+        if t.size == 0:
+            return {'edad_s': edad, 'tasa_hz': 0.0, 'canales': {}, 'reloj_ms': 0.0}
+        if self._lag_base is None and lag.size >= u['reloj_lecturas_base']:
+            self._lag_base = float(np.median(lag[:u['reloj_lecturas_base']]))
+        deriva = 0.0 if self._lag_base is None else (float(np.median(lag[-20:])) - self._lag_base) * 1000
+        fresco = edad <= u['eeg_edad_rojo_s']
+        return {'edad_s': edad,
+                'tasa_hz': float((t > t[-1] - u['ventana_canales_s']).sum() / u['ventana_canales_s']),
+                'canales': revisar_canales(x, self.fs) if fresco else {},
+                'reloj_ms': deriva}
 
     def esperar_hasta(self, t_lsl, timeout=2.0):
         t_fin = time.time() + timeout
@@ -75,23 +221,16 @@ class EntradaEEG:
 
     def epoca(self, t0, antes=-config.EPOCA_ERRP[0], despues=config.EPOCA_ERRP[1],
               banda=config.BANDA_ERRP):
-        """Epoca filtrada y con linea base alrededor de t0 (reloj LSL); None si faltan datos."""
+        """Epoca filtrada y con linea base alrededor de t0 (reloj LSL); None si faltan datos
+        o si el tramo cruza un corte."""
         if not self.esperar_hasta(t0 + despues):
             return None
-        x, t = self.ventana(4.0)
-        if x.size == 0 or x.shape[1] < self.fs:
-            return None
-        xf = filtrar(x, banda, self.fs)
-        i0 = int(np.searchsorted(t, t0 - antes))
-        n = int(round((antes + despues) * self.fs))
-        if i0 < 0 or i0 + n > xf.shape[1]:
-            return None
-        e = xf[:, i0:i0 + n]
-        return e - e[:, :int(antes * self.fs)].mean(axis=1, keepdims=True)
+        x, t = self._crudo(4.0)
+        return cortar_epoca(x, t, t0, self.fs, antes, despues, banda)
 
     def calidad(self, segundos=10.0):
         """Por canal: uV RMS (1-40 Hz), fraccion de potencia en 60 Hz y saturacion."""
-        x, _ = self.ventana(segundos)
+        x, _ = self._crudo(segundos)
         if x.size == 0:
             return []
         xf = filtrar(x, (1.0, 40.0), self.fs)
@@ -114,12 +253,19 @@ class EntradaEEG:
 
 # ============================ Ortesis ============================
 class _OrtesisBase:
-    """Interfaz comun. mover() bloquea hasta el ACK y devuelve (seq, t_ack_lsl, latencia_ms)."""
+    """Interfaz comun. mover() bloquea hasta el ACK y devuelve (seq, t_ack_lsl, latencia_ms).
+
+    mover() NUNCA lanza: si el ACK no llega devuelve (seq, None, nan) y lo cuenta.
+    seq no se reinicia nunca, ni al reabrir el puerto: el ESP32 solo devuelve el
+    seq que recibio, asi que la PC es la unica duena de la numeracion."""
 
     def __init__(self):
         self.seq = 0
         self.latencias_ms = deque(maxlen=200)
         self.telemetria = {}
+        self.acks_perdidos = 0            # consecutivos
+        self.puerto_ok = True
+        self.ultima_latencia = 0.0
 
     def jitter(self):
         lat = np.array(self.latencias_ms)
@@ -127,20 +273,42 @@ class _OrtesisBase:
             return float('nan'), float('nan')
         return float(lat.mean()), float(lat.std())
 
+    def lecturas(self):
+        """Lo que el Vigilante necesita de la ortesis."""
+        return {'puerto_ok': self.puerto_ok, 'acks_perdidos': self.acks_perdidos,
+                'latencia_ms': self.ultima_latencia}
+
+    def _con_ack(self, seq, t_envio, t_ack):
+        lat = (t_ack - t_envio) * 1000
+        self.latencias_ms.append(lat)
+        self.acks_perdidos, self.ultima_latencia = 0, lat
+        return seq, t_ack, lat
+
+    def _sin_ack(self, seq):
+        self.acks_perdidos += 1
+        return seq, None, float('nan')
+
     @staticmethod
     def _a_firmware(fraccion):
         return int(round(np.clip(fraccion, 0.0, 1.0) * 1000))
 
 
 class OrtesisSerial(_OrtesisBase):
-    """ESP32 por USB. Protocolo en config.py (M / A / T)."""
+    """ESP32 por USB. Protocolo en config.py (M / A / T).
 
-    def __init__(self, puerto=config.PUERTO_ORTESIS, baudios=config.BAUDIOS, timeout_ack=0.3):
+    Si el puerto se cae (ESP32 reiniciado, cable suelto) el hilo lector lo reabre
+    con retroceso exponencial; mientras tanto mover() devuelve "sin ACK" de
+    inmediato. `abrir` permite inyectar un puerto de mentira en las pruebas."""
+
+    def __init__(self, puerto=config.PUERTO_ORTESIS, baudios=config.BAUDIOS, timeout_ack=0.3, abrir=None):
         super().__init__()
-        import serial
         from pylsl import local_clock
         self._clock = local_clock
-        self.ser = serial.Serial(puerto, baudios, timeout=0.01)
+        if abrir is None:
+            import serial
+            abrir = lambda: serial.Serial(puerto, baudios, timeout=0.01)
+        self._abrir = abrir
+        self.ser = abrir()
         self.timeout_ack = timeout_ack
         self._acks = {}
         self._cv = threading.Condition()
@@ -148,66 +316,106 @@ class OrtesisSerial(_OrtesisBase):
         threading.Thread(target=self._leer, daemon=True).start()
         time.sleep(0.5)
 
+    def _reabrir(self, retroceso):
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+        time.sleep(retroceso.siguiente())
+        try:
+            self.ser = self._abrir()
+        except Exception:
+            return
+        self.puerto_ok = True
+        retroceso.reiniciar()
+        print('  [ortesis] puerto recuperado', flush=True)
+
+    def _linea(self, linea, t):
+        partes = linea.decode(errors='ignore').strip().split(',')
+        if partes[0] == 'A' and len(partes) >= 2:
+            with self._cv:
+                self._acks[int(partes[1])] = t
+                self._cv.notify_all()
+        elif partes[0] == 'T' and len(partes) >= 4:
+            self.telemetria = {'t_us': int(partes[1]), 'angulo': int(partes[2]),
+                               'fsr': int(partes[3])}
+
     def _leer(self):
-        buf = b''
+        buf, retroceso = b'', Retroceso()
         while self._vivo:
-            buf += self.ser.read(256)
+            if not self.puerto_ok:
+                self._reabrir(retroceso)
+                continue
+            try:
+                buf += self.ser.read(256)
+            except Exception:                     # puerto caido
+                self.puerto_ok, buf = False, b''
+                continue
             while b'\n' in buf:
                 linea, buf = buf.split(b'\n', 1)
                 t = self._clock()
-                partes = linea.decode(errors='ignore').strip().split(',')
-                if partes[0] == 'A' and len(partes) >= 2:
-                    with self._cv:
-                        self._acks[int(partes[1])] = t
-                        self._cv.notify_all()
-                elif partes[0] == 'T' and len(partes) >= 4:
-                    self.telemetria = {'t_us': int(partes[1]), 'angulo': int(partes[2]),
-                                       'fsr': int(partes[3])}
+                try:
+                    self._linea(linea, t)
+                except ValueError:                # linea corrupta: se ignora
+                    pass
 
     def mover(self, fraccion, dur_ms=config.DURACION_PASO_MS):
         self.seq += 1
         seq = self.seq
+        if not self.puerto_ok:
+            return self._sin_ack(seq)
+        with self._cv:
+            self._acks.clear()                    # ACK atrasados de pasos anteriores
         t_envio = self._clock()
-        self.ser.write(f'M,{seq},{self._a_firmware(fraccion)},{dur_ms}\n'.encode())
+        try:
+            self.ser.write(f'M,{seq},{self._a_firmware(fraccion)},{dur_ms}\n'.encode())
+        except Exception:
+            self.puerto_ok = False
+            return self._sin_ack(seq)
         with self._cv:
             self._cv.wait_for(lambda: seq in self._acks, timeout=self.timeout_ack)
             t_ack = self._acks.pop(seq, None)
         if t_ack is None:
-            raise TimeoutError(f'La ortesis no respondio ACK al paso {seq}')
-        lat = (t_ack - t_envio) * 1000
-        self.latencias_ms.append(lat)
-        return seq, t_ack, lat
+            return self._sin_ack(seq)
+        return self._con_ack(seq, t_envio, t_ack)
 
     def cerrar(self):
+        self.mover(0.0)
+        self._vivo = False
         try:
-            self.mover(0.0)
+            self.ser.close()
         except Exception:
             pass
-        self._vivo = False
-        self.ser.close()
 
 
 class OrtesisSimulada(_OrtesisBase):
-    """Misma interfaz, sin ESP32. Latencia y jitter configurables para probar el lazo."""
+    """Misma interfaz, sin ESP32. Latencia y jitter configurables para probar el lazo.
 
-    def __init__(self, latencia_ms=8.0, jitter_ms=1.5, semilla=0):
+    Con `caos` (un PlanCaos) pierde ACK y mete picos de latencia de forma reproducible."""
+
+    def __init__(self, latencia_ms=8.0, jitter_ms=1.5, semilla=0, caos=None, timeout_ack=0.3):
         super().__init__()
         from pylsl import local_clock
         self._clock = local_clock
         self.lat, self.jit = latencia_ms, jitter_ms
         self.rng = np.random.default_rng(semilla)
+        self.caos, self.timeout_ack = caos, timeout_ack
         self.angulo = 0.0
 
     def mover(self, fraccion, dur_ms=config.DURACION_PASO_MS):
         self.seq += 1
         t_envio = self._clock()
-        time.sleep(max(0.0, self.rng.normal(self.lat, self.jit)) / 1000)
+        latencia = max(0.0, self.rng.normal(self.lat, self.jit))
+        if self.caos is not None:
+            if self.caos.por_paso('ack_perdido', self.seq):
+                time.sleep(self.timeout_ack)
+                return self._sin_ack(self.seq)
+            latencia = self.caos.por_paso('pico_latencia', self.seq) or latencia
+        time.sleep(latencia / 1000)
         t_ack = self._clock()
         self.angulo = float(np.clip(fraccion, 0, 1))
-        lat = (t_ack - t_envio) * 1000
-        self.latencias_ms.append(lat)
         self.telemetria = {'angulo': self._a_firmware(self.angulo), 'fsr': 0}
-        return self.seq, t_ack, lat
+        return self._con_ack(self.seq, t_envio, t_ack)
 
     def cerrar(self):
         pass
@@ -256,8 +464,11 @@ class DecoderIM:
         return self
 
     def phi(self, x, actualizar_centro=True):
+        """Rasgos de una ventana (canales x muestras), o None si la ventana no es finita."""
         from pyriemann.utils.base import invsqrtm
         from pyriemann.utils.geodesic import geodesic_riemann
+        if not np.isfinite(x).all():
+            return None                      # ventana corrupta: ni rasgos ni recentrado
         C = self.cov.transform(x[None])[0]
         if actualizar_centro and self.paso > 0:
             self.M = geodesic_riemann(self.M, C, self.paso)

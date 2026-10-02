@@ -22,6 +22,37 @@ from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
 from pylsl import StreamOutlet, local_clock
 
 import config
+from salud import Retroceso
+
+SILENCIO_MAX_S = 2.0     # sin datos de la placa durante este tiempo: se reconecta
+
+
+def reconectar(board, retroceso, grabar=None):
+    """Libera la sesion de BrainFlow y la vuelve a preparar, con retroceso exponencial,
+    hasta que la placa responda (dongle desconectado, casco apagado). El flujo LSL no
+    se toca: el orquestador solo ve un silencio.
+
+    OJO: probado solo con la placa sintetica; NO probado con el Cyton real."""
+    for soltar in (board.stop_stream, board.release_session):
+        try:
+            soltar()
+        except Exception:
+            pass
+    while True:
+        espera = retroceso.siguiente()
+        print(f'  [puente] placa sin datos: reintento en {espera:.1f} s', flush=True)
+        time.sleep(espera)
+        try:
+            board.prepare_session()
+            board.start_stream(45000, f'file://{grabar}:a' if grabar else '')   # :a = no pisa lo grabado
+            retroceso.reiniciar()
+            print('  [puente] placa recuperada', flush=True)
+            return
+        except Exception:
+            try:
+                board.release_session()
+            except Exception:
+                pass
 
 
 def medir_impedancias(board, eeg, fs, simulada=False):
@@ -92,13 +123,21 @@ def main():
     print(f'Publicando EEG ({a.placa}, {len(eeg)} canales, {fs} Hz). Ctrl+C para parar.')
 
     n_total, t_ini = 0, time.time()
+    t_dato, retroceso = time.time(), Retroceso()
     try:
         while True:
-            d = board.get_board_data()
+            try:
+                d = board.get_board_data()
+            except Exception:                   # la placa dejo de responder
+                d = np.empty((0, 0))
             if d.shape[1]:
                 # la ultima muestra del bloque se estampa "ahora"; LSL reparte el resto
                 outlet.push_chunk(d[eeg, :].T.tolist(), local_clock())
                 n_total += d.shape[1]
+                t_dato = time.time()
+            elif time.time() - t_dato > SILENCIO_MAX_S:
+                reconectar(board, retroceso, a.grabar)
+                t_dato = time.time()
             if time.time() - t_ini > 5:
                 print(f'  {n_total / (time.time() - t_ini):.0f} muestras/s')
                 n_total, t_ini = 0, time.time()
@@ -106,8 +145,11 @@ def main():
     except KeyboardInterrupt:
         print('Deteniendo...')
     finally:
-        board.stop_stream()
-        board.release_session()
+        for soltar in (board.stop_stream, board.release_session):
+            try:
+                soltar()
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':

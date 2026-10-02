@@ -167,7 +167,10 @@ class BackendReal:
 
     # ---------------- calibraciones secuenciales ----------------
     def _ventana_mi(self):
+        """Ventana de MI filtrada, o None si el EEG no esta fresco y continuo."""
         x, _ = self.eeg.ventana(config.VENTANA_MI + 1.0)
+        if x is None:
+            return None
         xf = self.hw.filtrar(x, config.BANDA_MI, self.eeg.fs)
         return xf[:, -int(config.VENTANA_MI * self.eeg.fs):]
 
@@ -196,7 +199,11 @@ class BackendReal:
             aviso('    >>> CERRAR: imagina que cierras la mano' if clase
                   else '    >>> RELAJA: imagina que abres y relajas la mano')
             time.sleep(self.a.duracion_mi)
-            X.append(self._ventana_mi())
+            v = self._ventana_mi()
+            if v is None:
+                aviso('    ensayo descartado: el EEG no estaba disponible')
+                continue
+            X.append(v)
             y.append(clase)
             n = k + 1
             if n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi:
@@ -235,6 +242,9 @@ class BackendReal:
             theta = float(np.clip(theta + (0.15 if d else -0.15), 0.1, 0.9))
             orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
             seq, t_ack, _ = self.ortesis.mover(theta)
+            if t_ack is None:
+                aviso('    ensayo descartado: la ortesis no confirmo el movimiento')
+                continue
             orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
             e = self.eeg.epoca(t_ack)
             if e is not None:

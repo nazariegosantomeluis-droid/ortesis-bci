@@ -231,6 +231,9 @@ def modelos_hardware():
     det = hw.DetectorErrP().ajustar(E, Y)
     raro = E[0].copy(); raro[3] *= 6
     assert det.ba > 0.8 and det.artefacto(raro) and not det.artefacto(E[1]), det.ba
+    # una ventana con NaN no produce rasgos ni mueve el centro del recentrado
+    M0 = dec.M.copy()
+    assert dec.phi(np.full((ch, 500), np.nan)) is None and np.array_equal(dec.M, M0)
     lo, hi = hw.intervalo_ba(Y, det.pred_cv)
     assert lo <= det.ba <= hi
     o = hw.OrtesisSimulada()
@@ -240,6 +243,210 @@ def modelos_hardware():
     assert 3 < media < 20
     return (f'recentrado: {acc:.0%} tras mezclar canales; ErrP BA {det.ba:.2f}, rareza ok; '
             f'ACK {media:.1f}+-{sd:.1f} ms')
+
+
+@prueba
+def senal_valida():
+    import hardware as hw
+    fs, rng = 250, np.random.default_rng(0)
+    x = rng.normal(0, 10, size=(8, 1000)); t = 100 + np.arange(1000) / fs
+    assert hw.revisar_canales(x, fs) == {}
+    malo = x.copy(); malo[2] = 5.0; malo[7] *= 40; malo[0, 10] = 200_000.0
+    assert hw.revisar_canales(malo, fs) == {'FC1': 'saturado', 'C3': 'plano', 'Fz': 'ruidoso'}
+    assert hw.revisar_canales(np.empty((8, 0)), fs) == {}                           # buffer vacio
+    assert hw.ventana_valida(x, t, fs, edad_s=0.05, segundos=3.0)
+    assert not hw.ventana_valida(x, t, fs, edad_s=2.0, segundos=3.0)               # rancia
+    assert not hw.ventana_valida(x[:, :300], t[:300], fs, 0.05, 3.0)               # incompleta
+    assert not hw.ventana_valida(np.empty((0,)), np.empty(0), fs, 0.05, 3.0)       # buffer vacio
+    con_nan = x.copy(); con_nan[1, 500] = np.nan
+    assert not hw.ventana_valida(con_nan, t, fs, 0.05, 3.0)
+    t_hueco = t.copy(); t_hueco[620:] += 1.5
+    assert not hw.ventana_valida(x, t_hueco, fs, 0.05, 3.0)                        # cruza un corte
+    t_atras = t.copy(); t_atras[620:] -= 0.5
+    assert not hw.ventana_valida(x, t_atras, fs, 0.05, 3.0)                        # salto hacia atras
+    t0 = t[600]
+    e = hw.cortar_epoca(x, t, t0, fs)
+    assert e is not None and e.shape == (8, 250)
+    assert hw.cortar_epoca(x, t_hueco, t0, fs) is None                              # corte dentro de la epoca
+    assert hw.cortar_epoca(x, t_hueco, t[300], fs) is not None                      # epoca limpia antes del corte
+    assert hw.cortar_epoca(con_nan, t, t[450], fs) is None
+    assert hw.cortar_epoca(x, t, t[-10], fs) is None                                # faltan muestras
+    assert hw.cortar_epoca(x, t, t[0] - 5.0, fs) is None                            # t0 fuera del buffer
+    return 'canales, ventana y epoca validadas por tiempo'
+
+
+@prueba
+def ortesis_sin_ack():
+    import hardware as hw
+
+    class PlanFijo:                       # pierde los ACK 2, 3 y 4; pico de latencia en el 5
+        def por_paso(self, tipo, seq):
+            if tipo == 'ack_perdido':
+                return 2 <= seq <= 4
+            return 120.0 if seq == 5 else None
+    o = hw.OrtesisSimulada(caos=PlanFijo(), timeout_ack=0.0)
+    r = [o.mover(0.5) for _ in range(4)]
+    assert [x[0] for x in r] == [1, 2, 3, 4]                   # seq nunca se reinicia
+    assert r[0][1] is not None and r[1][1] is None and np.isnan(r[1][2])
+    assert o.lecturas()['acks_perdidos'] == 3 and o.lecturas()['puerto_ok']
+    seq, t_ack, lat = o.mover(0.5)
+    assert seq == 5 and t_ack is not None and lat > 100 and o.lecturas()['acks_perdidos'] == 0
+    return 'mover() no lanza; cuenta ACK perdidos, conserva seq y mide el pico de latencia'
+
+
+class _ESP32Falso:
+    """Puerto serie de mentira con el protocolo M/A del contrato y fallas a pedido."""
+
+    def __init__(self, mundo):
+        self.mundo, self.pendiente = mundo, b''
+
+    def write(self, datos):
+        if self.mundo['caido']:
+            raise OSError('puerto caido')
+        _, seq, _, _ = datos.decode().strip().split(',')
+        if int(seq) in self.mundo['sin_ack']:
+            return
+        self.pendiente += self.mundo['basura'] + f'A,{seq},123\n'.encode()
+
+    def read(self, n):
+        if self.mundo['caido']:
+            raise OSError('puerto caido')
+        time.sleep(0.005)
+        datos, self.pendiente = self.pendiente, b''
+        return datos
+
+    def close(self):
+        pass
+
+
+@prueba
+def ortesis_serial_reconecta():
+    """OrtesisSerial contra un ESP32 de mentira: lineas corruptas, ACK perdido, puerto caido y reapertura."""
+    import hardware as hw
+    mundo = {'caido': False, 'sin_ack': {2}, 'basura': b'A,xx,\n\xff\xfeT,1\n', 'aperturas': 0}
+
+    def abrir():
+        mundo['aperturas'] += 1
+        if mundo['caido']:
+            raise OSError('no existe el puerto')
+        return _ESP32Falso(mundo)
+    o = hw.OrtesisSerial(abrir=abrir, timeout_ack=0.1)
+    try:
+        seq, t_ack, lat = o.mover(0.5)
+        assert seq == 1 and t_ack is not None and lat < 100        # la basura no mata al lector
+        assert o.mover(0.5)[1] is None and o.lecturas()['acks_perdidos'] == 1
+        mundo['caido'] = True                                      # se reinicia el ESP32
+        assert o.mover(0.5)[1] is None
+        time.sleep(0.1)
+        assert not o.lecturas()['puerto_ok']
+        mundo['caido'] = False
+        t_fin = time.time() + 5
+        while not o.lecturas()['puerto_ok'] and time.time() < t_fin:
+            time.sleep(0.05)
+        assert o.lecturas()['puerto_ok'] and mundo['aperturas'] >= 2
+        seq, t_ack, _ = o.mover(0.5)
+        assert seq == 4 and t_ack is not None and o.lecturas()['acks_perdidos'] == 0
+    finally:
+        o.cerrar()
+    return f"sobrevive a basura, ACK perdido y puerto caido; reabre solo ({mundo['aperturas']} aperturas), seq continua"
+
+
+@prueba
+def reconexion_eeg():
+    """El flujo de EEG muere y vuelve como instancia nueva con OTRO desfase de reloj:
+    EntradaEEG se reconecta, el reloj no queda en ROJO, la pausa puede terminar y
+    ninguna ventana ni epoca cruza el hueco."""
+    import threading
+    import hardware as hw
+    from pylsl import StreamInfo, StreamOutlet, local_clock
+    from salud import Vigilante
+    fs, nombre = 250, 'EEG_prueba'
+    rng = np.random.default_rng(0)
+    pub = {'outlet': None, 'desfase': 0.0, 't': local_clock(), 'vivo': True}
+    candado = threading.Lock()
+
+    def crear(desfase):
+        with candado:
+            pub['desfase'], pub['t'] = desfase, local_clock()
+            pub['outlet'] = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
+
+    def publicar():
+        while pub['vivo']:
+            with candado:
+                n = int((local_clock() - pub['t']) * fs)
+                if pub['outlet'] is not None and n > 0:
+                    pub['t'] += n / fs
+                    pub['outlet'].push_chunk(rng.normal(0, 10, size=(n, 8)).tolist(), pub['t'] + pub['desfase'])
+            time.sleep(0.02)
+
+    def vigilar(v, eeg, segundos, hasta=None):
+        """Alimenta al Vigilante cada 0.1 s; devuelve los colores vistos de eeg y reloj."""
+        vistos, t_fin = [], time.time() + segundos
+        while time.time() < t_fin:
+            l = eeg.lecturas()
+            v.actualizar(time.time(), eeg=l, reloj_ms=l['reloj_ms'],
+                         ortesis={'puerto_ok': True, 'acks_perdidos': 0, 'latencia_ms': 8.0})
+            vistos.append((v.colores['eeg'], v.colores['reloj']))
+            if hasta is not None and hasta():
+                break
+            time.sleep(0.1)
+        return vistos
+
+    crear(0.0)
+    threading.Thread(target=publicar, daemon=True).start()
+    eeg = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre)
+    try:
+        v = Vigilante()
+        vigilar(v, eeg, 12.0, hasta=lambda: v.listo_para_reanudar(time.time()))
+        assert v.listo_para_reanudar(time.time()), (v.colores, v.detalle)
+        assert eeg.ventana(3.0)[0] is not None
+        # se cae el flujo
+        with candado:
+            pub['outlet'] = None
+        t_corte = local_clock()
+        vistos = vigilar(v, eeg, 1.5)
+        assert v.motivo_pausa() == 'eeg', (v.colores, v.detalle)
+        assert eeg.ventana(3.0) == (None, None)
+        # vuelve como instancia nueva, estampando 0.25 s adelantado
+        crear(0.25)
+        vistos = vigilar(v, eeg, 20.0, hasta=lambda: v.listo_para_reanudar(time.time()))
+        assert v.listo_para_reanudar(time.time()), (v.colores, v.detalle)   # se puede salir de la pausa
+        assert eeg.reconexiones == 1, eeg.reconexiones
+        rojo_reloj = [r for _, r in vistos if r == config.ROJO]
+        assert not rojo_reloj, f'el reloj quedo en ROJO {len(rojo_reloj)} lecturas tras reconectar'
+        x, t = eeg.ventana(3.0)
+        assert x is not None and t[0] > t_corte + 1.0 and np.abs(np.diff(t)).max() <= config.SALUD['hueco_max_s']
+        assert eeg.epoca(t_corte + 0.5) is None           # t0 dentro del hueco
+        assert eeg.epoca(t_corte - 0.3) is None           # la epoca cruzaria el hueco
+        assert eeg.epoca(t[-1] - 1.0) is not None         # una epoca nueva y limpia si sale
+    finally:
+        pub['vivo'] = False
+        eeg.cerrar()
+    return 'reconecta con otro desfase; reloj sin ROJO; sale de la pausa; nada cruza el hueco'
+
+
+@prueba
+def puente_reconecta():
+    """La reconexion de la placa en puente_lsl.py, con la placa sintetica de BrainFlow.
+    NO sustituye la prueba con el Cyton real."""
+    import puente_lsl
+    from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
+    from salud import Retroceso
+    BoardShim.disable_board_logger()
+    board = BoardShim(BoardIds.SYNTHETIC_BOARD.value, BrainFlowInputParams())
+    board.prepare_session()
+    board.start_stream(45000, '')
+    try:
+        board.release_session()                           # "se desconecto el dongle"
+        puente_lsl.reconectar(board, Retroceso(0.1, 0.2), grabar=None)
+        time.sleep(0.5)
+        assert board.get_board_data().shape[1] > 50
+    finally:
+        try:
+            board.release_session()
+        except Exception:
+            pass
+    return 'la placa sintetica vuelve a entregar datos tras reconectar (Cyton real: sin probar)'
 
 
 @prueba
@@ -284,7 +491,9 @@ def main():
     a = ap.parse_args()
     print('Pruebas ortesis-bci')
     for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
-              maquina_estados, orquestador_sim, modelos_hardware, cerebro_sintetico):
+              maquina_estados, orquestador_sim, modelos_hardware, senal_valida,
+              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, puente_reconecta,
+              cerebro_sintetico):
         p()
     if a.completa:
         lazo_real_sintetico()
