@@ -44,12 +44,13 @@ python cerebro_sintetico.py --banco   # decoder y detector offline
 python cerebro_sintetico.py           # terminal 1: gemelo
 python tablero.py                     # terminal 2
 python orquestador.py real --ortesis-sim   # terminal 3: camino real completo
-python orquestador.py sim --ciclo 0 --caos 1   # caos estándar en el simulador
+python orquestador.py sim --ciclo 0 --caos 1   # caos estándar en el simulador (--caos-nivel leve: una falla cada 2-3 min)
 python orquestador.py real --ortesis-sim --reanudar   # continuar una sesión interrumpida
 ```
 
 ## Cosas que muerden
 
+- **El umbral de renovación del EEG es 1 s** (`config.SALUD['eeg_renovar_s']`, `--renovar-eeg`). No bajarlo sin medir el dongle: `puente_lsl.py` imprime el registro de huecos cada 30 s.
 - **Un solo flujo `EEG` en la red.** Un `cerebro_sintetico.py` olvidado en otra terminal contamina cualquier medición contra el gemelo. Antes de medir: `python ver_flujos.py`.
 - `pruebas.py --completa`: `lazo_real_sintetico` excedió sus 400 s una vez de tres (2 de octubre) y no se reprodujo; si vuelve a pasar, la prueba ya muestra las últimas líneas de la sesión.
 - **No correr `pruebas.py` mientras hay una sesión `real` en marcha:** las pruebas publican flujos `Marcadores` y `Paso` con los mismos nombres.
@@ -63,7 +64,7 @@ Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11,
 - Con el detector degradado a propósito (prueba `confianza_detector`, 12 sujetos): aprendizaje al 8 %, congelado 88 % de la falla, 1 % de congelamientos en falso.
 - Banco offline del gemelo (`python cerebro_sintetico.py --banco`): decoder MI BA 0.71; detector ErrP sensibilidad 0.66, especificidad 0.91, BA 0.79.
 - Corrida real completa contra el gemelo (una corrida, 2 de octubre): CP1–CP4 en GO (MI BA 0.92, ErrP BA 0.92); error tras perturbar agente 0.26 vs sombra 0.46; ninguna pausa en falso. La calibración no usa semilla fija, así que varía entre corridas (una medida anterior dio 0.14 vs 0.47).
-- Caos estándar, simulador (30 sujetos, `orquestador.py sim --caos`): tras perturbar agente 0.222 vs sombra 0.333 (sin caos: 0.235 vs 0.323); excluidas 1109 de 11 425 filas.
-- Caos estándar, gemelo (tres corridas): 9 a 10 pausas por corrida, todas reanudadas; CP4 en GO; tras perturbar agente/sombra 0.44/0.49, 0.30/0.53 y 0.46/0.47 (no concluyente).
+- Caos, simulador (30 sujetos, `orquestador.py sim --caos`): tras perturbar agente/sombra 0.222/0.333 con el estándar (1109 de 11 425 filas excluidas) y 0.232/0.326 con el leve (105 de 10 867); sin caos 0.235/0.323.
+- Caos, gemelo (una corrida por condición, mismos modelos que la limpia, renovación a 1 s): leve 0.37/0.47 con 1 pausa; estándar 0.37/0.47 con 10 pausas, todas reanudadas; CP4 en GO. No concluyente. Con renovación a 0.3 s, tres corridas estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47.
 
 Las tareas pendientes, en orden, están en `TAREAS.md`.

@@ -8,7 +8,7 @@
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 27/27 pruebas pasaron
+python pruebas.py                    # debe decir 28/28 pruebas pasaron
 ```
 
 ## Archivos
@@ -104,9 +104,10 @@ De la pausa se sale sola tras 3 s continuos de EEG y órtesis en VERDE; se regre
 
 **Reconexión automática**, con retroceso exponencial (0.5 s, 1, 2, 4, 8, 8...):
 
-- `EntradaEEG` vuelve a resolver el flujo si se pierde, y renueva su entrada en cuanto el flujo calla 0.3 s (lo avisa en consola: `[eeg] silencio ... entrada renovada`; el umbral es `eeg_edad_amarillo_s` en `config.SALUD`). Al reconectar vacía el buffer y reinicia la línea base del reloj, porque el flujo nuevo puede traer otro desfase. Si hay varios flujos `EEG` en la red (un gemelo olvidado en otra terminal), avisa, usa el más reciente y no salta a otro mientras el suyo siga publicado.
+- `EntradaEEG` vuelve a resolver el flujo si se pierde. Si el flujo calla más de 1 s sin perderse, renueva su entrada (lo avisa en consola: `[eeg] silencio ... entrada renovada`), porque tras un hueco las marcas de tiempo de LSL quedan desfasadas. El umbral se ajusta con `orquestador.py --renovar-eeg <s>`. Un hueco más corto no renueva: el semáforo del reloj lo detecta y el agente no aprende mientras dura el desfase. Al reconectar vacía el buffer y reinicia la línea base del reloj, porque el flujo nuevo puede traer otro desfase. Si hay varios flujos `EEG` en la red (un gemelo olvidado en otra terminal), avisa, usa el más reciente y no salta a otro mientras el suyo siga publicado.
 - `OrtesisSerial` reabre el puerto y conserva `seq`. `mover()` nunca lanza una excepción.
 - `puente_lsl.py` vuelve a preparar la placa si deja de entregar datos 2 s. **Probado solo con la placa sintética de BrainFlow; no probado con el Cyton real.**
+- `puente_lsl.py` imprime cada 30 s un **registro de huecos**: ráfagas de paquetes perdidos (por el contador de paquetes de la placa), su duración media y máxima, silencios de llegada y frecuencia por minuto. Sirve para medir el dongle con el casco real: si las ráfagas duran más que `--renovar-eeg`, súbelo.
 
 **Calibración.** Un ensayo afectado por una falla se repite como máximo 3 veces (la consola dice por qué); después se avisa y la calibración sigue.
 
@@ -126,25 +127,28 @@ De la pausa se sale sola tras 3 s continuos de EEG y órtesis en VERDE; se regre
 python orquestador.py sim --ciclo 0 --caos 1                    # simulador con caos, en segundos
 python cerebro_sintetico.py --caos 1                            # terminal 1: gemelo con caos
 python orquestador.py real --ortesis-sim --forzar --caos 1      # terminal 3 (--forzar: el caos tumba el CP1)
+python orquestador.py sim --ciclo 0 --caos 1 --caos-nivel leve  # caos leve: una falla cada 2 a 3 minutos
 python orquestador.py real --puerto COM4 --reanudar             # continuar tras un cierre inesperado
 ```
 
-**Resultados con el caos estándar (exploratorios; simulador y gemelo, no una persona).** Error en los ~2 min tras la perturbación, sobre pasos no excluidos:
+**Resultados con caos (exploratorios; simulador y gemelo, no una persona).** Error en los ~2 min tras la perturbación, sobre pasos no excluidos. "Caos leve" (`--caos-nivel leve`) es una falla cada 2 a 3 minutos; el estándar, una cada pocos segundos.
 
 | Medición | Agente | Sombra | Excluidos y pausas |
 |---|---|---|---|
 | Simulador, 30 sujetos, sin caos | 0.235 | 0.323 | ninguno; agente por debajo en 26 de 30 sujetos |
-| Simulador, 30 sujetos, caos estándar | **0.222** | 0.333 | 1109 de 11 425 filas: `pausa:eeg` 443, `sin_ack` 332, `pausa:canal` 181, `epoca_invalida` 152, `pausa:ortesis` 1; agente por debajo en 29 de 30 |
-| Gemelo, una corrida, sin caos | 0.26 | 0.46 | 0 de 150 filas; ninguna pausa; CP1 a CP4 en GO |
-| Gemelo, caos estándar, corrida 1 (mismos modelos que la limpia) | 0.44 | 0.49 | 20 de 160 filas: `pausa:eeg` 7, `sin_ack` 5, `epoca_invalida` 5, `pausa:canal` 3; 10 pausas, todas reanudadas solas; CP4 en GO (58 s) |
-| Gemelo, caos estándar, corrida 2 (`pruebas.py --completa`) | 0.30 | 0.53 | 20 de 159 filas; 9 pausas, todas reanudadas; CP4 en GO (33 s) |
-| Gemelo, caos estándar, corrida 3 (`pruebas.py --completa`, calibración corta) | 0.46 | 0.47 | 20 de 160 filas; 10 pausas, todas reanudadas; CP4 en GO (36 s) |
+| Simulador, 30 sujetos, caos leve | 0.232 | 0.326 | 105 de 10 867 filas: `pausa:eeg` 39, `pausa:canal` 28, `epoca_invalida` 20, `sin_ack` 18; agente por debajo en 27 de 30 |
+| Simulador, 30 sujetos, caos estándar | 0.222 | 0.333 | 1109 de 11 425 filas: `pausa:eeg` 443, `sin_ack` 332, `pausa:canal` 181, `epoca_invalida` 152, `pausa:ortesis` 1; agente por debajo en 29 de 30 |
+| Gemelo, sin caos | 0.26 | 0.46 | 0 de 150 filas; ninguna pausa; CP1 a CP4 en GO |
+| Gemelo, caos leve (semilla 2) | 0.37 | 0.47 | 2 de 151 filas: `pausa:eeg` 1, `epoca_invalida` 1; 1 pausa, reanudada sola; CP4 en GO (22 s) |
+| Gemelo, caos estándar (semilla 1) | 0.37 | 0.47 | 20 de 160 filas: `pausa:eeg` 7, `sin_ack` 6, `epoca_invalida` 4, `pausa:canal` 3; 10 pausas, todas reanudadas solas; CP4 en GO (24 s) |
 
-En el simulador el agente sigue claramente por debajo de la sombra con el caos estándar. En el gemelo el agente quedó por debajo en las tres corridas, pero por márgenes muy distintos (0.05, 0.23 y 0.01): con tres corridas, y modelos distintos entre ellas, **no es concluyente**. En el bloque adaptativo completo de la corrida 1 el error fue 0.27 (agente) contra 0.36 (sombra). Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
+Las tres filas del gemelo usan los mismos modelos (una sola calibración) y el umbral de renovación de 1 s; es **una corrida por condición**, así que no es concluyente. La semilla del caos leve se eligió para que cayera al menos un corte de EEG dentro de los ~5 minutos de sesión. Antes, con el umbral en 0.3 s, tres corridas con caos estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47 (agente/sombra), con modelos distintos entre ellas.
+
+En el simulador el agente sigue claramente por debajo de la sombra con caos leve y estándar. En el gemelo quedó por debajo en todas las corridas, por márgenes entre 0.01 y 0.23. El agente no se modificó para estas mediciones. Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
 
 **Lo que enseñó el caos (medido, no supuesto):**
 
-- Tras un silencio sin perder el flujo, el suavizado de marcas de tiempo de LSL (dejitter) deja las marcas atrasadas: 2.7 s tras un hueco de 3 s, y tarda más de 10 s en converger. Eso desalineaba las épocas de ErrP y congelaba el aprendizaje. `EntradaEEG` ahora abre una entrada nueva al mismo flujo en cuanto calla 0.3 s; con eso las marcas quedan alineadas al volver los datos.
+- Tras un silencio sin perder el flujo, el suavizado de marcas de tiempo de LSL (dejitter) deja las marcas atrasadas: 2.7 s tras un hueco de 3 s, y tarda más de 10 s en converger. Eso desalineaba las épocas de ErrP y congelaba el aprendizaje. `EntradaEEG` ahora abre una entrada nueva al mismo flujo cuando calla más de 1 s; con eso las marcas quedan alineadas al volver los datos. El costo de no renovar antes: tras una ráfaga de 0.6 s las marcas siguen desfasadas un rato, el reloj se pone en ROJO y el agente no aprende en esos pasos.
 - La deriva del reloj se mide contra una mediana móvil de ~30 s: detecta un cambio de desfase y lo absorbe, así el semáforo del reloj nunca queda en ROJO para siempre.
 - Una sesión sobrevivió a 37 minutos de suspensión del equipo (tapa cerrada) y se reanudó sola al despertar. Aun así: **no cierres la tapa durante la demo**.
 
