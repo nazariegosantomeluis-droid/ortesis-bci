@@ -929,7 +929,76 @@ def registro_huecos():
         assert trozo in txt, (trozo, txt)
     assert '0 rafagas' in r.resumen(t=60.0) and 'sesion: 2 rafagas' in r.resumen(t=60.0)   # ventana nueva
     assert not r.toca_resumen(t=70.0) and r.toca_resumen(t=91.0)
+    # contador sin vuelta (Unicorn): un salto son perdidas; si retrocede, el casco se reinicio
+    u = RegistroHuecos(fs=250, modulo=None)
+    u.bloque(np.arange(1000, 1100), t=0.1)
+    u.bloque(np.arange(1130, 1200), t=0.2)                    # 30 perdidas
+    u.bloque(np.arange(0, 50), t=0.3)                         # reinicio: no cuenta como perdida
+    assert (u.total_perdidas, u.total_rafagas, u.reinicios) == (30, 1, 1), (u.total_perdidas, u.reinicios)
+    assert '1 reinicio' in u.resumen(t=30.0)
     return 'cuenta rafagas de paquetes perdidos y silencios; resumen por ventana y de la sesion'
+
+
+def _bluetooth(fs, contadores, rng, latencia=0.020, deriva_ppm=0.0, t0=1000.0):
+    """Bloques (contadores, hora de llegada) como los entrega un casco por Bluetooth: cada
+    muestra se toma en t0 + c / fs (con el cristal del casco algo desviado) y llega en
+    rafagas, con un retardo minimo fijo mas uno variable."""
+    verdad = t0 + np.asarray(contadores) / (fs * (1 + deriva_ppm * 1e-6))
+    bloques, i = [], 0
+    while i < len(contadores):
+        n = int(rng.integers(3, 30))
+        retardo = latencia + rng.exponential(0.015) + (0.3 if rng.random() < 0.03 else 0.0)
+        bloques.append((contadores[i:i + n], verdad[min(i + n, len(contadores)) - 1] + retardo))
+        i += n
+    return bloques, verdad
+
+
+@prueba
+def reloj_contador():
+    """La hora de cada muestra se reconstruye con el contador del casco, no con la hora de
+    llegada por Bluetooth: sin jitter, con las perdidas visibles como huecos y siguiendo la
+    deriva del cristal."""
+    from salud import RelojContador
+    fs, rng = 250, np.random.default_rng(0)
+    # 1) flujo normal con llegadas a rafagas (y algunas muy tardias)
+    c = np.arange(0, 250 * 120)
+    bloques, verdad = _bluetooth(fs, c, rng)
+    reloj = RelojContador(fs)
+    t = np.concatenate([reloj.estampar(b, llegada) for b, llegada in bloques])
+    assert np.all(np.diff(t) > 0)
+    err = (t - verdad)[250 * 20:] - 0.020                       # tras 20 s; 20 ms = retardo minimo, constante
+    assert np.abs(err).max() < 0.004, np.abs(err).max()
+    assert np.abs(np.diff(t)[250 * 20:] - 1 / fs).max() < 0.0005   # sin jitter entre muestras
+    # 2) perdida de Bluetooth: faltan 50 muestras; el hueco queda en la hora, no se disimula
+    c2 = np.r_[0:5000, 5050:10000]
+    bloques, verdad = _bluetooth(fs, c2, rng)
+    reloj = RelojContador(fs)
+    t = np.concatenate([reloj.estampar(b, llegada) for b, llegada in bloques])
+    saltos = np.diff(t)
+    assert abs(saltos.max() - 51 / fs) < 0.002 and (saltos > 0.02).sum() == 1
+    assert reloj.perdidas == 50 and reloj.reinicios == 0
+    # 3) el casco se reinicia: el contador vuelve a 0; la hora sigue adelante y se cuenta el reinicio
+    reloj = RelojContador(fs)
+    a, va = _bluetooth(fs, np.arange(0, 3000), rng, t0=1000.0)
+    b, vb = _bluetooth(fs, np.arange(0, 3000), rng, t0=1020.0)
+    t = np.concatenate([reloj.estampar(x, llegada) for x, llegada in a + b])
+    assert np.all(np.diff(t) > 0) and reloj.reinicios == 1
+    assert np.abs((t[3000:] - vb)[1500:] - 0.020).max() < 0.02
+    # 4) deriva del cristal: 100 ppm durante 10 minutos (60 ms acumulados) no se acumula en el error
+    for ppm in (100.0, -100.0):
+        c = np.arange(0, 250 * 600)
+        bloques, verdad = _bluetooth(fs, c, rng, deriva_ppm=ppm)
+        reloj = RelojContador(fs)
+        t = np.concatenate([reloj.estampar(x, llegada) for x, llegada in bloques])
+        err = (t - verdad)[250 * 60:] - 0.020
+        assert np.abs(err).max() < 0.008, (ppm, np.abs(err).max())
+    # 5) contador con vuelta (placa sintetica o Cyton: 0..255)
+    reloj = RelojContador(fs, modulo=256)
+    bloques, verdad = _bluetooth(fs, np.arange(0, 5000), rng)
+    t = np.concatenate([reloj.estampar(np.asarray(x) % 256, llegada) for x, llegada in bloques])
+    assert np.all(np.diff(t) > 0) and reloj.perdidas == 0 and np.abs(np.diff(t) - 1 / fs).max() < 0.002
+    assert reloj.estampar([], 5000.0).size == 0
+    return 'hora por contador: sin jitter, perdidas como huecos, reinicios y deriva de 100 ppm bajo 8 ms'
 
 
 @prueba
@@ -1047,6 +1116,7 @@ def main():
               instantanea_estado, reanudar,
               modelos_hardware, senal_valida,
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, registro_huecos,
+              reloj_contador,
               puente_reconecta,
               cerebro_sintetico):
         p()

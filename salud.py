@@ -9,6 +9,10 @@ Escalera de degradacion (escalon()):
   3. EEG perdido o canal despegado: pausa segura
   4. ortesis perdida: pausa segura sin poder moverla (registro y aviso)
 """
+from collections import deque
+
+import numpy as np
+
 import config
 
 V, A, R = config.VERDE, config.AMARILLO, config.ROJO
@@ -30,11 +34,80 @@ class Retroceso:
         return e
 
 
+class RelojContador:
+    """Reconstruye la hora de cada muestra con el contador de muestras del casco.
+
+    Por Bluetooth las muestras llegan a rafagas: la hora de llegada tiene decenas de ms
+    de jitter y no sirve para cortar una epoca. El contador si: la muestra c se tomo en
+    desfase + c / fs. El desfase se estima como el MINIMO de (llegada - c / fs) en una
+    ventana deslizante: el retardo de transporte nunca es negativo, asi que su minimo es
+    un retardo fijo, y la ventana deja seguir la deriva del cristal del casco.
+
+    - Las muestras perdidas quedan como un hueco en la hora (no se disimulan) y se cuentan.
+    - Si el contador retrocede, el casco se reinicio: se vuelve a anclar y se cuenta.
+    - El desfase se corrige de a poco (20 % de un periodo por muestra): la hora nunca
+      retrocede.
+    modulo: None para un contador que no da la vuelta (Unicorn); 256 para el del Cyton o el
+    de la placa sintetica de BrainFlow.
+    """
+
+    def __init__(self, fs, ventana_s=30.0, modulo=None):
+        self.fs, self.ventana_s, self.modulo = float(fs), ventana_s, modulo
+        self.perdidas = self.reinicios = 0
+        self._candidatos = deque()                # (llegada, llegada - c / fs) por bloque
+        self._desfase = None
+        self._crudo = self._abs = None            # ultimo contador visto y su valor desenrollado
+        self._ultima_hora = -np.inf
+
+    def _anclar(self):
+        self._candidatos.clear()
+        self._desfase = None
+
+    def estampar(self, contadores, t_llegada):
+        """Hora (mismo reloj que t_llegada) de cada muestra del bloque que acaba de llegar."""
+        c = np.asarray(contadores, dtype=np.int64)
+        if c.size == 0:
+            return np.empty(0)
+        absolutos = np.empty(c.size, dtype=np.int64)
+        for i, v in enumerate(c):                 # desenrollar el contador y contar perdidas
+            if self._crudo is None:
+                self._abs = int(v) if self.modulo is None else 0
+            else:
+                salto = int(v) - self._crudo
+                if self.modulo is not None:
+                    salto %= self.modulo
+                    salto = salto or 1            # contador repetido: se toma como la siguiente
+                if salto <= 0:                    # retrocedio: el casco se reinicio
+                    self.reinicios += 1
+                    self._anclar()
+                    salto = 1
+                self.perdidas += salto - 1
+                self._abs += salto
+            self._crudo = int(v)
+            absolutos[i] = self._abs
+        candidato = t_llegada - absolutos[-1] / self.fs
+        if self._desfase is None:                 # primer bloque, o tras un reinicio
+            base = max(candidato, self._ultima_hora + 1 / self.fs - absolutos[0] / self.fs)
+            self._desfase = base
+        self._candidatos.append((t_llegada, candidato))
+        while t_llegada - self._candidatos[0][0] > self.ventana_s:
+            self._candidatos.popleft()
+        objetivo = min(v for _, v in self._candidatos)
+        paso = 0.2 / self.fs                      # correccion maxima por muestra
+        horas = np.empty(c.size)
+        for i, a in enumerate(absolutos):
+            self._desfase += float(np.clip(objetivo - self._desfase, -paso, paso))
+            horas[i] = max(self._desfase + a / self.fs, self._ultima_hora + 1e-6)
+            self._ultima_hora = horas[i]
+        return horas
+
+
 class RegistroHuecos:
     """Cuenta los huecos del flujo de la placa, para medir el dongle con el casco real.
 
-    - Rafagas de paquetes perdidos: saltos del contador de paquetes de la placa (el del
-      Cyton va de 0 a 255 y da la vuelta). Una rafaga de N muestras dura N / fs.
+    - Rafagas de muestras perdidas: saltos del contador de la placa. El del Unicorn no da
+      la vuelta (modulo=None); el del Cyton y el de la placa sintetica van de 0 a 255
+      (modulo=256). Una rafaga de N muestras dura N / fs.
     - Silencios de llegada: los datos tardaron mas de `silencio_s` en llegar al puente.
     resumen() se imprime cada `periodo_s` y da la ventana reciente y el total de la sesion.
     """
@@ -43,7 +116,7 @@ class RegistroHuecos:
         self.fs, self.modulo, self.silencio_s, self.periodo_s = fs, modulo, silencio_s, periodo_s
         self.huecos, self.silencios = [], []      # ventana actual: (t, muestras, s) y (t, s)
         self.muestras = 0                         # recibidas en toda la sesion
-        self.total_rafagas = self.total_perdidas = self.total_silencios = 0
+        self.total_rafagas = self.total_perdidas = self.total_silencios = self.reinicios = 0
         self._ultimo = self._t_bloque = self._t0 = self._t_resumen = None
 
     def reiniciar_contador(self):
@@ -63,7 +136,13 @@ class RegistroHuecos:
         previo = self._ultimo
         for v in c:
             if previo is not None and v != previo:           # un contador repetido no es un hueco
-                perdidas = (v - previo - 1) % self.modulo
+                if self.modulo is not None:
+                    perdidas = (v - previo - 1) % self.modulo
+                elif v > previo:
+                    perdidas = v - previo - 1
+                else:                                        # sin vuelta y retrocede: reinicio del casco
+                    perdidas = 0
+                    self.reinicios += 1
                 if perdidas:
                     self.huecos.append((t, perdidas, perdidas / self.fs))
                     self.total_rafagas += 1
@@ -89,7 +168,8 @@ class RegistroHuecos:
         total = self.muestras + self.total_perdidas
         txt += (f' | sesion: {self.total_rafagas} rafagas ({self.total_rafagas / minutos:.1f} por min), '
                 f'{self.total_perdidas} muestras perdidas ({100 * self.total_perdidas / max(total, 1):.2f} %), '
-                f'{self.total_silencios} silencios')
+                f'{self.total_silencios} silencios'
+                + (f', {self.reinicios} reinicios del contador' if self.reinicios else ''))
         self.huecos, self.silencios, self._t_resumen = [], [], t
         return txt
 
