@@ -48,7 +48,65 @@ def contrato():
             vistos.add(x)
             pila += [d for d in config.TRANSICIONES[x] if d not in vistos]
         assert 'EVALUACION' in vistos, e
+    assert 'PAUSA_SEGURA' in config.ESTADOS
+    for e in ('LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'PERTURBACION'):
+        assert 'PAUSA_SEGURA' in config.TRANSICIONES[e], e
+    assert set(config.TRANSICIONES['PAUSA_SEGURA']) == {
+        'LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'EVALUACION'}
+    assert config.m_salud('eeg', config.ROJO) == 'salud:eeg:ROJO'
+    assert config.COLUMNAS_CSV[-2:] == ['salud', 'excluido']
     return f'{len(config.FLUJOS)} flujos, {len(config.ESTADOS)} estados'
+
+
+# ------------------------------------------------------------ salud
+@prueba
+def vigilante():
+    from salud import Vigilante
+    A, R = config.AMARILLO, config.ROJO
+    bien_eeg = {'edad_s': 0.02, 'tasa_hz': 250.0, 'canales': {}}
+    bien_ort = {'puerto_ok': True, 'acks_perdidos': 0, 'latencia_ms': 8.0}
+    v = Vigilante()
+    assert v.actualizar(0.0, eeg=bien_eeg, ortesis=bien_ort, reloj_ms=0.0,
+                        detector={'fiabilidad': 1.0, 'congelado': False}) == []
+    assert v.codigo() == 'VVVV' and v.escalon() == 1 and v.motivo_pausa() is None
+    # corte de EEG: rojo inmediato, con marcador de cambio
+    assert v.actualizar(1.0, eeg={**bien_eeg, 'edad_s': 1.4}) == [('eeg', R)]
+    assert v.motivo_pausa() == 'eeg' and v.escalon() == 3
+    # vuelve: hacen falta 3 s continuos en verde
+    v.actualizar(2.0, eeg=bien_eeg)
+    assert not v.listo_para_reanudar(4.9) and v.listo_para_reanudar(5.0)
+    # canal despegado: dice cual y por que
+    v.actualizar(6.0, eeg={**bien_eeg, 'canales': {'C3': 'plano', 'Fz': 'ruidoso'}})
+    assert v.motivo_pausa() == 'canal' and 'C3 plano' in v.detalle['eeg'] and 'Fz ruidoso' in v.detalle['eeg']
+    v.actualizar(7.0, eeg=bien_eeg)
+    # ortesis: 1 ACK perdido amarillo, 3 rojo, pico de latencia amarillo, puerto caido rojo
+    v.actualizar(8.0, ortesis={**bien_ort, 'acks_perdidos': 1})
+    assert v.colores['ortesis'] == A and v.motivo_pausa() is None
+    v.actualizar(9.0, ortesis={**bien_ort, 'acks_perdidos': 3})
+    assert v.motivo_pausa() == 'ortesis' and v.escalon() == 4
+    v.actualizar(10.0, ortesis={**bien_ort, 'latencia_ms': 150.0})
+    assert v.colores['ortesis'] == A
+    v.actualizar(11.0, ortesis={**bien_ort, 'puerto_ok': False})
+    assert v.colores['ortesis'] == R
+    v.actualizar(12.0, ortesis=bien_ort)
+    # reloj rojo y detector congelado: escalon 2, sin pausa
+    v.actualizar(13.0, reloj_ms=60.0)
+    assert v.colores['reloj'] == R and v.escalon() == 2 and v.motivo_pausa() is None
+    assert not v.listo_para_reanudar(99.0)            # el reloj en rojo bloquea la salida
+    v.actualizar(14.0, reloj_ms=5.0, detector={'fiabilidad': 0.2, 'congelado': True})
+    assert v.colores['detector'] == R and v.escalon() == 2
+    assert v.listo_para_reanudar(17.0)                # el detector no la bloquea
+    return 'semaforos, detalle del electrodo, verde continuo y escalones'
+
+
+@prueba
+def retroceso():
+    from salud import Retroceso
+    r = Retroceso(0.5, 8.0)
+    assert [r.siguiente() for _ in range(6)] == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0]
+    r.reiniciar()
+    assert r.siguiente() == 0.5
+    return '0.5, 1, 2, 4, 8, 8 y reinicio'
 
 
 # ------------------------------------------------------------ agente
@@ -225,7 +283,7 @@ def main():
     ap.add_argument('--completa', action='store_true')
     a = ap.parse_args()
     print('Pruebas ortesis-bci')
-    for p in (contrato, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
+    for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
               maquina_estados, orquestador_sim, modelos_hardware, cerebro_sintetico):
         p()
     if a.completa:

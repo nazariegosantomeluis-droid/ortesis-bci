@@ -40,13 +40,17 @@ CUE_RELAJA      = 'cue_relaja'
 PERTURBACION_ON = 'perturbacion:on'
 def m_paso_ack(seq): return f'paso_ack:{seq}'
 def m_bloque(nombre): return f'bloque:{nombre}'
+def m_salud(subsistema, color): return f'salud:{subsistema}:{color}'
 
 
 # ============================ CSV (una fila por paso) ============================
 COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'meta', 'angulo', 'p_prima',
                 'direccion', 'delta', 'P_hat', 'artefacto', 'fiabilidad', 'beta',
                 'varianza_beta', 'sens_viva', 'espec_viva', 'cambio', 'explorando',
-                'error_verdadero', 'error_sombra', 'latencia_ack_ms']
+                'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido']
+# salud: una letra por subsistema (V/A/R) en el orden de SUBSISTEMAS.
+# excluido: vacio = paso valido; si no, el motivo (el paso queda fuera del analisis).
+MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'epoca_invalida']
 
 
 # ============================ Tiempos (s) ============================
@@ -84,18 +88,40 @@ DURACION_PASO_MS = 250
 # ESP32 -> PC:  "A,<seq>,<t_us>\n"      ACK al aplicar el primer pulso
 #               "T,<t_us>,<angulo>,<fsr>\n"   telemetria a 50 Hz
 
+# ============================ Salud ============================
+SUBSISTEMAS = ['eeg', 'ortesis', 'reloj', 'detector']
+VERDE, AMARILLO, ROJO = 'VERDE', 'AMARILLO', 'ROJO'
+SALUD = {
+    'eeg_edad_amarillo_s': 0.3, 'eeg_edad_rojo_s': 1.0,     # edad de la ultima muestra
+    'eeg_tasa_amarillo': 0.10, 'eeg_tasa_rojo': 0.25,       # desviacion relativa de la tasa real
+    'hueco_max_s': 0.02,                                    # salto entre muestras que cuenta como corte
+    'canal_plano_uv': 0.1, 'canal_saturado_uv': 180_000.0, 'canal_ruidoso_uv': 100.0,
+    'ventana_canales_s': 2.0,
+    'acks_amarillo': 1, 'acks_rojo': 3,                     # ACK perdidos consecutivos
+    'latencia_pico_ms': 80.0,
+    'reloj_amarillo_ms': 20.0, 'reloj_rojo_ms': 50.0,       # deriva del retraso contra su linea base
+    'reloj_lecturas_base': 40,                              # lecturas para (re)medir la linea base
+    'detector_amarillo': 0.7,                               # fiabilidad bajo este valor
+    'verde_para_reanudar_s': 3.0,                           # VERDE continuo para salir de la pausa
+}
+POSICION_SEGURA   = 0.0          # abierta
+PAUSA_DURACION_MS = 1500         # abrir despacio
+RECONEXION_INICIAL_S, RECONEXION_MAX_S = 0.5, 8.0           # retroceso exponencial
+CAL_REPETICIONES_MAX = 3         # repeticiones de un ensayo de calibracion afectado por una falla
+
 # ============================ Maquina de estados ============================
 ESTADOS = ['IMPEDANCIAS', 'CAL_MI', 'CAL_ERRP', 'LAZO_ESTATICO',
            'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'PERTURBACION',
-           'EVALUACION']
+           'PAUSA_SEGURA', 'EVALUACION']
 TRANSICIONES = {
     'IMPEDANCIAS':           ['CAL_MI', 'LAZO_ESTATICO', 'EVALUACION'],
     'CAL_MI':                ['CAL_ERRP', 'EVALUACION'],
     'CAL_ERRP':              ['LAZO_ESTATICO', 'EVALUACION'],
-    'LAZO_ESTATICO':         ['LAZO_ADAPTATIVO', 'EVALUACION'],
-    'LAZO_ADAPTATIVO':       ['APRENDIZAJE_CONGELADO', 'PERTURBACION', 'EVALUACION'],
-    'APRENDIZAJE_CONGELADO': ['LAZO_ADAPTATIVO', 'PERTURBACION', 'EVALUACION'],
-    'PERTURBACION':          ['LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'EVALUACION'],
+    'LAZO_ESTATICO':         ['LAZO_ADAPTATIVO', 'PAUSA_SEGURA', 'EVALUACION'],
+    'LAZO_ADAPTATIVO':       ['APRENDIZAJE_CONGELADO', 'PERTURBACION', 'PAUSA_SEGURA', 'EVALUACION'],
+    'APRENDIZAJE_CONGELADO': ['LAZO_ADAPTATIVO', 'PERTURBACION', 'PAUSA_SEGURA', 'EVALUACION'],
+    'PERTURBACION':          ['LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'PAUSA_SEGURA', 'EVALUACION'],
+    'PAUSA_SEGURA':          ['LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'EVALUACION'],
     'EVALUACION':            [],
 }
 
@@ -104,3 +130,4 @@ RAIZ       = Path(__file__).resolve().parent
 RESULTADOS = RAIZ / 'resultados'
 MODELOS    = RAIZ / 'modelos'
 IMPEDANCIAS_JSON = RESULTADOS / 'impedancias.json'
+ESTADO_SESION_JSON = RESULTADOS / 'estado_sesion.json'

@@ -360,7 +360,7 @@ class Orquestador:
             'varianza_beta': round(info['varianza'], 4), 'sens_viva': round(sens_v, 3),
             'espec_viva': round(espec_v, 3), 'cambio': info['cambio'], 'explorando': int(dec.explorando),
             'error_verdadero': int(erroneo), 'error_sombra': int(dec.direccion_sombra != meta),
-            'latencia_ack_ms': round(lat, 2),
+            'latencia_ack_ms': round(lat, 2), 'salud': '', 'excluido': '',
         }
         self.csv.writerow(fila)
         self.f_csv.flush()
