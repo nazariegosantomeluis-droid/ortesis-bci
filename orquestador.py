@@ -306,7 +306,8 @@ class BackendReal:
         import hardware as hw
         self.hw, self.a = hw, a
         aviso('Conectando al flujo EEG...')
-        self.eeg = hw.EntradaEEG(renovar_s=getattr(a, 'renovar_eeg', None))
+        self.eeg = hw.EntradaEEG(fuente=getattr(a, 'fuente', 'puente'), nombre=getattr(a, 'eeg_nombre', None),
+                                 tipo=getattr(a, 'eeg_tipo', None))
         caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
                 if a.caos is not None else None)                    # solo afecta a la ortesis simulada
         self.ortesis = hw.OrtesisSimulada(caos=caos) if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
@@ -348,7 +349,8 @@ class BackendReal:
     # ---------------- calibraciones secuenciales ----------------
     def _ventana_mi(self):
         """Ventana de MI filtrada, o None si el EEG no esta fresco y continuo."""
-        x, _ = self.eeg.ventana(config.VENTANA_MI + 1.0)
+        u = config.SALUD                           # tolera perdidas de Bluetooth chicas
+        x, _ = self.eeg.ventana(config.VENTANA_MI + 1.0, u['mi_perdida_max'], u['mi_hueco_max_s'])
         if x is None:
             return None
         xf = self.hw.filtrar(x, config.BANDA_MI, self.eeg.fs)
@@ -901,9 +903,12 @@ def argumentos(argv=None):
     # real
     ap.add_argument('--puerto', default=config.PUERTO_ORTESIS)
     ap.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true')
-    ap.add_argument('--renovar-eeg', dest='renovar_eeg', type=float, default=config.SALUD['eeg_renovar_s'],
-                    metavar='S', help='silencio del EEG (s) tras el que se renueva la entrada de LSL; '
-                    'subelo si el dongle pierde paquetes en rafagas y el buffer se vacia seguido')
+    ap.add_argument('--fuente', choices=sorted(config.FUENTES_EEG), default='puente',
+                    help='de donde viene el EEG: puente (puente_lsl.py o el gemelo) o unicornlsl (la app de g.tec)')
+    ap.add_argument('--eeg-nombre', dest='eeg_nombre', default=None,
+                    help='nombre del flujo LSL de EEG (en UnicornLSL, el que se escribio en la app o el numero de serie)')
+    ap.add_argument('--eeg-tipo', dest='eeg_tipo', default=None,
+                    help='tipo del flujo LSL de EEG, si se prefiere resolver por tipo')
     ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
     ap.add_argument('--min_mi', type=int, default=24)

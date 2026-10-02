@@ -21,12 +21,12 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | Archivo | Rol |
 |---|---|
 | `config.py` | Contrato: flujos LSL (`EEG`, `IMU`...), montaje del Unicorn y papel de cada sensor (`PAPELES`), fuentes de EEG (`FUENTES_EEG`: puente propio o app UnicornLSL), marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
-| `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector; el detector empieza en CALENTANDO) y `Retroceso` (esperas de reconexión). Clase pura, sin hardware. |
+| `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector; el detector empieza en CALENTANDO), `Retroceso` (esperas de reconexión), `RelojContador` (hora de cada muestra por el contador del casco) y `RegistroHuecos` (pérdidas de Bluetooth). Clases puras, sin hardware. |
 | `caos.py` | `PlanCaos(semilla)`: fallas reproducibles (cortes de EEG, ACK perdidos, picos de latencia, parpadeos, canal despegado). Tasas en `config.CAOS_ESTANDAR`. |
 | `agente_errp.py` | `AgenteErrP` (filtro de Kalman sobre la corrección `beta` del logit; P_hat bayesiano; detectores de cambio por sesgo y chequeo predictivo) y `ConfianzaDetector` (sens/espec vivas del detector de ErrP con posteriores Beta; congela el aprendizaje si el detector deja de informar). |
 | `simulador_lazo.py` | Piloto sintético rápido a nivel de rasgos, para comparar agentes con muchos sujetos. |
 | `cerebro_sintetico.py` | Gemelo digital del piloto con un Unicorn puesto: EEG que reacciona al lazo (ERD mu/beta en C3, ErrP en Fz/Cz/Pz ante movimientos erróneos, N1 visual en PO7/Oz/PO8 ante todo movimiento, alfa occipital, parpadeos, fatiga), IMU con movimientos de cabeza que ensucian el EEG, contador y pérdidas de Bluetooth (`--perdidas-bt`). Dos formatos de salida (`--formato`): `puente` (flujos `EEG` e `IMU`, hora por muestra) y `unicornlsl` (un flujo `Data` de 17 canales, como la app de g.tec). Tiene banco offline (`sesion_mi`, `sesion_errp`, `--banco`). |
-| `hardware.py` | `EntradaEEG` (LSL con buffer y reloj sincronizado), `OrtesisSerial`/`OrtesisSimulada` (ACK con latencia medida), `DecoderIM` (Riemann con recentrado no supervisado), `DetectorErrP` (fusión temporal + geométrica, calibrado, umbral de Neyman-Pearson, detector de rareza), calibración secuencial (`intervalo_ba`). |
+| `hardware.py` | `EntradaEEG` (LSL con buffer; fuente configurable `puente` o `unicornlsl`, por nombre o tipo; hora por contador; IMU; tolera pérdidas chicas de Bluetooth), `OrtesisSerial`/`OrtesisSimulada` (ACK con latencia medida), `DecoderIM` (Riemann con recentrado no supervisado), `DetectorErrP` (fusión temporal + geométrica, calibrado, umbral de Neyman-Pearson, detector de rareza), calibración secuencial (`intervalo_ba`). |
 | `orquestador.py` | Máquina de estados, checkpoints go/no go (CP1-CP4), calibraciones, lazo, CSV, flujos `Marcadores`/`Paso`/`Estado`. Backends `sim` y `real`. Revisa la salud antes de cada paso, entra y sale de `PAUSA_SEGURA`, marca pasos excluidos, guarda una instantánea por paso y reanuda con `--reanudar`. |
 | `puente_lsl.py` | BrainFlow → LSL (sintética, Cyton, playback) e impedancias. |
 | `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). |
@@ -50,7 +50,7 @@ python orquestador.py real --ortesis-sim --reanudar   # continuar una sesión in
 
 ## Cosas que muerden
 
-- **El umbral de renovación del EEG es 1 s** (`config.SALUD['eeg_renovar_s']`, `--renovar-eeg`). No bajarlo sin medir el dongle: `puente_lsl.py` imprime el registro de huecos cada 30 s.
+- **La hora de cada muestra sale del contador del casco** (`salud.RelojContador`, en el puente o en `EntradaEEG` con la fuente `unicornlsl`). No volver a activar el suavizado de marcas de LSL (`proc_dejitter`): desfasa las marcas segundos tras cualquier hueco. La renovación de la entrada y `--renovar-eeg` se quitaron por innecesarias.
 - **Un solo flujo `EEG` en la red.** Un `cerebro_sintetico.py` olvidado en otra terminal contamina cualquier medición contra el gemelo. Antes de medir: `python ver_flujos.py`.
 - `pruebas.py --completa`: `lazo_real_sintetico` excedió sus 400 s una vez de tres (2 de octubre) y no se reprodujo; si vuelve a pasar, la prueba ya muestra las últimas líneas de la sesión.
 - **No correr `pruebas.py` mientras hay una sesión `real` en marcha:** las pruebas publican flujos `Marcadores` y `Paso` con los mismos nombres.

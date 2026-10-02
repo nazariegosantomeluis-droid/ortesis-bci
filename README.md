@@ -14,7 +14,9 @@ El casco de la demo es un **g.tec Unicorn Hybrid Black**: 8 canales de EEG a 250
 | Acelerómetro y giroscopio | Rechazo de artefactos por movimiento de cabeza |
 | Contador de muestras | Hora de cada muestra y pérdidas de Bluetooth |
 
-La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. **En curso:** `puente_lsl.py --placa unicorn`, la entrada directa desde UnicornLSL y el uso de la IMU y del contador en el orquestador todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
+La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. **En curso:** `puente_lsl.py --placa unicorn`, `verificar_unicorn.py`, la selección de canales en la calibración y el rechazo por movimiento de cabeza todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
+
+El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defecto: `puente_lsl.py` o el gemelo; flujos `EEG` e `IMU`) o `unicornlsl` (la app de g.tec: un flujo de tipo `Data` con 17 canales, que se resuelve por tipo o con `--eeg-nombre <nombre o número de serie>`). Solo una aplicación puede conectarse al casco a la vez.
 
 ## Instalación
 
@@ -22,7 +24,7 @@ La calibración real decidirá, por validación cruzada, si cada modelo usa los 
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 28/28 pruebas pasaron
+python pruebas.py                    # debe decir 32/32 pruebas pasaron
 ```
 
 ## Archivos
@@ -120,10 +122,10 @@ De la pausa se sale sola tras 3 s continuos de EEG y órtesis en VERDE; se regre
 
 **Reconexión automática**, con retroceso exponencial (0.5 s, 1, 2, 4, 8, 8...):
 
-- `EntradaEEG` vuelve a resolver el flujo si se pierde. Si el flujo calla más de 1 s sin perderse, renueva su entrada (lo avisa en consola: `[eeg] silencio ... entrada renovada`), porque tras un hueco las marcas de tiempo de LSL quedan desfasadas. El umbral se ajusta con `orquestador.py --renovar-eeg <s>`. Un hueco más corto no renueva: el semáforo del reloj lo detecta y el agente no aprende mientras dura el desfase. Al reconectar vacía el buffer y reinicia la línea base del reloj, porque el flujo nuevo puede traer otro desfase. Si hay varios flujos `EEG` en la red (un gemelo olvidado en otra terminal), avisa, usa el más reciente y no salta a otro mientras el suyo siga publicado.
+- `EntradaEEG` vuelve a resolver el flujo si se pierde; al reconectar vacía el buffer y reinicia el reloj. Si hay varios flujos iguales en la red (un gemelo olvidado en otra terminal), avisa, usa el más reciente y no salta a otro mientras el suyo siga publicado. La hora de cada muestra viene de la fuente, reconstruida con el contador del casco, y **no** se usa el suavizado de marcas de LSL: una pérdida de Bluetooth queda como un hueco en la hora, y tras un silencio las marcas siguen alineadas sin tener que vaciar el buffer. La ventana de imaginación motora tolera pérdidas chicas (hasta 10 % de las muestras y huecos de hasta 0.25 s, interpolados); la época de ErrP no cruza huecos de más de 20 ms.
 - `OrtesisSerial` reabre el puerto y conserva `seq`. `mover()` nunca lanza una excepción.
 - `puente_lsl.py` vuelve a preparar la placa si deja de entregar datos 2 s. **Probado solo con la placa sintética de BrainFlow; no probado con el Cyton real.**
-- `puente_lsl.py` imprime cada 30 s un **registro de huecos**: ráfagas de paquetes perdidos (por el contador de paquetes de la placa), su duración media y máxima, silencios de llegada y frecuencia por minuto. Sirve para medir el dongle con el casco real: si las ráfagas duran más que `--renovar-eeg`, súbelo.
+- `puente_lsl.py` estampa cada muestra con la hora reconstruida por el contador de la placa e imprime cada 30 s un **registro de huecos**: ráfagas de muestras perdidas, su duración media y máxima, silencios de llegada y frecuencia por minuto. Sirve para medir el Bluetooth con el casco real.
 
 **Calibración.** Un ensayo afectado por una falla se repite como máximo 3 veces (la consola dice por qué); después se avisa y la calibración sigue.
 
@@ -158,13 +160,13 @@ python orquestador.py real --puerto COM4 --reanudar             # continuar tras
 | Gemelo, caos leve (semilla 2) | 0.37 | 0.47 | 2 de 151 filas: `pausa:eeg` 1, `epoca_invalida` 1; 1 pausa, reanudada sola; CP4 en GO (22 s) |
 | Gemelo, caos estándar (semilla 1) | 0.37 | 0.47 | 20 de 160 filas: `pausa:eeg` 7, `sin_ack` 6, `epoca_invalida` 4, `pausa:canal` 3; 10 pausas, todas reanudadas solas; CP4 en GO (24 s) |
 
-Las tres filas del gemelo usan los mismos modelos (una sola calibración) y el umbral de renovación de 1 s; es **una corrida por condición**, así que no es concluyente. La semilla del caos leve se eligió para que cayera al menos un corte de EEG dentro de los ~5 minutos de sesión. Antes, con el umbral en 0.3 s, tres corridas con caos estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47 (agente/sombra), con modelos distintos entre ellas.
+Las tres filas del gemelo usan los mismos modelos (una sola calibración) ; son del montaje anterior y de antes de la hora por contador; es **una corrida por condición**, así que no es concluyente. La semilla del caos leve se eligió para que cayera al menos un corte de EEG dentro de los ~5 minutos de sesión. Antes, con el umbral en 0.3 s, tres corridas con caos estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47 (agente/sombra), con modelos distintos entre ellas.
 
 En el simulador el agente sigue claramente por debajo de la sombra con caos leve y estándar. En el gemelo quedó por debajo en todas las corridas, por márgenes entre 0.01 y 0.23. El agente no se modificó para estas mediciones. Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
 
 **Lo que enseñó el caos (medido, no supuesto):**
 
-- Tras un silencio sin perder el flujo, el suavizado de marcas de tiempo de LSL (dejitter) deja las marcas atrasadas: 2.7 s tras un hueco de 3 s, y tarda más de 10 s en converger. Eso desalineaba las épocas de ErrP y congelaba el aprendizaje. `EntradaEEG` ahora abre una entrada nueva al mismo flujo cuando calla más de 1 s; con eso las marcas quedan alineadas al volver los datos. El costo de no renovar antes: tras una ráfaga de 0.6 s las marcas siguen desfasadas un rato, el reloj se pone en ROJO y el agente no aprende en esos pasos.
+- Tras un silencio sin perder el flujo, el suavizado de marcas de tiempo de LSL (dejitter) deja las marcas atrasadas: 2.7 s tras un hueco de 3 s, y tarda más de 10 s en converger. Eso desalineaba las épocas de ErrP y congelaba el aprendizaje. Primero se resolvió renovando la entrada tras cada silencio; ahora la hora de cada muestra se reconstruye con el contador del casco y el suavizado no se usa, así que el problema desaparece de raíz (prueba `silencio_sin_recrear`: 5 ms de diferencia tras 2.5 s de silencio, sin vaciar el buffer).
 - La deriva del reloj se mide contra una mediana móvil de ~30 s: detecta un cambio de desfase y lo absorbe, así el semáforo del reloj nunca queda en ROJO para siempre.
 - Una sesión sobrevivió a 37 minutos de suspensión del equipo (tapa cerrada) y se reanudó sola al despertar. Aun así: **no cierres la tapa durante la demo**.
 

@@ -607,7 +607,24 @@ def senal_valida():
     assert hw.cortar_epoca(con_nan, t, t[450], fs) is None
     assert hw.cortar_epoca(x, t, t[-10], fs) is None                                # faltan muestras
     assert hw.cortar_epoca(x, t, t[0] - 5.0, fs) is None                            # t0 fuera del buffer
-    return 'canales, ventana y epoca validadas por tiempo'
+    # perdidas de Bluetooth chicas y repartidas (5 %): la ventana estricta no vale; la de MI si
+    quedan = np.sort(rng.choice(1000, 950, replace=False))
+    xl, tl = x[:, quedan], t[quedan]
+    u = config.SALUD
+    assert not hw.ventana_valida(xl, tl, fs, 0.05, 3.0)
+    assert hw.ventana_valida(xl, tl, fs, 0.05, 3.0, u['mi_perdida_max'], u['mi_hueco_max_s'])
+    hoyo = np.r_[0:700, 800:1000]                                                   # falta 0.4 s seguido
+    assert not hw.ventana_valida(x[:, hoyo], t[hoyo], fs, 0.05, 3.0, u['mi_perdida_max'], u['mi_hueco_max_s'])
+    # rejilla: las muestras con hora vuelven a una rejilla uniforme
+    onda = np.sin(2 * np.pi * 5 * (t - t[0]))[None, :] * np.ones((8, 1)) * 20
+    xu, tu = hw.rejilla(onda[:, quedan], tl, fs)
+    assert abs(np.diff(tu) - 1 / fs).max() < 1e-9 and np.abs(xu - 20 * np.sin(2 * np.pi * 5 * (tu - t[0]))).max() < 1.0
+    # epoca con 3 muestras perdidas dentro (12 ms): sale completa y alineada con la de los datos completos
+    falta = np.r_[0:640, 643:1000]
+    e_ok, e_falta = hw.cortar_epoca(onda, t, t0, fs), hw.cortar_epoca(onda[:, falta], t[falta], t0, fs)
+    assert e_falta is not None and e_falta.shape == e_ok.shape == (8, 250)
+    assert np.abs(e_falta - e_ok).max() < 1.5, np.abs(e_falta - e_ok).max()
+    return 'canales, ventana y epoca validadas por tiempo; perdidas chicas toleradas e interpoladas'
 
 
 @prueba
@@ -781,9 +798,9 @@ def reconexion_eeg():
 
 @prueba
 def silencio_sin_recrear():
-    """El flujo enmudece 2.5 s y sigue con la MISMA instancia (un tiron del dongle). El
-    suavizado de marcas de LSL (dejitter) quedaria desfasado segundos; EntradaEEG renueva
-    su entrada y las marcas vuelven a coincidir con el reloj en cuanto regresan los datos."""
+    """El flujo enmudece 2.5 s y sigue con la MISMA instancia (un tiron del Bluetooth). La hora
+    de cada muestra viene de la fuente (reconstruida por contador), no del suavizado de LSL:
+    al volver los datos las marcas siguen alineadas con el reloj, sin vaciar el buffer."""
     import threading
     import hardware as hw
     from pylsl import StreamInfo, StreamOutlet, local_clock
@@ -800,53 +817,37 @@ def silencio_sin_recrear():
             else:
                 n = int((ahora - pub['t']) * fs)
                 if n > 0:
-                    pub['t'] += n / fs
-                    out.push_chunk(rng.normal(0, 10, size=(n, 8)).tolist(), pub['t'])
+                    horas = pub['t'] + np.arange(1, n + 1) / fs
+                    pub['t'] = horas[-1]
+                    out.push_chunk(rng.normal(0, 10, size=(n, 8)).tolist(), list(horas))
             time.sleep(0.02)
     threading.Thread(target=publicar, daemon=True).start()
     eeg = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre)
-    sensible = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre, renovar_s=0.3)
-    import orquestador                              # el umbral se ajusta por linea de comandos
-    assert orquestador.argumentos(['real']).renovar_eeg == config.SALUD['eeg_renovar_s']
-    assert orquestador.argumentos(['real', '--renovar-eeg', '0.5']).renovar_eeg == 0.5
     retraso = lambda: local_clock() - eeg.ultimo_t()
     try:
         time.sleep(4.0)
-        # una rafaga corta de paquetes perdidos (0.6 s) NO renueva con el umbral por defecto (1 s),
-        # para no vaciar el buffer con cada tiron del dongle; con un umbral de 0.3 s si
-        assert config.SALUD['eeg_renovar_s'] == 1.0
         antes = retraso()
         assert antes < 0.1, antes
-        pub['callado'] = True
-        time.sleep(0.6)
-        pub['callado'] = False
-        derivas = []
-        for _ in range(15):
-            time.sleep(0.1)
-            derivas.append(abs(eeg.lecturas()['reloj_ms']))
-        assert eeg.renovaciones == 0 and sensible.renovaciones == 1, (eeg.renovaciones, sensible.renovaciones)
-        # sin renovar, las marcas quedan desfasadas un rato: el semaforo del reloj lo ve (y el agente no aprende)
-        assert max(derivas) >= config.SALUD['reloj_rojo_ms'], max(derivas)
-        sensible.cerrar()
-        time.sleep(2.0)
+        n_antes = eeg._crudo(10.0)[1].size
         pub['callado'] = True
         t_corte = local_clock()
         time.sleep(2.5)
         pub['callado'] = False
-        time.sleep(2.0)
+        time.sleep(1.0)
         despues = retraso()
-        assert abs(despues - antes) < 0.1, f'marcas desfasadas {1000 * (despues - antes):.0f} ms tras el silencio'
-        assert eeg.reconexiones == 0 and eeg.renovaciones >= 1, (eeg.reconexiones, eeg.renovaciones)
-        assert eeg.ventana(3.0) == (None, None)            # aun no hay 3 s limpios tras el hueco
+        assert abs(despues - antes) < 0.05, f'marcas desfasadas {1000 * (despues - antes):.0f} ms tras el silencio'
+        assert eeg.reconexiones == 0 and eeg._crudo(10.0)[1].size > n_antes       # el buffer no se vacia
+        assert eeg.ventana(3.0) == (None, None)            # la ventana cruzaria el hueco
         assert eeg.epoca(t_corte + 2.0) is None            # la epoca cruzaria el hueco
-        time.sleep(2.5)
+        time.sleep(3.0)
         x, t = eeg.ventana(3.0)
         assert x is not None and t[0] > t_corte + 2.0
         assert abs(eeg.lecturas()['reloj_ms']) < config.SALUD['reloj_rojo_ms']
+        assert eeg.epoca(t[-1] - 1.0) is not None
     finally:
         pub['vivo'] = False
         eeg.cerrar()
-    return f'tras 2.5 s de silencio las marcas coinciden con el reloj (diferencia {1000 * (despues - antes):+.0f} ms)'
+    return f'tras 2.5 s de silencio las marcas coinciden con el reloj (diferencia {1000 * (despues - antes):+.0f} ms), sin vaciar el buffer'
 
 
 @prueba
@@ -907,6 +908,97 @@ def dos_flujos_eeg():
         pub['vivo'] = False
         eeg.cerrar()
     return 'elige el mas reciente; no salta mientras el suyo viva; si muere, espera a uno mas nuevo'
+
+
+@prueba
+def entrada_unicorn():
+    """EntradaEEG contra las fuentes de un Unicorn (gemelo): el flujo del puente, con IMU aparte,
+    y el flujo unico de la app UnicornLSL (17 canales, resuelto por tipo o por nombre, hora por
+    contador). Con perdidas de Bluetooth la ventana de MI sigue saliendo."""
+    import hardware as hw
+    from pylsl import local_clock
+
+    def con_gemelo(extra, **entrada):
+        g = subprocess.Popen([sys.executable, 'cerebro_sintetico.py', '--semilla', '5', '--cabeza', '0.6',
+                              '--perdidas-bt', '40'] + extra, cwd=config.RAIZ,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            eeg = hw.EntradaEEG(segundos=20.0, timeout=20.0, **entrada)
+            try:
+                time.sleep(7.0)
+                x, t = eeg._crudo(6.0)
+                l = eeg.lecturas()
+                for _ in range(10):                # con ~7 % de perdidas casi todas las ventanas valen
+                    ventana_mi = eeg.ventana(3.0, config.SALUD['mi_perdida_max'], config.SALUD['mi_hueco_max_s'])[0]
+                    if ventana_mi is not None:
+                        break
+                    time.sleep(0.5)
+                x, t = eeg._crudo(6.0)
+                giro = eeg.movimiento(t[-1] - 10.0, t[-1])
+                retraso = local_clock() - t[-1]
+                return x, t, l, ventana_mi, giro, retraso
+            finally:
+                eeg.cerrar()
+        finally:
+            g.terminate()
+            g.wait()
+
+    resumen = []
+    for nombre, extra, entrada in (
+            ('puente', [], {}),
+            ('unicornlsl por tipo', ['--formato', 'unicornlsl'], {'fuente': 'unicornlsl'}),
+            ('unicornlsl por nombre', ['--formato', 'unicornlsl', '--nombre-lsl', 'UN-PRUEBA'],
+             {'fuente': 'unicornlsl', 'nombre': 'UN-PRUEBA'})):
+        x, t, l, ventana_mi, giro, retraso = con_gemelo(extra, **entrada)
+        assert x.shape[0] == 8 and x.shape[1] > 1000, (nombre, x.shape)
+        d = np.diff(t)
+        assert abs(np.median(d) - 0.004) < 1e-4 and d.min() > 0, (nombre, np.median(d), d.min())
+        normales = d[d < 0.018]
+        assert np.abs(normales - 0.004).max() < 0.0015, (nombre, np.abs(normales - 0.004).max())   # sin jitter
+        assert (d > 0.018).sum() >= 1, f'{nombre}: las perdidas de Bluetooth deben verse como huecos'
+        assert -0.05 < retraso < 0.25, (nombre, retraso)
+        # el offset de continua del casco no debe parecer un canal saturado ni plano
+        assert not set(l['canales'].values()) & {'saturado', 'plano'}, (nombre, l)
+        assert l['edad_s'] < 0.3 and 180 < l['tasa_hz'] < 300, (nombre, l)
+        assert ventana_mi is not None and ventana_mi.shape == (8, 750), nombre
+        assert giro is not None and giro > 20, (nombre, giro)                     # la cabeza se movio
+        resumen.append(f'{nombre}: {int((d > 0.018).sum())} huecos')
+    # un flujo con otro numero de canales no es esa fuente: error claro, no datos mezclados
+    g = subprocess.Popen([sys.executable, 'cerebro_sintetico.py'], cwd=config.RAIZ,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        try:
+            hw.EntradaEEG(timeout=20.0, fuente='unicornlsl', nombre='EEG')
+            raise AssertionError('debio rechazar un flujo de 8 canales como fuente unicornlsl')
+        except RuntimeError as e:
+            assert '17' in str(e), e
+    finally:
+        g.terminate()
+        g.wait()
+    return '; '.join(resumen) + '; hora por contador sin jitter, IMU y ventana de MI con perdidas'
+
+
+@prueba
+def puente_hora_por_contador():
+    """puente_lsl.py (placa sintetica de BrainFlow) estampa cada muestra con la hora reconstruida
+    por el contador de la placa: sin el jitter de los bloques de llegada."""
+    from pylsl import StreamInlet, resolve_byprop, proc_clocksync, local_clock
+    g = subprocess.Popen([sys.executable, 'puente_lsl.py'], cwd=config.RAIZ,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        s = resolve_byprop('name', 'EEG', timeout=20)
+        assert s, 'no aparecio el flujo EEG del puente'
+        e, ts, t_fin = StreamInlet(s[0], processing_flags=proc_clocksync), [], time.time() + 6
+        while time.time() < t_fin:
+            ts.extend(e.pull_chunk(timeout=0.05)[1])
+        retraso = local_clock() - ts[-1]
+    finally:
+        g.terminate()
+        g.wait()
+    d = np.diff(ts)[250:]
+    assert len(ts) > 1000 and np.abs(d - 0.004).max() < 0.001, np.abs(d - 0.004).max()
+    assert -0.05 < retraso < 0.3, retraso
+    return f'{len(ts)} muestras con paso de 4 ms exacto (desvio maximo {1000 * np.abs(d - 0.004).max():.2f} ms)'
 
 
 @prueba
@@ -1198,8 +1290,8 @@ def main():
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               instantanea_estado, reanudar,
               modelos_hardware, senal_valida,
-              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, registro_huecos,
-              reloj_contador,
+              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, entrada_unicorn,
+              puente_hora_por_contador, registro_huecos, reloj_contador,
               puente_reconecta,
               cerebro_sintetico, gemelo_unicorn):
         p()

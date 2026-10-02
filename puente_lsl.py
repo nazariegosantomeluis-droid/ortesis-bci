@@ -22,7 +22,7 @@ from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
 from pylsl import StreamOutlet, local_clock
 
 import config
-from salud import RegistroHuecos, Retroceso
+from salud import RegistroHuecos, RelojContador, Retroceso
 
 SILENCIO_MAX_S = 2.0     # sin datos de la placa durante este tiempo: se reconecta
 
@@ -122,9 +122,13 @@ def main():
     outlet = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
     print(f'Publicando EEG ({a.placa}, {len(eeg)} canales, {fs} Hz). Ctrl+C para parar.')
     # registro de huecos: paquetes perdidos (contador de paquetes de la placa) y silencios de
-    # llegada. Sirve para medir el dongle con el casco real y elegir orquestador.py --renovar-eeg.
+    # llegada. Sirve para medir el Bluetooth con el casco real.
     canal_paquete = BoardShim.get_package_num_channel(datos_id)
     huecos = RegistroHuecos(fs)
+    # la hora de cada muestra se reconstruye con el contador de la placa (sin el jitter de los
+    # bloques de llegada); una perdida queda como un hueco en la hora. El orquestador no usa
+    # el suavizado de marcas de LSL: confia en esta hora.
+    reloj = RelojContador(fs, modulo=256)
 
     n_total, t_ini = 0, time.time()
     t_dato, retroceso = time.time(), Retroceso()
@@ -135,8 +139,8 @@ def main():
             except Exception:                   # la placa dejo de responder
                 d = np.empty((0, 0))
             if d.shape[1]:
-                # la ultima muestra del bloque se estampa "ahora"; LSL reparte el resto
-                outlet.push_chunk(d[eeg, :].T.tolist(), local_clock())
+                horas = reloj.estampar(d[canal_paquete], local_clock())
+                outlet.push_chunk(d[eeg, :].T.tolist(), list(horas))
                 n_total += d.shape[1]
                 t_dato = time.time()
                 huecos.bloque(d[canal_paquete], t_dato)

@@ -129,12 +129,10 @@ VERDE, AMARILLO, ROJO = 'VERDE', 'AMARILLO', 'ROJO'
 CALENTANDO = 'CALENTANDO'       # solo el detector: aun no hay epocas para juzgarlo (gris en el tablero)
 SALUD = {
     'eeg_edad_amarillo_s': 0.3, 'eeg_edad_rojo_s': 1.0,     # edad de la ultima muestra
-    'eeg_renovar_s': 1.0,                                   # silencio tras el que se renueva la entrada
-                                                            # (orquestador.py --renovar-eeg). El dongle del
-                                                            # Cyton pierde paquetes en rafagas cortas: con
-                                                            # menos de 1 s se vaciaria el buffer seguido.
     'eeg_tasa_amarillo': 0.10, 'eeg_tasa_rojo': 0.25,       # desviacion relativa de la tasa real
     'hueco_max_s': 0.02,                                    # salto entre muestras que cuenta como corte
+    # la ventana de imaginacion motora tolera perdidas de Bluetooth chicas (se interpolan):
+    'mi_perdida_max': 0.10, 'mi_hueco_max_s': 0.25,         # fraccion de muestras y hueco mas largo
     # saturado: el Unicorn mide +-750 mV (dato de g.tec, por confirmar con verificar_unicorn.py)
     'canal_plano_uv': 0.1, 'canal_saturado_uv': 700_000.0, 'canal_ruidoso_uv': 100.0,
     'ventana_canales_s': 2.0,

@@ -14,7 +14,7 @@ import numpy as np
 from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos
 
 import config
-from salud import Retroceso
+from salud import RelojContador, Retroceso
 
 
 # ============================ Senal ============================
@@ -46,19 +46,36 @@ def revisar_canales(x, fs, u=None):
     return malos
 
 
-def _sin_huecos(t, u=None):
+def _sin_huecos(t, hueco_max_s=None):
     """Las marcas de tiempo avanzan sin saltos (ni hacia adelante ni hacia atras)."""
-    u = u or config.SALUD
-    return len(t) < 2 or float(np.abs(np.diff(t)).max()) <= u['hueco_max_s']
+    hueco = config.SALUD['hueco_max_s'] if hueco_max_s is None else hueco_max_s
+    return len(t) < 2 or float(np.abs(np.diff(t)).max()) <= hueco
 
 
-def ventana_valida(x, t, fs, edad_s, segundos, u=None):
-    """La ventana de los ultimos `segundos` es fresca, completa, continua y finita."""
+def rejilla(x, t, fs):
+    """Lleva muestras con hora propia (con alguna perdida) a una rejilla uniforme de fs,
+    por interpolacion lineal. Devuelve (x canales x n, t)."""
+    n = int(round((t[-1] - t[0]) * fs)) + 1
+    tu = t[0] + np.arange(n) / fs
+    return np.vstack([np.interp(tu, t, fila) for fila in x]), tu
+
+
+def ventana_valida(x, t, fs, edad_s, segundos, perdida_max=0.0, hueco_max_s=None, u=None):
+    """La ventana de los ultimos `segundos` (por HORA, no por numero de muestras) es fresca,
+    finita y esta completa: como mucho falta la fraccion `perdida_max` de sus muestras y
+    ningun hueco pasa de `hueco_max_s`. Por defecto es estricta; la ventana de imaginacion
+    motora tolera perdidas de Bluetooth chicas (config.SALUD mi_perdida_max, mi_hueco_max_s)."""
     u = u or config.SALUD
-    n = int(segundos * fs)
-    if x.ndim != 2 or x.shape[1] < n or len(t) < n or edad_s > u['eeg_edad_rojo_s']:
+    hueco = u['hueco_max_s'] if hueco_max_s is None else hueco_max_s
+    if x.ndim != 2 or len(t) < 2 or x.shape[1] != len(t) or edad_s > u['eeg_edad_rojo_s']:
         return False
-    return bool(np.isfinite(x[:, -n:]).all() and _sin_huecos(t[-n:], u))
+    ini = t[-1] - segundos + 1.0 / fs
+    dentro = t >= ini - 1e-9
+    if t[0] > ini + hueco or t[dentro][0] > ini + hueco:   # el buffer no llega tan atras
+        return False
+    falta = 1.0 - dentro.sum() / (segundos * fs)
+    return bool(falta <= perdida_max + 1.0 / (segundos * fs)
+                and _sin_huecos(t[dentro], hueco) and np.isfinite(x[:, dentro]).all())
 
 
 VENTANA_RELOJ = 1500      # lecturas de retraso que se recuerdan (~30 s)
@@ -80,69 +97,79 @@ def cortar_epoca(x, t, t0, fs, antes=-config.EPOCA_ERRP[0], despues=config.EPOCA
                  banda=config.BANDA_ERRP):
     """Epoca filtrada y con linea base alrededor de t0, o None si no es de fiar.
 
-    La epoca se corta por TIEMPO: si el tramo [t0 - antes, t0 + despues] tiene un
-    hueco, valores no finitos o le faltan muestras, no hay epoca. El filtro de fase
-    cero se aplica solo al tramo continuo que la contiene, para que un corte
-    cercano no contamine la epoca."""
+    La epoca se corta por TIEMPO. Se toma el tramo sin huecos (ninguno mayor que
+    hueco_max_s) que contiene [t0 - antes, t0 + despues]; si no existe, o tiene valores
+    no finitos, no hay epoca. Las perdidas chicas dentro del tramo se interpolan a una
+    rejilla uniforme, asi la epoca queda alineada con t0 aunque falten muestras. El filtro
+    de fase cero se aplica solo a ese tramo, para que un corte cercano no la contamine."""
     if x.ndim != 2 or x.shape[1] < fs:
         return None
-    n = int(round((antes + despues) * fs))
-    i0 = int(np.searchsorted(t, t0 - antes))
-    if i0 + n > x.shape[1]:
-        return None
-    tramo = t[i0:i0 + n]
-    if abs(tramo[0] - (t0 - antes)) > 2.0 / fs or not _sin_huecos(tramo):
-        return None
+    ini, fin = t0 - antes, t0 + despues
     saltos = np.flatnonzero(np.abs(np.diff(t)) > config.SALUD['hueco_max_s']) + 1
-    j0 = int(saltos[saltos <= i0].max()) if (saltos <= i0).any() else 0
-    j1 = int(saltos[saltos >= i0 + n].min()) if (saltos >= i0 + n).any() else x.shape[1]
-    seg = x[:, j0:j1]
-    if not np.isfinite(seg).all():
+    bordes = np.r_[0, saltos, len(t)]
+    for a, b in zip(bordes[:-1], bordes[1:]):
+        if t[a] <= ini + 1.0 / fs and t[b - 1] >= fin - 1.0 / fs:
+            break
+    else:
         return None
-    e = filtrar(seg, banda, fs)[:, i0 - j0:i0 - j0 + n]
+    if not np.isfinite(x[:, a:b]).all():
+        return None
+    xu, tu = rejilla(x[:, a:b], t[a:b], fs)
+    n = int(round((antes + despues) * fs))
+    i0 = int(round((ini - tu[0]) * fs))
+    if xu.shape[1] < fs or i0 < 0 or i0 + n > xu.shape[1]:
+        return None
+    e = filtrar(xu, banda, fs)[:, i0:i0 + n]
     return e - e[:, :int(antes * fs)].mean(axis=1, keepdims=True)
 
 
 class EntradaEEG:
-    """Lee el flujo 'EEG' de LSL en un hilo y guarda los ultimos segundos.
+    """Lee el EEG (y la IMU) de LSL en un hilo y guarda los ultimos segundos.
 
-    Las marcas de tiempo quedan en el reloj local de LSL (clocksync + dejitter),
-    el mismo reloj con el que se estampa el ACK de la ortesis. Asi la epoca del
-    ErrP se corta con la misma base de tiempo que el movimiento.
+    fuente (config.FUENTES_EEG) dice de donde viene y en que canal esta cada cosa:
+      'puente'      flujo del contrato, de puente_lsl.py o del gemelo: 8 canales de EEG ya
+                    estampados con la hora reconstruida por contador; la IMU va en el flujo
+                    'IMU', que se lee aparte si existe.
+      'unicornlsl'  la app UnicornLSL de g.tec: un flujo de 17 canales estampado a la
+                    llegada. Aqui se separan EEG, IMU, bateria y validez, y la hora de cada
+                    muestra se reconstruye con el contador (salud.RelojContador).
+    El flujo se resuelve por `nombre` si lo hay y, si no, por `tipo` (los dos se pueden
+    cambiar al construir: orquestador.py --eeg-nombre / --eeg-tipo).
 
-    Resiliencia: la entrada se crea con recover=False para ENTERARSE de que el
-    flujo se perdio. Si se pierde o enmudece, se vuelve a resolver con retroceso
-    exponencial. Un flujo que vuelve es una instancia nueva y su desfase de reloj
-    puede ser otro: al reconectar se vacia el buffer (ninguna ventana ni epoca
-    mezcla los dos lados del hueco) y se reinicia la linea base del reloj.
+    La hora de cada muestra queda en el reloj local de LSL, el mismo con el que se estampa
+    el ACK de la ortesis: asi la epoca del ErrP se corta con la base de tiempo del
+    movimiento. NO se usa el suavizado de marcas de LSL (dejitter): la hora ya viene bien
+    de la fuente, y el suavizado desfasa las marcas tras cualquier hueco (medido: 2.7 s tras
+    un hueco de 3 s). Una perdida de Bluetooth queda como un hueco en la hora.
 
-    Si hay VARIOS flujos con el mismo nombre en la red (un gemelo olvidado en otra
-    terminal, por ejemplo) se avisa, se usa el mas reciente y nunca se salta a otro
-    mientras el propio siga publicado, aunque enmudezca un rato. Si el propio muere,
-    solo se acepta un flujo creado DESPUES que el: uno mas viejo ya fue descartado al
-    arrancar y no es la fuente que volvio.
+    Resiliencia: la entrada se crea con recover=False para ENTERARSE de que el flujo se
+    perdio. Si se pierde o enmudece, se vuelve a resolver con retroceso exponencial. Un
+    flujo que vuelve es una instancia nueva: al reconectar se vacia el buffer (ninguna
+    ventana ni epoca mezcla los dos lados del hueco) y se reinicia el reloj.
 
-    Silencios sin perder el flujo (un tiron del dongle): el suavizado de marcas de LSL
-    (dejitter) supone muestreo regular y, tras un hueco, deja las marcas desfasadas
-    segundos durante ~10 s (medido: 2.7 s tras un hueco de 3 s). Por eso, en cuanto el
-    flujo calla mas de `renovar_s` (config.SALUD['eeg_renovar_s'], 1 s por defecto), la
-    entrada se RENUEVA: una entrada nueva al mismo flujo empieza con el suavizado limpio
-    y el buffer vacio. Un hueco mas corto no renueva (el dongle del Cyton pierde paquetes
-    en rafagas cortas y vaciar el buffer cada vez seria peor); de ese desfase menor se
-    encarga el semaforo del reloj, que suspende el aprendizaje.
+    Si hay VARIOS flujos iguales en la red (un gemelo olvidado en otra terminal) se avisa,
+    se usa el mas reciente y nunca se salta a otro mientras el propio siga publicado. Si el
+    propio muere, solo se acepta uno creado DESPUES que el.
     """
 
-    def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG', renovar_s=None):
-        self.nombre, self._segundos = nombre, segundos
-        self._renovar_s = config.SALUD['eeg_renovar_s'] if renovar_s is None else renovar_s
+    def __init__(self, segundos=30.0, timeout=10.0, nombre=None, fuente='puente', tipo=None):
+        self.fuente = dict(config.FUENTES_EEG[fuente], id=fuente)
+        self.nombre = nombre or self.fuente['nombre']
+        self.tipo = tipo or self.fuente['tipo']
+        self._clave = ('name', self.nombre) if self.nombre else ('type', self.tipo)
+        self.etiqueta = f'{self._clave[0]}={self._clave[1]}'
+        self._segundos = segundos
         self._uid, self._creado, self.reconexiones = None, -np.inf, 0
-        self._info, self.renovaciones, self._renovada = None, 0, False
+        self._info, self._reloj, self._imu_inlet = None, None, None
+        self.bateria, self.invalidas = None, 0   # solo si la fuente los trae (unicornlsl)
         self._llegadas = deque(maxlen=2000)       # (instante de llegada, muestras): tasa real
-        self.inlet = self._resolver(timeout)
+        self.inlet = self._resolver(timeout, estricto=True)
         if self.inlet is None:
-            raise RuntimeError(f"No encontre el flujo '{nombre}'. ¿Esta corriendo puente_lsl.py?")
+            raise RuntimeError(f"No encontre el flujo de EEG ({self.etiqueta}). "
+                               f"¿Esta corriendo puente_lsl.py, el gemelo o la app UnicornLSL?")
         n = int(segundos * self.fs)
         self._x, self._t = deque(maxlen=n), deque(maxlen=n)
+        self._imu_x, self._imu_t = deque(maxlen=n), deque(maxlen=n)
         self._lag = deque(maxlen=VENTANA_RELOJ)   # retraso (reloj local - ultima marca) por lectura
         self._t_llegada = time.monotonic()        # reloj de pared: no depende del desfase del flujo
         self._retroceso, self._proximo_intento = Retroceso(), 0.0
@@ -151,47 +178,50 @@ class EntradaEEG:
         self._hilo = threading.Thread(target=self._leer, daemon=True)
         self._hilo.start()
 
-    def _resolver(self, timeout=None):
+    # ---------------- conexion ----------------
+    def _resolver(self, timeout=None, estricto=False):
         """Entrada nueva al flujo, o None si no aparece o si la instancia actual sigue
         publicada. timeout=None: una sola busqueda de 1 s (reconexion)."""
-        from pylsl import StreamInlet, resolve_byprop, proc_clocksync, proc_dejitter
-        if timeout is not None and not resolve_byprop('name', self.nombre, timeout=timeout):
+        from pylsl import resolve_byprop
+        clave, valor = self._clave
+        if timeout is not None and not resolve_byprop(clave, valor, timeout=timeout):
             return None                           # al arrancar: esperar a que aparezca alguno
-        s = resolve_byprop('name', self.nombre, minimum=16, timeout=1.0)   # 1 s completo: verlos TODOS
+        s = resolve_byprop(clave, valor, minimum=16, timeout=1.0)          # 1 s completo: verlos TODOS
         if not s or self._uid in {x.uid() for x in s}:
             return None                           # el flujo propio sigue vivo: no se cambia por otro
         elegido = max(s, key=lambda x: x.created_at())
         if elegido.created_at() <= self._creado:
             return None                           # solo quedan flujos mas viejos que el propio: esperar
+        if elegido.channel_count() != self.fuente['canales']:
+            if estricto:
+                raise RuntimeError(
+                    f"El flujo {self.etiqueta} tiene {elegido.channel_count()} canales y la fuente "
+                    f"'{self.fuente['id']}' espera {self.fuente['canales']}. Revisa --fuente (en la app "
+                    f"UnicornLSL, el flujo combinado y no el dividido).")
+            return None
         if len(s) > 1:
-            print(f"  AVISO: hay {len(s)} flujos '{self.nombre}' en la red ("
+            print(f"  AVISO: hay {len(s)} flujos {self.etiqueta} en la red ("
                   + ', '.join(f'{x.hostname()} {x.uid()[:8]}' for x in s)
                   + f'). Uso el mas reciente ({elegido.uid()[:8]}); cierra los demas.', flush=True)
         self._uid, self._creado, self._info = elegido.uid(), elegido.created_at(), elegido
         self.fs = float(elegido.nominal_srate())
-        return self._abrir()
+        if self.fuente['contador'] is not None:   # hora por contador: reloj nuevo para la instancia nueva
+            self._reloj = RelojContador(self.fs)
+        self._imu_inlet = self._abrir_imu()
+        return self._abrir(elegido)
 
-    def _abrir(self):
-        from pylsl import StreamInlet, proc_clocksync, proc_dejitter
-        return StreamInlet(self._info, max_buflen=int(self._segundos) + 5,
-                           processing_flags=proc_clocksync | proc_dejitter, recover=False)
+    def _abrir(self, info):
+        from pylsl import StreamInlet, proc_clocksync
+        return StreamInlet(info, max_buflen=int(self._segundos) + 5,
+                           processing_flags=proc_clocksync, recover=False)
 
-    def _renovar(self):
-        """Entrada nueva al MISMO flujo: suavizado de marcas limpio y buffer vacio."""
-        try:
-            nueva = self._abrir()
-        except Exception:
-            return
-        with self._lock:
-            self.inlet = nueva
-            self._x.clear()
-            self._t.clear()
-            self._reiniciar_reloj()
-        self.renovaciones += 1
-        print(f"  [eeg] silencio en '{self.nombre}': entrada renovada ({self.renovaciones})", flush=True)
-
-    def _reiniciar_reloj(self):
-        self._lag.clear()
+    def _abrir_imu(self):
+        """La IMU del puente va en su propio flujo; si no esta, se sigue sin ella."""
+        from pylsl import resolve_byprop
+        if self.fuente['imu'] is not None or self.fuente['id'] != 'puente' or self.nombre != self.fuente['nombre']:
+            return None
+        s = resolve_byprop('name', 'IMU', timeout=1.0)
+        return self._abrir(max(s, key=lambda x: x.created_at())) if s else None
 
     def _reconectar(self):
         """Un intento de volver a resolver el flujo; los intentos se espacian con retroceso."""
@@ -203,17 +233,17 @@ class EntradaEEG:
             return
         with self._lock:
             self.inlet = nueva
-            self._x.clear()
-            self._t.clear()
-            self._reiniciar_reloj()
+            for cola in (self._x, self._t, self._imu_x, self._imu_t, self._lag):
+                cola.clear()
         self.reconexiones += 1
         self._retroceso.reiniciar()
         self._proximo_intento = 0.0
-        print(f"  [eeg] flujo '{self.nombre}' recuperado (reconexion {self.reconexiones})", flush=True)
+        print(f'  [eeg] flujo {self.etiqueta} recuperado (reconexion {self.reconexiones})', flush=True)
 
+    # ---------------- lectura ----------------
     def _leer(self):
         from pylsl import local_clock
-        rojo = config.SALUD['eeg_edad_rojo_s']
+        rojo, f = config.SALUD['eeg_edad_rojo_s'], self.fuente
         while self._vivo:
             try:
                 datos, ts = self.inlet.pull_chunk(timeout=0.05)
@@ -223,18 +253,34 @@ class EntradaEEG:
                 continue
             if ts:
                 ahora = time.monotonic()
-                self._renovada = False
+                datos = np.asarray(datos, dtype=float)
+                horas = np.asarray(ts)
+                if self._reloj is not None:       # la marca de LSL es la llegada: la hora sale del contador
+                    horas = self._reloj.estampar(datos[:, f['contador']], ts[-1])
                 with self._lock:
-                    self._x.extend(datos)
-                    self._t.extend(ts)
-                    self._lag.append(local_clock() - ts[-1])
+                    self._x.extend(datos[:, f['eeg']].tolist())
+                    self._t.extend(horas.tolist())
+                    if f['imu'] is not None:
+                        self._imu_x.extend(datos[:, f['imu']].tolist())
+                        self._imu_t.extend(horas.tolist())
+                    if f['bateria'] is not None:
+                        self.bateria = float(datos[-1, f['bateria']])
+                    if f['validez'] is not None:
+                        self.invalidas += int((datos[:, f['validez']] != 1).sum())
+                    self._lag.append(local_clock() - horas[-1])
                     self._llegadas.append((ahora, len(ts)))
                     self._t_llegada = ahora
-            elif time.monotonic() - self._t_llegada > self._renovar_s and not self._renovada:
-                self._renovar()                   # un hueco descuadra el suavizado: entrada limpia
-                self._renovada = True
             elif time.monotonic() - self._t_llegada > rojo:
                 self._reconectar()                # mudo: quiza es otra instancia la que publica ahora
+            if self._imu_inlet is not None:
+                try:
+                    imu, ti = self._imu_inlet.pull_chunk(timeout=0.0)
+                except Exception:
+                    self._imu_inlet, imu, ti = None, [], []
+                if ti:
+                    with self._lock:
+                        self._imu_x.extend(imu)
+                        self._imu_t.extend(ti)
 
     def edad(self):
         """Segundos desde que llego la ultima muestra."""
@@ -245,19 +291,39 @@ class EntradaEEG:
             return self._t[-1] if self._t else -np.inf
 
     def _crudo(self, segundos):
-        """(x canales x muestras en uV, t) de los ultimos `segundos`, sin validar."""
+        """(x canales x muestras en uV, t) de las ultimas segundos * fs muestras, sin validar."""
         n = int(segundos * self.fs)
         with self._lock:
             x = np.array(list(self._x)[-n:], dtype=float).T
             t = np.array(list(self._t)[-n:])
         return x, t
 
-    def ventana(self, segundos):
-        """(x, t) de los ultimos `segundos`, o (None, None) si no es fresca, completa y continua."""
-        x, t = self._crudo(segundos)
-        if not ventana_valida(x, t, self.fs, self.edad(), segundos):
+    def ventana(self, segundos, perdida_max=0.0, hueco_max_s=None):
+        """(x, t) de los ultimos `segundos` en una rejilla uniforme, o (None, None) si la
+        ventana no es fresca y completa. Estricta por defecto; ver ventana_valida()."""
+        x, t = self._crudo(segundos + 0.5)
+        if not ventana_valida(x, t, self.fs, self.edad(), segundos, perdida_max, hueco_max_s):
             return None, None
-        return x, t
+        dentro = t >= t[-1] - segundos + 0.5 / self.fs
+        xu, tu = rejilla(x[:, dentro], t[dentro], self.fs)
+        n = int(segundos * self.fs)
+        if xu.shape[1] < n:                       # la primera muestra de la ventana se perdio: completar
+            xu = np.hstack([np.repeat(xu[:, :1], n - xu.shape[1], axis=1), xu])
+            tu = np.r_[tu[0] - np.arange(n - len(tu), 0, -1) / self.fs, tu]
+        return xu[:, -n:], tu[-n:]
+
+    def movimiento(self, t0, t1):
+        """Velocidad angular maxima de la cabeza (grados/s, giroscopio) entre t0 y t1, o
+        None si no hay IMU en ese tramo."""
+        with self._lock:
+            t = np.array(self._imu_t)
+            if t.size == 0:
+                return None
+            sel = (t >= t0) & (t <= t1)
+            if not sel.any():
+                return None
+            giro = np.array(self._imu_x, dtype=float)[sel, 3:6]
+        return float(np.abs(giro).max())
 
     def lecturas(self):
         """Lo que el Vigilante necesita: edad, tasa real, canales malos y deriva del reloj (ms)."""

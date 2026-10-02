@@ -275,6 +275,8 @@ Decididos al medir; cada uno tiene su prueba en `pruebas.py`.
   en ráfagas cortas, y es ajustable con `orquestador.py --renovar-eeg`.
 - **Registro de huecos en `puente_lsl.py`** (cada 30 s) y **caos leve** (`--caos-nivel leve`),
   pedidos por Luis tras ver los resultados del caos estándar.
+- **(P0 del Unicorn) La renovación y `--renovar-eeg` se quitaron:** la hora de cada muestra se reconstruye con el
+  contador del casco y ya no se usa el suavizado de marcas de LSL, así que tras un silencio no hay desfase que corregir.
 - **Deriva del reloj contra una mediana móvil** de ~30 s en lugar de una línea base fija:
   detecta un cambio de desfase y lo absorbe, así el reloj nunca queda en ROJO para siempre
   (`deriva_reloj`). Sustituye al reinicio de línea base como mecanismo principal; el
