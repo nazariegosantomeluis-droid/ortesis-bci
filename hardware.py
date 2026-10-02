@@ -663,11 +663,23 @@ class DetectorErrP:
         from pyriemann.utils.mean import mean_riemann
         from sklearn.model_selection import StratifiedKFold, cross_val_predict
         k = int(min(4, np.bincount(y).min()))
-        proba = cross_val_predict(self._pipe(), X, y, method='predict_proba',
-                                  cv=StratifiedKFold(max(k, 2), shuffle=True, random_state=0))[:, 1]
+        pliegues = StratifiedKFold(max(k, 2), shuffle=True, random_state=0)
+        # Validacion ANIDADA: en cada pliegue, el umbral se elige con puntajes de validacion
+        # cruzada del entrenamiento y se aplica a la prueba. Elegirlo sobre los mismos puntajes
+        # que se evaluan inflaba la BA reportada (maldicion del ganador).
+        self.pred_cv = np.zeros(len(y), dtype=int)
+        for ent, pru in pliegues.split(X, y):
+            k_in = int(min(3, np.bincount(y[ent]).min()))
+            p_ent = cross_val_predict(self._pipe(), X[ent], y[ent], method='predict_proba',
+                                      cv=StratifiedKFold(max(k_in, 2), shuffle=True, random_state=1))[:, 1]
+            u = self._umbral_neyman_pearson(p_ent, y[ent])
+            p_pru = self._pipe().fit(X[ent], y[ent]).predict_proba(X[pru])[:, 1]
+            self.pred_cv[pru] = (p_pru > u).astype(int)
+        # el umbral del modelo final, con los puntajes de validacion cruzada de todo
+        proba = cross_val_predict(self._pipe(), X, y, method='predict_proba', cv=pliegues)[:, 1]
         self.p_error_cal = float(y.mean())
         self.umbral = self._umbral_neyman_pearson(proba, y)
-        self.pred_cv, self.y_cal = (proba > self.umbral).astype(int), y
+        self.y_cal = y
         self.sens = float((self.pred_cv[y == 1] == 1).mean())
         self.espec = float((self.pred_cv[y == 0] == 0).mean())
         self.ba = 0.5 * (self.sens + self.espec)
@@ -708,6 +720,23 @@ class DetectorErrP:
 def exactitud_balanceada(y, pred):
     y, pred = np.asarray(y), np.asarray(pred)
     return float(0.5 * ((pred[y == 1] == 1).mean() + (pred[y == 0] == 0).mean()))
+
+
+def intervalo_error(errores, nivel=0.90, tam_ensayo=config.PASOS_ENSAYO, n_boot=2000, semilla=0):
+    """Intervalo bootstrap de una tasa de error del lazo, remuestreando ENSAYOS (bloques de
+    `tam_ensayo` pasos con la misma meta) y no pasos sueltos: los errores de un ensayo estan
+    correlacionados y remuestrear pasos daria un intervalo demasiado estrecho."""
+    e = np.asarray(errores, dtype=float)
+    if e.size == 0:
+        return 0.0, 1.0
+    bloques = [e[i:i + tam_ensayo] for i in range(0, e.size, tam_ensayo)]
+    rng = np.random.default_rng(semilla)
+    tasas = []
+    for _ in range(n_boot):
+        elegidos = rng.integers(0, len(bloques), len(bloques))
+        tasas.append(np.concatenate([bloques[i] for i in elegidos]).mean())
+    q = (1 - nivel) / 2
+    return float(np.quantile(tasas, q)), float(np.quantile(tasas, 1 - q))
 
 
 def intervalo_ba(y, pred, nivel=0.90, n_boot=1000, semilla=0):

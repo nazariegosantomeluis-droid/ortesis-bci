@@ -475,13 +475,13 @@ class BackendReal:
             if e is not None:
                 X.append(e)
                 y.append(int(err))
-            if (len(y) >= self.a.min_errp and n % 10 == 0 or n == self.a.ensayos_errp) and self._ajustable(y):
-                self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y))
-                r = self._decidir_secuencial(np.array(y), self.detector.pred_cv, config.BA_MIN, n,
-                                             self.a.ensayos_errp, self.a.min_errp,
-                                             extra_ok=self.detector.espec >= config.ESPEC_MIN)
-                if r != 'seguir':
-                    break
+        # Todas las epocas pedidas, sin GO ni NO GO tempranos: con 40 a 60 epocas la parada
+        # secuencial elegia estimados inflados por suerte (en el gemelo: 0.87 reportado contra
+        # 0.69 real). El umbral se elige con validacion anidada (DetectorErrP.ajustar).
+        if self._ajustable(y):
+            self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y))
+            lo, hi = self.hw.intervalo_ba(np.array(y), self.detector.pred_cv)
+            aviso(f'    [{len(y)} epocas] BA {self.detector.ba:.2f}  IC90 [{lo:.2f}, {hi:.2f}]')
         if self.detector is None:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
             return False
@@ -545,7 +545,7 @@ class BackendReal:
     # ---------------- lazo ----------------
     def cue(self, meta):
         aviso('    >>> CERRAR' if meta > 0 else '    >>> RELAJA')
-        time.sleep(config.VENTANA_MI)            # que la ventana ya contenga imaginacion
+        time.sleep(config.VENTANA_MI + config.ESPERA_PRIMER_PASO_S)   # la ventana ya en estado estable
 
     def phi(self, meta):
         v = self._ventana_mi()
@@ -838,18 +838,21 @@ class Orquestador:
         s = np.array([f['error_sombra'] for f in validas])
         est = np.array([f['estado'] for f in validas])
         lat = np.array([f['latencia_ack_ms'] for f in validas], dtype=float)
+        ic = lambda v: '[{:.2f}, {:.2f}]'.format(*self.hw_intervalo(v))
+        aviso('  (intervalos del 90 %, remuestreando ensayos de 5 pasos)')
         for nombre in ('LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO'):
             m = est == nombre
             if m.any():
-                aviso(f'  {nombre:22s} pasos={m.sum():4d}  error agente={e[m].mean():.2f}  '
-                      f'error sombra={s[m].mean():.2f}')
+                aviso(f'  {nombre:22s} pasos={m.sum():4d}  error agente={e[m].mean():.2f} {ic(e[m])}  '
+                      f'error sombra={s[m].mean():.2f} {ic(s[m])}')
         if self.a.backend == 'real':
             aviso(f'  latencia ACK: {lat.mean():.1f} +- {lat.std():.1f} ms')
         if self.t_perturbacion is not None:
             tp = sum(1 for f in self.filas[:self.t_perturbacion] if not f['excluido'])
             if tp < len(validas):
                 k2 = tp + int(config.RECUPERACION_MAX_S / config.CICLO_S)
-                self.error_post = {'agente': float(e[tp:k2].mean()), 'sombra': float(s[tp:k2].mean())}
+                self.error_post = {'agente': float(e[tp:k2].mean()), 'sombra': float(s[tp:k2].mean()),
+                                   'ic_agente': self.hw_intervalo(e[tp:k2]), 'ic_sombra': self.hw_intervalo(s[tp:k2])}
                 beta = np.array([f['beta'] for f in validas[tp:]])
                 meta_beta = self.beta_pre + 0.7 * config.PERTURBACION_LOGITS
                 idx = np.flatnonzero(beta >= meta_beta)
@@ -862,7 +865,8 @@ class Orquestador:
                     checkpoint(self.salidas, 4, seg <= config.RECUPERACION_MAX_S,
                                f'recuperacion (beta al 70% de la perturbacion) en {n_rec} pasos '
                                f'= {seg:.0f} s; error ~2 min tras perturbar: agente '
-                               f'{self.error_post["agente"]:.2f} vs sombra {self.error_post["sombra"]:.2f}',
+                               f'{self.error_post["agente"]:.2f} {ic(e[tp:k2])} vs sombra '
+                               f'{self.error_post["sombra"]:.2f} {ic(s[tp:k2])}',
                                False, informativo=True)
                 else:
                     checkpoint(self.salidas, 4, False,
@@ -872,6 +876,11 @@ class Orquestador:
         aviso(f'  beta final = {self.filas[-1]["beta"]}  |  cambios detectados = {self.agente.n_cambios}'
               f'  |  detector vivo: sens {self.confianza.sens:.2f}, espec {self.confianza.espec:.2f}')
         aviso(f'  CSV: {self.ruta_csv}')
+
+    @staticmethod
+    def hw_intervalo(errores):
+        import hardware as hw                    # importa scipy/pyriemann: solo al evaluar
+        return hw.intervalo_error(errores)
 
     def cerrar(self):
         self.f_csv.close()
@@ -913,9 +922,10 @@ def argumentos(argv=None):
                     help='tipo del flujo LSL de EEG, si se prefiere resolver por tipo')
     ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
-    ap.add_argument('--min_mi', type=int, default=24)
-    ap.add_argument('--ensayos_errp', type=int, default=120, help='maximo')
-    ap.add_argument('--min_errp', type=int, default=40)
+    # minimo 36 (antes 24): en el gemelo, la BA reportada era optimista en +0.02; con 36, +0.00
+    ap.add_argument('--min_mi', type=int, default=36)
+    ap.add_argument('--ensayos_errp', type=int, default=120,
+                    help='epocas de calibracion de ErrP; siempre se usan todas (sin parada temprana)')
     ap.add_argument('--duracion_mi', type=float, default=4.0)
     ap.add_argument('--espera', type=float, default=1.5)
     ap.add_argument('--p_error', type=float, default=0.3)

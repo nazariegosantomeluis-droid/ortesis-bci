@@ -91,6 +91,10 @@ MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'ep
 # ============================ Tiempos (s) ============================
 CICLO_S     = 2.1
 VENTANA_MI  = 2.0            # ventana de decision de imaginacion motora
+# espera extra tras la senal antes del primer paso de cada ensayo: la ventana del primer paso
+# ya no empieza con la transicion mental (gemelo, 8 sujetos: el error del primer paso baja de
+# 0.22 a 0.15, ~80 % de lo que se gana esperando 2 s)
+ESPERA_PRIMER_PASO_S = 1.0
 EPOCA_ERRP  = (-0.2, 0.8)    # alrededor del ACK del paso
 PASOS_ENSAYO = 5             # pasos por ensayo (misma meta)
 

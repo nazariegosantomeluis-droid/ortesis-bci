@@ -616,6 +616,90 @@ def modelos_hardware():
 
 
 @prueba
+def detector_umbral_anidado():
+    """El umbral de Neyman-Pearson se elige dentro de cada pliegue (validacion anidada): la BA
+    que reporta la calibracion coincide con la de epocas nuevas. Verifica que no hay sesgo; con
+    120 epocas el sesgo del umbral elegido sobre los mismos puntajes era chico (+0.03): el grande
+    venia de la parada secuencial (ver calibracion_errp_fija)."""
+    import hardware as hw
+    rng = np.random.default_rng(1)
+    t = np.arange(250) / 250
+    erp = 2.2 * np.exp(-((t - 0.5) ** 2) / 0.005)                # senal debil: BA real ~0.7
+
+    def epocas(n):
+        y = (rng.random(n) < 0.3).astype(int)
+        E = rng.normal(0, 3, size=(n, 8, 250))
+        E[y == 1, 6] += erp
+        E[y == 1, 2] += 0.6 * erp
+        return E, y
+    difs = []
+    for _ in range(2):
+        E, y = epocas(120)
+        det = hw.DetectorErrP().ajustar(E, y)
+        Et, yt = epocas(600)
+        p = np.array([det.p_error(e) for e in Et]) > det.umbral
+        difs.append(det.ba - 0.5 * (p[yt == 1].mean() + 1 - p[yt == 0].mean()))
+        assert len(det.pred_cv) == len(y)
+    assert abs(np.mean(difs)) < 0.06, difs
+    return f'BA reportada menos BA real en epocas nuevas: {np.mean(difs):+.3f}'
+
+
+@prueba
+def calibracion_errp_fija():
+    """La calibracion de ErrP usa siempre todas las epocas pedidas (120 por defecto): sin GO ni
+    NO GO tempranos, que con pocos datos elegian estimados inflados por suerte."""
+    import types
+    import orquestador
+    import hardware as hw
+    assert orquestador.argumentos(['real']).ensayos_errp == 120
+    rng = np.random.default_rng(0)
+    t = np.arange(250) / 250
+    ultimo = {'meta': 1, 'dir': 1}
+
+    class Salidas:
+        def marcador(self, txt, t=None):
+            if txt in (config.CUE_CERRAR, config.CUE_RELAJA):
+                ultimo['meta'] = 1 if txt == config.CUE_CERRAR else -1
+
+        def estado(self, **k):
+            pass
+        paso = types.SimpleNamespace(push_sample=lambda x: ultimo.update(dir=int(x[1])))
+
+    class EEG:                                            # ErrP enorme: con la regla vieja daba GO a las 40
+        def epoca(self, t0):
+            e = rng.normal(0, 2, size=(8, 250))
+            if ultimo['dir'] != ultimo['meta']:
+                e[2] += 8 * np.exp(-((t - 0.5) ** 2) / 0.005)
+            return e
+
+        def lecturas(self):
+            return {'canales': {}}
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.hw, b.eeg, b.ortesis, b.detector = hw, EEG(), hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0), None
+    b.a = types.SimpleNamespace(ensayos_errp=60, p_error=0.3, espera=0.0, forzar=True)
+    orq = types.SimpleNamespace(salidas=Salidas())
+    assert b.calibrar_errp(orq)
+    assert len(b.detector.y_cal) == 60 and b.detector.ba > 0.9, (len(b.detector.y_cal), b.detector.ba)
+    return f'usa las 60 epocas pedidas aunque el detector es casi perfecto (BA {b.detector.ba:.2f})'
+
+
+@prueba
+def intervalo_por_ensayos():
+    """El intervalo del 90 % de una tasa de error se calcula remuestreando ENSAYOS (5 pasos con la
+    misma meta), no pasos sueltos: los errores de un mismo ensayo estan correlacionados."""
+    import hardware as hw
+    rng = np.random.default_rng(0)
+    independientes = (rng.random(300) < 0.2).astype(int)
+    lo, hi = hw.intervalo_error(independientes, nivel=0.90)
+    assert lo < independientes.mean() < hi and 0.05 < hi - lo < 0.13, (lo, hi)
+    correlacionados = np.repeat((rng.random(60) < 0.2).astype(int), 5)   # ensayos enteros bien o mal
+    lo2, hi2 = hw.intervalo_error(correlacionados, nivel=0.90)
+    assert hi2 - lo2 > 1.5 * (hi - lo), ((lo, hi), (lo2, hi2))
+    assert hw.intervalo_error([], nivel=0.9) == (0.0, 1.0)
+    return f'pasos independientes: [{lo:.2f}, {hi:.2f}]; ensayos enteros: [{lo2:.2f}, {hi2:.2f}]'
+
+
+@prueba
 def senal_valida():
     import hardware as hw
     fs, rng = 250, np.random.default_rng(0)
@@ -1322,7 +1406,7 @@ def lazo_real_sintetico():
         try:
             r = subprocess.run([sys.executable, 'orquestador.py', 'real', '--ortesis-sim', '--forzar',
                                 '--ensayos_mi', '24', '--min_mi', '24', '--duracion_mi', '2.5',
-                                '--espera', '0.3', '--ensayos_errp', '60', '--min_errp', '60',
+                                '--espera', '0.3', '--ensayos_errp', '60',
                                 '--seg_revision', '3',
                                 '--pasos_estatico', '5', '--pasos_adaptativo', '10'],
                                cwd=config.RAIZ, capture_output=True, text=True, timeout=400)
@@ -1367,25 +1451,29 @@ def lazo_real_caos():
     return f"{pausas} pausas, todas reanudadas; {linea('excluidos del analisis')}; {linea('[CP4]')}"
 
 
+# Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
+# datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
+# tiempo real; --completa agrega las sesiones reales contra el gemelo.
+RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
+           'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
+           'calibracion_repeticiones', 'calibracion_errp_fija', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
+           'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
+           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
+CON_LSL = ['reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
+           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn']
+LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos']
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--completa', action='store_true')
+    ap.add_argument('--lsl', action='store_true', help='agrega las pruebas con LSL en tiempo real (~2.5 min)')
+    ap.add_argument('--completa', action='store_true', help='todas, con las sesiones reales contra el gemelo (~10 min)')
     a = ap.parse_args()
-    print('Pruebas ortesis-bci')
-    for p in (contrato, vigilante, retroceso, agente_basico, p_hat_refleja_errp, agente_aprende, agente_sin_sesgo, confianza_detector,
-              maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones, deriva_reloj,
-              plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
-              instantanea_estado, reanudar,
-              modelos_hardware, senal_valida,
-              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, entrada_unicorn,
-              verificar_unicorn,
-              puente_hora_por_contador, registro_huecos, reloj_contador,
-              puente_reconecta,
-              cerebro_sintetico, gemelo_unicorn):
-        p()
-    if a.completa:
-        lazo_real_sintetico()
-        lazo_real_caos()
+    nombres = RAPIDAS + (CON_LSL if a.lsl or a.completa else []) + (LAZO_REAL if a.completa else [])
+    print('Pruebas ortesis-bci' + (' (completas)' if a.completa else ' (con LSL)' if a.lsl else ' (rapidas)'))
+    for nombre in nombres:
+        globals()[nombre]()
     ok = sum(RESULTADOS)
     print(f'\n{ok}/{len(RESULTADOS)} pruebas pasaron')
     sys.exit(0 if ok == len(RESULTADOS) else 1)
