@@ -267,11 +267,13 @@ class BackendReal:
         fallaron. Un ensayo afectado se repite como maximo config.CAL_REPETICIONES_MAX
         veces; despues se avisa y la calibracion sigue con el siguiente."""
         for k in range(config.CAL_REPETICIONES_MAX + 1):
+            self.falla = 'sin dato'                # tomar() deja aqui el motivo si falla
             dato = tomar()
             if dato is not None:
                 return dato
             if k < config.CAL_REPETICIONES_MAX:
-                aviso(f'    {que} afectado por una falla: se repite ({k + 1}/{config.CAL_REPETICIONES_MAX})')
+                aviso(f'    {que} afectado por una falla ({self.falla}): se repite '
+                      f'({k + 1}/{config.CAL_REPETICIONES_MAX})')
         aviso(f'    AVISO: {que} descartado tras {config.CAL_REPETICIONES_MAX} repeticiones; '
               f'la calibracion sigue')
         return None
@@ -288,6 +290,13 @@ class BackendReal:
         if hi < umbral - 0.05 and n >= 1.5 * n_min:
             return 'nogo'
         return 'go' if n >= n_max and lo >= umbral else ('fin' if n >= n_max else 'seguir')
+
+    def _canales_malos(self):
+        """True (y deja el motivo en self.falla) si algun electrodo esta despegado ahora."""
+        malos = self.eeg.lecturas()['canales']
+        if malos:
+            self.falla = '; '.join(f'{c} {m}' for c, m in malos.items())
+        return bool(malos)
 
     @staticmethod
     def _ajustable(y):
@@ -308,7 +317,10 @@ class BackendReal:
                 aviso('    >>> CERRAR: imagina que cierras la mano' if clase
                       else '    >>> RELAJA: imagina que abres y relajas la mano')
                 time.sleep(self.a.duracion_mi)
-                return None if self.eeg.lecturas()['canales'] else self._ventana_mi()
+                if self._canales_malos():
+                    return None
+                self.falla = 'EEG sin ventana fresca y continua'
+                return self._ventana_mi()
             v = self._ensayo_con_reintentos(tomar, 'ensayo de MI')
             if v is not None:
                 X.append(v)
@@ -357,10 +369,14 @@ class BackendReal:
                 orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
                 seq, t_ack, _ = self.ortesis.mover(theta[0])
                 if t_ack is None:
+                    self.falla = 'la ortesis no confirmo el movimiento'
                     return None                    # sin ACK no se sabe cuando empezo el movimiento
                 orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
                 e = self.eeg.epoca(t_ack)
-                return None if self.eeg.lecturas()['canales'] else e
+                if self._canales_malos():
+                    return None
+                self.falla = 'epoca incompleta o con un corte de EEG'
+                return e
             e = self._ensayo_con_reintentos(tomar, 'ensayo de ErrP')
             if e is not None:
                 X.append(e)
