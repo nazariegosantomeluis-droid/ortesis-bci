@@ -46,8 +46,11 @@ python orquestador.py real --ortesis-sim   # terminal 3: camino real completo
 
 ## Resultados de referencia (para no retroceder)
 
-- Simulador, 30 sujetos, perturbación de 2.4 logits — error en los primeros 2 min tras perturbar: estático 0.325, eta fijo 0.243, **bayes 0.211**.
-- Con el detector degradado a propósito: aprendizaje al 8 %, congelado 88 % de la falla, 1 % de congelamientos en falso.
-- Corrida real completa contra el gemelo: CP1–CP4 en GO; error tras perturbar agente 0.14 vs sombra 0.47.
+Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11, numpy 2.5.3, scikit-learn 1.9.1), salvo donde se indica. En otra plataforma o con otras versiones pueden variar en el tercer decimal.
+
+- Simulador (`python simulador_lazo.py --semillas 30`), perturbación de 2.4 logits — error en los primeros 2 min tras perturbar: estático 0.325, eta fijo 0.246, **bayes 0.214**. Antes de perturbar: 0.165 / 0.170 / 0.169; después de los 2 min: 0.316 / 0.178 / 0.175.
+- Con el detector degradado a propósito (prueba `confianza_detector`, 12 sujetos): aprendizaje al 8 %, congelado 88 % de la falla, 1 % de congelamientos en falso.
+- Banco offline del gemelo (`python cerebro_sintetico.py --banco`): decoder MI BA 0.71; detector ErrP sensibilidad 0.66, especificidad 0.91, BA 0.79.
+- Corrida real completa contra el gemelo: CP1–CP4 en GO; error tras perturbar agente 0.14 vs sombra 0.47. **Medida anterior, no repetida el 2 de octubre**; la calibración no usa semilla fija, así que varía entre corridas.
 
 Las tareas pendientes, en orden, están en `TAREAS.md`.

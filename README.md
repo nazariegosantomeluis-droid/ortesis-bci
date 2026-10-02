@@ -44,13 +44,13 @@ python pruebas.py                    # debe decir 9/9 pruebas pasaron
 - **Calibración secuencial.** Se detiene sola cuando el intervalo de confianza de la exactitud ya decide el checkpoint, y ahorra minutos de piloto.
 - **Impedancias reales del Cyton** (lead-off a 31.25 Hz) para el checkpoint 1.
 
-Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simulador_lazo.py`):
+Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simulador_lazo.py --semillas 30`; medidos en Windows 11 con Python 3.11 el 2 de octubre de 2026):
 
 | Agente | Error antes | Primeros 2 min | Después |
 |---|---|---|---|
 | Estático (sin aprender) | 0.165 | 0.325 | 0.316 |
-| `eta` fijo 0.3 | 0.170 | 0.243 | 0.178 |
-| **Bayes (el nuestro)** | **0.168** | **0.211** | **0.177** |
+| `eta` fijo 0.3 | 0.170 | 0.246 | 0.178 |
+| **Bayes (el nuestro)** | **0.169** | **0.214** | **0.175** |
 
 Con el detector de ErrP degradado a propósito, el aprendizaje baja a menos del 10 % y se congela la mayor parte de la falla. Los congelamientos en falso son de 1 %.
 
