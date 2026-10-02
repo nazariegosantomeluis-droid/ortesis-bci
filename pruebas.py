@@ -258,11 +258,10 @@ def maquina_estados():
 @prueba
 def orquestador_sim():
     import orquestador
-    antes = set(config.RESULTADOS.glob('sesion_sim_*.csv'))
-    orquestador.main(['sim', '--ciclo', '0', '--pasos_estatico', '20', '--pasos_adaptativo', '90'])
-    nuevos = set(config.RESULTADOS.glob('sesion_sim_*.csv')) - antes
-    assert len(nuevos) == 1
-    filas = list(csv.DictReader(open(nuevos.pop())))
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '20', '--pasos_adaptativo', '90'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    orquestador.correr(orq, a)                     # (no se busca "el CSV nuevo": puede haber otras sesiones a la vez)
+    filas = list(csv.DictReader(open(orq.ruta_csv)))
     assert len(filas) == 110 and list(filas[0]) == config.COLUMNAS_CSV
     assert {'LAZO_ESTATICO', 'LAZO_ADAPTATIVO'} <= {f['estado'] for f in filas}
     return f'{len(filas)} filas con el esquema del contrato'
@@ -333,6 +332,42 @@ def pausa_segura():
     assert orq2.fsm.estado == 'EVALUACION' and orq2.f_csv.closed
     assert orq2.filas[-1]['excluido'] == 'pausa:eeg'
     return f'3 pausas (eeg, canal, ortesis) con regreso al estado previo; excluidos {orq.excluidos}'
+
+
+@prueba
+def cp1_robusto():
+    """CP1 de la ortesis con 40 movimientos y tres metricas robustas (MAD, p95 y ACK perdidos):
+    un pico aislado no lo tumba, un jitter tipico alto si. Y el caos actua solo desde el lazo."""
+    import types
+    import orquestador
+    import hardware as hw
+    import cerebro_sintetico as cs
+    rng = np.random.default_rng(0)
+    assert config.CP1_MOVIMIENTOS == 40
+    normal = list(rng.normal(8, 1.5, 39))
+    ok = hw.evaluar_latencias(normal + [300.0])               # 39 normales y un pico de 300 ms
+    assert ok['ok'], ok
+    malo = hw.evaluar_latencias(list(rng.normal(60, 40, 40)))   # jitter tipico de 40 ms
+    assert not malo['ok'] and malo['mad_ms'] > config.CP1_MAD_MAX_MS, malo
+    perdidos = hw.evaluar_latencias(normal[:35] + [float('nan')] * 5)   # 12.5 % de ACK perdidos
+    assert not perdidos['ok'] and abs(perdidos['perdidos'] - 0.125) < 1e-9, perdidos
+    assert 'MAD' in ok['texto'] and 'p95' in ok['texto']
+    # caos desde el lazo (por defecto) o desde la calibracion
+    assert orquestador.argumentos(['real']).caos_desde == 'lazo'
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.a = types.SimpleNamespace(caos=1, caos_nivel='estandar', caos_desde='lazo')
+    b.ortesis, b.hw = hw.OrtesisSimulada(), hw
+    b.activar_caos('calibracion')
+    assert b.ortesis.caos is None
+    b.activar_caos('lazo')
+    assert b.ortesis.caos is not None
+    cer = cs.Cerebro(cs._args(caos=1, caos_desde='lazo'))
+    assert cer.t_caos(1e6) is None                            # sin la senal del lazo no hay caos
+    cer._marcador(config.m_bloque('LAZO_ESTATICO'), 500.0)
+    assert cer.t_caos(530.0) == 30.0
+    desde_ya = cs.Cerebro(cs._args(caos=1, caos_desde='calibracion'))
+    assert desde_ya.t_caos(desde_ya.t0_sesion + 7) == 7
+    return f"pico aislado: GO ({ok['texto']}); jitter de 40 ms: NO GO; el caos espera al lazo"
 
 
 @prueba
@@ -1456,7 +1491,7 @@ def lazo_real_caos():
 # tiempo real; --completa agrega las sesiones reales contra el gemelo.
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
-           'calibracion_repeticiones', 'calibracion_errp_fija', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']

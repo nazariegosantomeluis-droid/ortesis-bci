@@ -308,43 +308,40 @@ class BackendReal:
         aviso('Conectando al flujo EEG...')
         self.eeg = hw.EntradaEEG(fuente=getattr(a, 'fuente', 'puente'), nombre=getattr(a, 'eeg_nombre', None),
                                  tipo=getattr(a, 'eeg_tipo', None))
-        caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
-                if a.caos is not None else None)                    # solo afecta a la ortesis simulada
-        self.ortesis = hw.OrtesisSimulada(caos=caos) if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
+        # el caos solo afecta a la ortesis simulada y se activa con activar_caos()
+        self.ortesis = hw.OrtesisSimulada() if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
+        self.activar_caos('calibracion')
         self.angulo = 0.5
         self.decoder = self.detector = None
 
     # ---------------- checkpoint 1 ----------------
     def revisar(self, orq):
-        filas_z, fuente = None, ''
-        if config.IMPEDANCIAS_JSON.exists():
-            dat = json.loads(config.IMPEDANCIAS_JSON.read_text())
-            if time.time() - dat['t'] < 15 * 60:
-                filas_z = dat['kohm']
-                fuente = ' (simuladas)' if dat.get('simulada') else ''
-        if filas_z:
-            malos = [c for c, z in filas_z.items() if z > config.IMPEDANCIA_MAX_KOHM]
-            ok_senal = not malos
-            txt_senal = (f'impedancias{fuente} <= {config.IMPEDANCIA_MAX_KOHM:.0f} kOhm en '
-                         f'{len(filas_z) - len(malos)}/{len(filas_z)}' + (f' (revisar {", ".join(malos)})' if malos else ''))
-        else:
-            aviso('Sin impedancias recientes (corre puente_lsl.py --impedancias). '
-                  'Uso calidad de senal: quietos y con los ojos abiertos...')
-            time.sleep(self.a.seg_revision)
-            filas = self.eeg.calidad(self.a.seg_revision)
-            for f in filas:
-                aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%} | "
-                      f"saturado {f['saturado']:4.0%} | {'bien' if f['ok'] else 'REVISAR'}")
-            ok_senal = bool(filas) and all(f['ok'] for f in filas)
-            txt_senal = f'calidad de senal ok {sum(f["ok"] for f in filas)}/{len(filas)}'
-        aviso('Midiendo latencia de la ortesis (20 pasos)...')
-        for k in range(20):
-            self.ortesis.mover(0.4 if k % 2 else 0.6)
+        """CP1: el Unicorn no mide impedancias. Calidad de senal por canal (quietos, ojos
+        abiertos) y latencia del ACK con metricas robustas (hardware.evaluar_latencias)."""
+        aviso('Revisando la calidad de senal: quietos y con los ojos abiertos...')
+        time.sleep(self.a.seg_revision)
+        filas = self.eeg.calidad(self.a.seg_revision)
+        for f in filas:
+            aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%} | "
+                  f"saturado {f['saturado']:4.0%} | {'bien' if f['ok'] else 'REVISAR'}")
+        ok_senal = bool(filas) and all(f['ok'] for f in filas)
+        malos = [f['canal'] for f in filas if not f['ok']]
+        txt_senal = (f'calidad de senal ok {len(filas) - len(malos)}/{len(filas)}'
+                     + (f' (revisar {", ".join(malos)})' if malos else ''))
+        aviso(f'Midiendo latencia de la ortesis ({config.CP1_MOVIMIENTOS} movimientos)...')
+        latencias = []
+        for k in range(config.CP1_MOVIMIENTOS):
+            _, t_ack, lat = self.ortesis.mover(0.4 if k % 2 else 0.6)
+            latencias.append(lat if t_ack is not None else float('nan'))
             time.sleep(0.15)
-        media, sd = self.ortesis.jitter()
-        ok = ok_senal and sd <= config.LATENCIA_JITTER_MAX_MS
-        return checkpoint(orq.salidas, 1, ok, f'{txt_senal}; latencia ACK {media:.1f} +- {sd:.1f} ms',
-                          self.a.forzar)
+        r = self.hw.evaluar_latencias(latencias)
+        return checkpoint(orq.salidas, 1, ok_senal and r['ok'], f"{txt_senal}; {r['texto']}", self.a.forzar)
+
+    def activar_caos(self, momento):
+        """El caos de la ortesis simulada empieza en la calibracion o en el lazo (--caos-desde)."""
+        if getattr(self.a, 'caos', None) is not None and momento == getattr(self.a, 'caos_desde', 'lazo') \
+                and isinstance(self.ortesis, self.hw.OrtesisSimulada):
+            self.ortesis.caos = PlanCaos(self.a.caos, config.CAOS[getattr(self.a, 'caos_nivel', 'estandar')])
 
     # ---------------- calibraciones secuenciales ----------------
     def _ventana_mi(self):
@@ -614,6 +611,8 @@ class Orquestador:
         self.confianza = ConfianzaDetector(p['sens'], p['espec'])
         aviso(f"Agente '{self.a.modo}' listo (detector sens {p['sens']:.2f}, espec {p['espec']:.2f}, "
               f"salida {p['salida']}).")
+        if hasattr(self.b, 'activar_caos'):
+            self.b.activar_caos('lazo')
         self.lista = True
         if inst is None:
             self.fsm.ir_a('LAZO_ESTATICO')
@@ -901,6 +900,8 @@ def argumentos(argv=None):
     ap.add_argument('--forzar', action='store_true', help='continua aunque un checkpoint de NO GO')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
                     help='inyecta el caos estandar (fallas reproducibles) en el simulador o en la ortesis simulada')
+    ap.add_argument('--caos-desde', dest='caos_desde', choices=['lazo', 'calibracion'], default='lazo',
+                    help='el caos empieza con el lazo (por defecto) o ya desde la calibracion')
     ap.add_argument('--caos-nivel', dest='caos_nivel', choices=sorted(config.CAOS), default='estandar',
                     help='estandar (una falla cada pocos segundos) o leve (una cada 2 a 3 minutos)')
     ap.add_argument('--reanudar', action='store_true',

@@ -36,7 +36,6 @@ Uso
   python cerebro_sintetico.py --caos 1              caos estandar: cortes de EEG, parpadeos, canal despegado
 """
 import argparse
-import json
 import threading
 import time
 
@@ -94,6 +93,9 @@ class Cerebro:
         self.n_err = self.n_ok = 0
         self.caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
                      if getattr(a, 'caos', None) is not None else None)
+        # el reloj del caos arranca con la senal del lazo (marcador bloque:LAZO_ESTATICO), o ya
+        # desde el arranque con --caos-desde calibracion
+        self.t0_caos = self.t0_sesion if getattr(a, 'caos_desde', 'lazo') == 'calibracion' else None
         self._canal_caos = None                  # para avisar una vez por falla
         self.lock = threading.Lock()
         n = len(CH)
@@ -135,7 +137,13 @@ class Cerebro:
                         self._marcador(m[0], t)
             time.sleep(0.005)
 
+    def t_caos(self, t):
+        """Segundos del reloj del caos en t, o None si el caos todavia no empieza."""
+        return None if self.t0_caos is None else t - self.t0_caos
+
     def _marcador(self, txt, t):
+        if txt == config.m_bloque('LAZO_ESTATICO') and self.t0_caos is None:
+            self.t0_caos = t
         if txt == config.CUE_CERRAR:
             self.meta = 1
         elif txt == config.CUE_RELAJA:
@@ -201,9 +209,10 @@ class Cerebro:
                     vivos.append((t0, pl, w))
             self.eventos = vivos
         # parpadeos (con caos: rafagas)
-        t_caos = ts[-1] - self.t0_sesion
+        t_caos = self.t_caos(ts[-1])
+        caos = self.caos if t_caos is not None else None
         tasa = a.parpadeos
-        if self.caos and self.caos.activo('rafaga_parpadeos', t_caos):
+        if caos and caos.activo('rafaga_parpadeos', t_caos):
             tasa = self.caos.tasas['rafaga_parpadeos']['por_segundo']
         if self.rng.random() < tasa * n / FS:
             i0 = self.rng.integers(0, n)
@@ -213,7 +222,7 @@ class Cerebro:
         y = self.mezcla @ x
         y += self._cabeza_e_imu(ts)                          # el movimiento de cabeza ensucia el EEG
         # caos: un canal se despega (plano, o ruido grande con mucha red electrica)
-        canal = self.caos.activo('canal', t_caos) if self.caos else None
+        canal = caos.activo('canal', t_caos) if caos else None
         if canal:
             y[IDX[canal[2]]] = (0.0 if canal[3] == 'plano'
                                 else 300.0 * self.rng.normal(size=n) + 200.0 * np.sin(fase))
@@ -303,7 +312,7 @@ class Salida:
 # para comparar decoders/detectores o elegir parametros antes del domingo.
 def _args(**k):
     a = argparse.Namespace(erd=0.25, errp=6.0, n1=4.0, fatiga=0.0, parpadeos=0.15, cabeza=0.0,
-                           perdidas_bt=0.0, semilla=0, caos=None)
+                           perdidas_bt=0.0, semilla=0, caos=None, caos_desde='calibracion')
     a.__dict__.update(k)
     return a
 
@@ -381,6 +390,8 @@ def main():
     ap.add_argument('--banco', action='store_true', help='evalua decoder y detector offline y sale')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
                     help='inyecta caos: cortes de EEG, rafagas de parpadeos, canal despegado')
+    ap.add_argument('--caos-desde', dest='caos_desde', choices=['lazo', 'calibracion'], default='lazo',
+                    help='el caos empieza al llegar la senal del lazo (bloque:LAZO_ESTATICO) o desde el arranque')
     ap.add_argument('--caos-nivel', dest='caos_nivel', choices=sorted(config.CAOS), default='estandar',
                     help='estandar o leve (una falla cada 2 a 3 minutos)')
     a = ap.parse_args()
@@ -391,10 +402,6 @@ def main():
     salida = Salida(a)
     threading.Thread(target=cer.escuchar, daemon=True).start()
     config.RESULTADOS.mkdir(exist_ok=True)
-    rng = np.random.default_rng(a.semilla)
-    config.IMPEDANCIAS_JSON.write_text(json.dumps(
-        {'t': time.time(), 'simulada': True,
-         'kohm': {c: float(rng.uniform(4, 14)) for c in CH}}, indent=1))
     print(f'Cerebro sintetico ({a.formato}): {len(CH)} canales de EEG e IMU a {FS} Hz; ERD {a.erd}, '
           f'ErrP {a.errp} uV, fatiga {a.fatiga}. Ctrl+C para parar.', flush=True)
     t_ult, t_rep = local_clock(), time.time()
@@ -402,7 +409,8 @@ def main():
     try:
         while True:
             ahora = local_clock()
-            corte = cer.caos.activo('corte_eeg', ahora - cer.t0_sesion) if cer.caos else None
+            t_caos = cer.t_caos(ahora)
+            corte = cer.caos.activo('corte_eeg', t_caos) if cer.caos and t_caos is not None else None
             if corte:                              # caos: el EEG deja de llegar
                 if corte_previo is None:
                     recrear = corte[1] >= cer.caos.tasas['corte_eeg']['recrear_desde_s']

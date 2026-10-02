@@ -722,6 +722,25 @@ def exactitud_balanceada(y, pred):
     return float(0.5 * ((pred[y == 1] == 1).mean() + (pred[y == 0] == 0).mean()))
 
 
+def evaluar_latencias(latencias_ms):
+    """CP1 de la ortesis: latencias del ACK (nan = ACK perdido) contra tres umbrales robustos
+    de config. Devuelve {'ok', 'mad_ms', 'p95_ms', 'perdidos', 'texto'}."""
+    lat = np.asarray(latencias_ms, dtype=float)
+    vivas = lat[np.isfinite(lat)]
+    perdidos = 1.0 - vivas.size / max(lat.size, 1)
+    if vivas.size < 2:
+        return {'ok': False, 'mad_ms': float('nan'), 'p95_ms': float('nan'), 'perdidos': perdidos,
+                'texto': f'sin ACK suficientes ({vivas.size} de {lat.size})'}
+    mediana = float(np.median(vivas))
+    mad = float(np.median(np.abs(vivas - mediana)))
+    p95 = float(np.quantile(vivas, 0.95))
+    ok = mad <= config.CP1_MAD_MAX_MS and p95 <= config.CP1_P95_MAX_MS and perdidos <= config.CP1_ACK_PERDIDOS_MAX
+    texto = (f'latencia ACK mediana {mediana:.1f} ms, MAD {mad:.1f} (max {config.CP1_MAD_MAX_MS:.0f}), '
+             f'p95 {p95:.1f} (max {config.CP1_P95_MAX_MS:.0f}), ACK perdidos {100 * perdidos:.0f} % '
+             f'(max {100 * config.CP1_ACK_PERDIDOS_MAX:.0f})')
+    return {'ok': ok, 'mad_ms': mad, 'p95_ms': p95, 'perdidos': perdidos, 'texto': texto}
+
+
 def intervalo_error(errores, nivel=0.90, tam_ensayo=config.PASOS_ENSAYO, n_boot=2000, semilla=0):
     """Intervalo bootstrap de una tasa de error del lazo, remuestreando ENSAYOS (bloques de
     `tam_ensayo` pasos con la misma meta) y no pasos sueltos: los errores de un ensayo estan

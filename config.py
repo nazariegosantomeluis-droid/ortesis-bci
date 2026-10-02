@@ -111,8 +111,13 @@ PASO_VISIBLE = 0.08          # fraccion del rango que el piloto percibe (medirlo
 PASO_MAX  = 0.20
 
 # ============================ Umbrales go / no go ============================
-LATENCIA_JITTER_MAX_MS = 15.0   # checkpoint 1
-IMPEDANCIA_MAX_KOHM = 20.0      # checkpoint 1 (Cyton con gel)
+# checkpoint 1: el Unicorn no mide impedancias; se revisa la calidad de senal por canal y la
+# latencia del ACK con metricas robustas (un pico aislado no tumba el CP1, un jitter tipico si)
+CP1_MOVIMIENTOS = 40
+CP1_MAD_MAX_MS = 15.0          # desviacion absoluta mediana de la latencia
+CP1_P95_MAX_MS = 60.0          # percentil 95 de la latencia
+CP1_ACK_PERDIDOS_MAX = 0.10     # fraccion de movimientos sin ACK
+IMPEDANCIA_MAX_KOHM = 20.0      # solo para puente_lsl.py --placa cyton --impedancias
 MI_EXACTITUD_MIN = 0.70         # checkpoint 2
 BA_MIN           = 0.75         # checkpoint 3
 ESPEC_MIN        = 0.90
