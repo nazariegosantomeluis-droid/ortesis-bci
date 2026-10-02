@@ -14,7 +14,7 @@ El casco de la demo es un **g.tec Unicorn Hybrid Black**: 8 canales de EEG a 250
 | Acelerómetro y giroscopio | Rechazo de artefactos por movimiento de cabeza |
 | Contador de muestras | Hora de cada muestra y pérdidas de Bluetooth |
 
-La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. **En curso:** `puente_lsl.py --placa unicorn`, `verificar_unicorn.py`, la selección de canales en la calibración y el rechazo por movimiento de cabeza todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
+La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. **En curso:** la selección de canales en la calibración, el CP1 sin impedancias y el rechazo por movimiento de cabeza todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
 
 El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defecto: `puente_lsl.py` o el gemelo; flujos `EEG` e `IMU`) o `unicornlsl` (la app de g.tec: un flujo de tipo `Data` con 17 canales, que se resuelve por tipo o con `--eeg-nombre <nombre o número de serie>`). Solo una aplicación puede conectarse al casco a la vez.
 
@@ -24,7 +24,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 32/32 pruebas pasaron
+python pruebas.py                    # debe decir 33/33 pruebas pasaron
 ```
 
 ## Archivos
@@ -36,7 +36,8 @@ python pruebas.py                    # debe decir 32/32 pruebas pasaron
 | `simulador_lazo.py` | Piloto sintético para probar y comparar agentes sin casco. |
 | `orquestador.py` | Máquina de estados, calibraciones, checkpoints go/no go, lazo, CSV. Backends `sim` y `real`. |
 | `hardware.py` | EEG por LSL, órtesis por USB (o simulada), decoder de MI con recentrado y detector de ErrP calibrado. |
-| `puente_lsl.py` | BrainFlow → LSL: placa sintética, Cyton o playback. Mide impedancias. |
+| `puente_lsl.py` | BrainFlow → LSL: Unicorn (`--placa unicorn --serie <num>`), placa sintética, playback o Cyton. Publica `EEG` e `IMU` con la hora de cada muestra reconstruida por contador, y registra los huecos de Bluetooth. |
+| `verificar_unicorn.py` | Con el casco puesto: comprueba orden de canales, unidades, contador, IMU, batería y validez, y dice qué fuente usar. |
 | `cerebro_sintetico.py` | **Gemelo digital del piloto**: publica EEG por LSL que *reacciona* al lazo (ERD al imaginar, ErrP cuando la órtesis se equivoca). Reemplaza al casco para ensayar. |
 | `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector) y el retroceso de las reconexiones. |
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
@@ -60,7 +61,7 @@ python pruebas.py                    # debe decir 32/32 pruebas pasaron
 - **Recentrado riemanniano no supervisado.** El decoder de MI se re-centra solo con cada ventana. En la prueba, tras mezclar canales pasa de 50 % a 98 % de exactitud sin recalibrar.
 - **Detector de ErrP de dos vistas fusionadas** (temporal con LDA encogido + geométrica de Riemann), con probabilidades calibradas, umbral de Neyman-Pearson (especificidad ≥ 0.90) y detector de rareza para épocas fuera de distribución.
 - **Calibración secuencial.** Se detiene sola cuando el intervalo de confianza de la exactitud ya decide el checkpoint, y ahorra minutos de piloto.
-- **Impedancias reales del Cyton** (lead-off a 31.25 Hz) para el checkpoint 1.
+- **Hora por contador.** La hora de cada muestra se reconstruye con el contador del casco, sin el jitter de llegada por Bluetooth; una pérdida queda como un hueco visible.
 
 Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simulador_lazo.py --semillas 30`; medidos en Windows 11 con Python 3.11 el 2 de octubre de 2026):
 
@@ -182,9 +183,20 @@ python tablero.py  &  python orquestador.py sim # ver el tablero en vivo
 
 ## El día de la demo (en este orden)
 
+**0. Verificar el casco (una vez, menos de 5 minutos).** El Unicorn llega el mismo día, así que hay cosas que solo se pudieron probar con el gemelo. Con el casco puesto y emparejado con **su dongle** (no con el Bluetooth de la laptop):
+
+```bash
+python verificar_unicorn.py brainflow            # con la Unicorn Suite cerrada
+python verificar_unicorn.py lsl                  # solo si lo anterior falla: con la app UnicornLSL abierta y en Start
+```
+
+Guía de unos 50 segundos (quieto, parpadear, ojos cerrados, mover la cabeza). Comprueba el orden de los canales, las unidades del EEG, que el contador avance de 1 en 1, que el acelerómetro mida ~1 g, la batería y la validez, y termina con un **veredicto** que dice qué comando usar. Solo una aplicación puede conectarse al casco a la vez.
+
+**1. Sesión**, con BrainFlow como fuente principal:
+
 ```bash
 # terminal 1: casco -> LSL (y graba crudo para el plan B)
-python puente_lsl.py --placa cyton --puerto COM3 --impedancias --grabar resultados/sesion_cyton.csv
+python puente_lsl.py --placa unicorn --grabar resultados/sesion_unicorn.csv
 # LabRecorder: seleccionar todos los flujos y grabar XDF
 # terminal 2
 python tablero.py
@@ -192,8 +204,12 @@ python tablero.py
 python orquestador.py real --puerto COM4
 ```
 
+Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
+
 Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`.
-**Plan B** (checkpoint 3 falla): `python puente_lsl.py --placa playback --archivo resultados/sesion_cyton.csv` y correr el orquestador igual.
+**Plan B** (checkpoint 3 falla): `python puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv` y correr el orquestador igual.
+
+El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
 **Antes de empezar:** cierra cualquier `cerebro_sintetico.py` o `puente_lsl.py` que haya quedado abierto en otra terminal. Debe haber un solo flujo `EEG` en la red; `python ver_flujos.py` lo muestra.
 

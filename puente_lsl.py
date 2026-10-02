@@ -1,15 +1,19 @@
-"""Puente BrainFlow -> LSL: publica el flujo 'EEG' del contrato.
+"""Puente BrainFlow -> LSL: publica los flujos 'EEG' e 'IMU' del contrato.
 
 Uso
-  python puente_lsl.py                                  placa sintetica (sin casco)
-  python puente_lsl.py --placa cyton --puerto COM3      casco real
-  python puente_lsl.py --placa cyton --puerto COM3 --grabar resultados/sesion.csv
+  python puente_lsl.py --placa unicorn                          casco real (g.tec Unicorn Hybrid Black)
+  python puente_lsl.py --placa unicorn --serie UN-2023.01.01    si hay varios cascos cerca
+  python puente_lsl.py --placa unicorn --grabar resultados/sesion.csv
+  python puente_lsl.py                                          placa sintetica (sin casco)
   python puente_lsl.py --placa playback --archivo resultados/sesion.csv   (plan B)
-  python puente_lsl.py --placa cyton --puerto COM3 --impedancias   mide antes de transmitir
+  python puente_lsl.py --placa cyton --puerto COM3 [--impedancias]        (hardware anterior)
 
-Impedancias: el Cyton inyecta 6 nA a 31.25 Hz en cada electrodo (comando
-z<canal>01Z); la amplitud de esa senal da la impedancia de contacto. Se
-guardan en resultados/impedancias.json y el orquestador las usa en el CP1.
+Unicorn: el casco se empareja con SU dongle (no con el Bluetooth de la laptop) y solo una
+aplicacion puede conectarse a la vez (cierra la Unicorn Suite). No mide impedancias: el CP1
+usa la calidad de senal por canal. Antes de la demo: python verificar_unicorn.py brainflow.
+
+La hora de cada muestra se reconstruye con el contador de la placa (salud.RelojContador) y
+cada 30 s se imprime el registro de huecos (perdidas de Bluetooth) y la bateria.
 """
 import argparse
 import json
@@ -55,6 +59,35 @@ def reconectar(board, retroceso, grabar=None):
                 pass
 
 
+def plan_placa(placa, serie=None, puerto=None, archivo=None, maestra='unicorn'):
+    """Todo lo que el puente necesita saber de una placa, sacado del descriptor de BrainFlow
+    (no conecta nada): identificador, parametros y en que fila esta cada cosa."""
+    ids = {'sintetica': BoardIds.SYNTHETIC_BOARD.value, 'cyton': BoardIds.CYTON_BOARD.value,
+           'unicorn': BoardIds.UNICORN_BOARD.value}
+    params, real = BrainFlowInputParams(), placa
+    if placa == 'playback':
+        if not archivo:
+            raise SystemExit('Falta --archivo para playback.')
+        board_id, real = BoardIds.PLAYBACK_FILE_BOARD.value, maestra
+        params.file, params.master_board = archivo, ids[maestra]
+    else:
+        board_id = ids[placa]
+        if placa == 'cyton':
+            if not puerto:
+                raise SystemExit('Falta --puerto (Administrador de dispositivos -> Puertos COM).')
+            params.serial_port = puerto
+        if placa == 'unicorn' and serie:
+            params.serial_number = serie          # opcional: solo hace falta con varios cascos cerca
+    d = BoardShim.get_board_descr(ids[real])
+    acc, gyr, otros = d.get('accel_channels'), d.get('gyro_channels'), d.get('other_channels')
+    return {'board_id': board_id, 'params': params, 'placa': real, 'fs': d['sampling_rate'],
+            'eeg': d['eeg_channels'][:8], 'imu': acc + gyr if acc and gyr else None,
+            'bateria': d.get('battery_channel'), 'contador': d['package_num_channel'],
+            'validez': otros[0] if real == 'unicorn' and otros else None,
+            # el contador del Unicorn no da la vuelta; el del Cyton y el de la placa sintetica, cada 256
+            'modulo': None if real == 'unicorn' else 256}
+
+
 def medir_impedancias(board, eeg, fs, simulada=False):
     """kOhm por canal. Formula del lead-off del ADS1299: Z = sqrt(2)*Vrms/6nA - 2.2 kOhm (serie)."""
     res = {}
@@ -82,55 +115,45 @@ def medir_impedancias(board, eeg, fs, simulada=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--placa', choices=['sintetica', 'cyton', 'playback'], default='sintetica')
+    ap.add_argument('--placa', choices=['sintetica', 'unicorn', 'cyton', 'playback'], default='sintetica')
+    ap.add_argument('--serie', help='numero de serie del Unicorn (UN-XXXX.XX.XX); opcional con un solo casco')
     ap.add_argument('--puerto', help='puerto del dongle del Cyton (p. ej. COM3)')
     ap.add_argument('--archivo', help='archivo de BrainFlow para --placa playback')
+    ap.add_argument('--maestra', choices=['unicorn', 'cyton'], default='unicorn',
+                    help='placa con la que se grabo el archivo de playback')
     ap.add_argument('--grabar', help='ademas guarda los datos crudos en este archivo (para playback)')
-    ap.add_argument('--impedancias', action='store_true', help='mide impedancias antes de transmitir')
+    ap.add_argument('--impedancias', action='store_true', help='mide impedancias antes de transmitir (solo Cyton)')
     a = ap.parse_args()
 
     BoardShim.disable_board_logger()
-    params = BrainFlowInputParams()
-    if a.placa == 'sintetica':
-        board_id = BoardIds.SYNTHETIC_BOARD.value
-    elif a.placa == 'cyton':
-        if not a.puerto:
-            raise SystemExit('Falta --puerto (Administrador de dispositivos -> Puertos COM).')
-        board_id = BoardIds.CYTON_BOARD.value
-        params.serial_port = a.puerto
-    else:
-        if not a.archivo:
-            raise SystemExit('Falta --archivo para playback.')
-        board_id = BoardIds.PLAYBACK_FILE_BOARD.value
-        params.file = a.archivo
-        params.master_board = BoardIds.CYTON_BOARD.value
-
-    datos_id = params.master_board if a.placa == 'playback' else board_id
-    eeg = BoardShim.get_eeg_channels(datos_id)[:8]
-    fs = BoardShim.get_sampling_rate(datos_id)
+    plan = plan_placa(a.placa, a.serie, a.puerto, a.archivo, a.maestra)
+    eeg, fs = plan['eeg'], plan['fs']
     if fs != config.FLUJOS['EEG'][2]:
         print(f'Aviso: la placa muestrea a {fs} Hz y el contrato dice {config.FLUJOS["EEG"][2]} Hz')
 
-    board = BoardShim(board_id, params)
+    board = BoardShim(plan['board_id'], plan['params'])
     board.prepare_session()
     if a.placa == 'playback':
         board.config_board('loopback_true')
     board.start_stream(45000, f'file://{a.grabar}:w' if a.grabar else '')
-    if a.impedancias and a.placa != 'playback':
+    if a.impedancias and plan['placa'] == 'unicorn':
+        print('El Unicorn no mide impedancias: el CP1 usa la calidad de senal por canal.')
+    elif a.impedancias and a.placa != 'playback':
         medir_impedancias(board, eeg, fs, simulada=(a.placa == 'sintetica'))
         board.get_board_data()                  # descarta lo medido con la corriente de prueba
     outlet = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
-    print(f'Publicando EEG ({a.placa}, {len(eeg)} canales, {fs} Hz). Ctrl+C para parar.')
-    # registro de huecos: paquetes perdidos (contador de paquetes de la placa) y silencios de
-    # llegada. Sirve para medir el Bluetooth con el casco real.
-    canal_paquete = BoardShim.get_package_num_channel(datos_id)
-    huecos = RegistroHuecos(fs)
+    salida_imu = StreamOutlet(config.crear_info('IMU'), chunk_size=10) if plan['imu'] else None
+    print(f"Publicando EEG{' e IMU' if salida_imu else ''} ({plan['placa']}, {len(eeg)} canales, {fs} Hz). "
+          f'Ctrl+C para parar.', flush=True)
+    # registro de huecos: muestras perdidas (contador de la placa) y silencios de llegada.
+    # Sirve para medir el Bluetooth con el casco real.
+    huecos = RegistroHuecos(fs, modulo=plan['modulo'])
     # la hora de cada muestra se reconstruye con el contador de la placa (sin el jitter de los
     # bloques de llegada); una perdida queda como un hueco en la hora. El orquestador no usa
     # el suavizado de marcas de LSL: confia en esta hora.
-    reloj = RelojContador(fs, modulo=256)
+    reloj = RelojContador(fs, modulo=plan['modulo'])
 
-    n_total, t_ini = 0, time.time()
+    n_total, t_ini, bateria, invalidas = 0, time.time(), None, 0
     t_dato, retroceso = time.time(), Retroceso()
     try:
         while True:
@@ -139,17 +162,25 @@ def main():
             except Exception:                   # la placa dejo de responder
                 d = np.empty((0, 0))
             if d.shape[1]:
-                horas = reloj.estampar(d[canal_paquete], local_clock())
-                outlet.push_chunk(d[eeg, :].T.tolist(), list(horas))
+                horas = list(reloj.estampar(d[plan['contador']], local_clock()))
+                outlet.push_chunk(d[eeg, :].T.tolist(), horas)
+                if salida_imu:
+                    salida_imu.push_chunk(d[plan['imu'], :].T.tolist(), horas)
+                if plan['bateria'] is not None:
+                    bateria = float(d[plan['bateria'], -1])
+                if plan['validez'] is not None:
+                    invalidas += int((d[plan['validez']] != 1).sum())
                 n_total += d.shape[1]
                 t_dato = time.time()
-                huecos.bloque(d[canal_paquete], t_dato)
+                huecos.bloque(d[plan['contador']], t_dato)
             elif time.time() - t_dato > SILENCIO_MAX_S:
                 reconectar(board, retroceso, a.grabar)
                 t_dato = time.time()
                 huecos.reiniciar_contador()
             if huecos.toca_resumen(time.time()):
-                print(huecos.resumen(time.time()), flush=True)
+                print(huecos.resumen(time.time())
+                      + (f' | bateria {bateria:.0f} %' if bateria is not None else '')
+                      + (f' | {invalidas} muestras no validas' if invalidas else ''), flush=True)
             if time.time() - t_ini > 5:
                 print(f'  {n_total / (time.time() - t_ini):.0f} muestras/s')
                 n_total, t_ini = 0, time.time()

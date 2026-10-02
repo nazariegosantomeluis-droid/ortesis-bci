@@ -933,7 +933,7 @@ def entrada_unicorn():
                     if ventana_mi is not None:
                         break
                     time.sleep(0.5)
-                x, t = eeg._crudo(6.0)
+                x, t = eeg._crudo(18.0)            # todo lo grabado: asi siempre hay algun hueco
                 giro = eeg.movimiento(t[-1] - 10.0, t[-1])
                 retraso = local_clock() - t[-1]
                 return x, t, l, ventana_mi, giro, retraso
@@ -988,9 +988,13 @@ def puente_hora_por_contador():
     try:
         s = resolve_byprop('name', 'EEG', timeout=20)
         assert s, 'no aparecio el flujo EEG del puente'
+        s2 = resolve_byprop('name', 'IMU', timeout=10)
+        assert s2 and s2[0].channel_count() == 6, 'el puente debe publicar la IMU en su propio flujo'
         e, ts, t_fin = StreamInlet(s[0], processing_flags=proc_clocksync), [], time.time() + 6
+        imu, ti = StreamInlet(s2[0], processing_flags=proc_clocksync), []
         while time.time() < t_fin:
             ts.extend(e.pull_chunk(timeout=0.05)[1])
+            ti.extend(imu.pull_chunk(timeout=0.0)[1])
         retraso = local_clock() - ts[-1]
     finally:
         g.terminate()
@@ -998,7 +1002,53 @@ def puente_hora_por_contador():
     d = np.diff(ts)[250:]
     assert len(ts) > 1000 and np.abs(d - 0.004).max() < 0.001, np.abs(d - 0.004).max()
     assert -0.05 < retraso < 0.3, retraso
+    assert len(ti) > 1000 and np.abs(np.diff(ti)[250:] - 0.004).max() < 0.001      # la IMU, con la misma hora
+    # el plan de cada placa sale del descriptor de BrainFlow (sin conectar nada)
+    import puente_lsl
+    u = puente_lsl.plan_placa('unicorn', serie='UN-2023.01.01')
+    assert u['params'].serial_number == 'UN-2023.01.01' and u['fs'] == 250 and u['modulo'] is None
+    assert (u['eeg'], u['imu'], u['bateria'], u['contador'], u['validez']) == \
+        (list(range(8)), list(range(8, 14)), 14, 15, 16), u
+    assert puente_lsl.plan_placa('unicorn')['params'].serial_number == ''       # la serie es opcional
+    c = puente_lsl.plan_placa('cyton', puerto='COM3')
+    assert c['imu'] is None and c['modulo'] == 256 and len(c['eeg']) == 8
+    assert puente_lsl.plan_placa('playback', archivo='x.csv')['modulo'] is None  # se reproduce un Unicorn
     return f'{len(ts)} muestras con paso de 4 ms exacto (desvio maximo {1000 * np.abs(d - 0.004).max():.2f} ms)'
+
+
+@prueba
+def verificar_unicorn():
+    """verificar_unicorn.py comprueba lo no verificado del casco (orden de canales, unidades,
+    contador, acelerometro, bateria, validez) y da un veredicto. Aqui se prueba con el gemelo en
+    formato UnicornLSL, con un mapa de canales equivocado y con la placa sintetica de BrainFlow."""
+    import verificar_unicorn as vu
+    g = subprocess.Popen([sys.executable, 'cerebro_sintetico.py', '--formato', 'unicornlsl', '--nombre-lsl',
+                          'UN-PRUEBA', '--cabeza', '0.5', '--parpadeos', '0.8'], cwd=config.RAIZ,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        datos = vu.leer_lsl(nombre=None, tipo='Data', fases=vu.fases(auto=True), salida=lambda *a: None)
+    finally:
+        g.terminate()
+        g.wait()
+    assert datos['nombre'] == 'UN-PRUEBA' and datos['x'].shape[0] == 17
+    res = vu.evaluar(datos)
+    estados = {r['clave']: r['estado'] for r in res}
+    for critica in vu.CRITICAS:
+        assert estados[critica] == 'OK', (critica, [r for r in res if r['clave'] == critica])
+    assert estados['alfa_occipital'] == 'OK' and estados['parpadeo_fz'] in ('OK', 'AVISO')
+    texto = vu.veredicto({'lsl': res}, datos['nombre'])
+    assert '--fuente unicornlsl' in texto and 'UN-PRUEBA' in texto, texto
+    # con el orden de canales equivocado (contador y bateria cambiados) lo dice
+    mal = dict(datos, mapa=dict(datos['mapa'], contador=14, bateria=15))
+    mal_res = {r['clave']: r for r in vu.evaluar(mal)}
+    assert mal_res['contador']['estado'] == 'FALLA' and 'canal 15' in mal_res['contador']['texto'], mal_res['contador']
+    assert 'NO uses' in vu.veredicto({'lsl': list(mal_res.values())}, 'UN-PRUEBA')
+    # el camino de BrainFlow corre de punta a punta con la placa sintetica (que NO es un Unicorn: debe fallar algo)
+    sint = vu.leer_brainflow(serie=None, fases=vu.fases(auto=True)[:1], salida=lambda *a: None, placa='sintetica')
+    sres = vu.evaluar(sint)
+    assert sint['x'].shape[1] > 500 and any(r['estado'] == 'FALLA' for r in sres)
+    assert vu.veredicto({'brainflow': res}, None).count('puente_lsl.py --placa unicorn') == 1
+    return 'gemelo en formato UnicornLSL: criticas en OK y veredicto; detecta un mapa de canales equivocado'
 
 
 @prueba
@@ -1291,6 +1341,7 @@ def main():
               instantanea_estado, reanudar,
               modelos_hardware, senal_valida,
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, entrada_unicorn,
+              verificar_unicorn,
               puente_hora_por_contador, registro_huecos, reloj_contador,
               puente_reconecta,
               cerebro_sintetico, gemelo_unicorn):

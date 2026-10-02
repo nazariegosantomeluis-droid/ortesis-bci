@@ -221,7 +221,14 @@ class EntradaEEG:
         if self.fuente['imu'] is not None or self.fuente['id'] != 'puente' or self.nombre != self.fuente['nombre']:
             return None
         s = resolve_byprop('name', 'IMU', timeout=1.0)
-        return self._abrir(max(s, key=lambda x: x.created_at())) if s else None
+        if not s:
+            return None
+        try:                                      # abrirla ya: la lectura posterior no espera
+            imu = self._abrir(max(s, key=lambda x: x.created_at()))
+            imu.open_stream(timeout=3.0)
+            return imu
+        except Exception:
+            return None
 
     def _reconectar(self):
         """Un intento de volver a resolver el flujo; los intentos se espacian con retroceso."""

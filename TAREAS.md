@@ -40,7 +40,7 @@ Orden de los 17 canales del flujo combinado, unidades del EEG, contador de 1 en 
 - [x] 4a. `EntradaEEG` configurable (fuente `puente` o `unicornlsl`, nombre o tipo, canales por índice, hora por contador, IMU); sin suavizado de marcas de LSL; la ventana de MI tolera pérdidas chicas. El puente ya estampa por contador.
 - [ ] 4b. Selección de canales por validación cruzada en la calibración (papel contra los 8), registrada.
 - [ ] 4c. Pérdidas de Bluetooth como tipo de caos; repetir las mediciones de caos con el montaje nuevo.
-- [ ] 5. `puente_lsl.py --placa unicorn --serie <num>` con flujo `IMU`; `verificar_unicorn.py`.
+- [x] 5. `puente_lsl.py --placa unicorn --serie <num>` con flujo `IMU`; `verificar_unicorn.py` (probados con la placa sintética y con el gemelo; **nunca con el casco**).
 - [ ] 6. CP1 robusto y sin impedancias.
 - [ ] 7. Rechazo por movimiento de cabeza.
 - [ ] 8. Brecha calibración → lazo (reportar causa) y bug de `P_hat`.
