@@ -31,6 +31,16 @@ PAPELES = {
 }
 
 
+def candidatos(modelo):
+    """Configuraciones entre las que elige la calibracion real por validacion cruzada (anidada
+    para reportar): los canales del papel contra los 8 y, en el detector, dos contra tres vistas."""
+    todos = list(range(len(CANALES_EEG)))
+    if modelo == 'decoder':
+        return {'C3/Cz/C4': indices('mi'), '8 canales': todos}
+    return {f'{nc}, {nv} vistas': (c, nv) for nc, c in (('Fz/Cz/Pz', indices('errp')), ('8 canales', todos))
+            for nv in ('dos', 'tres')}
+
+
 def indices(canales):
     """Posiciones en CANALES_EEG de un papel ('mi', 'errp'...) o de una lista de electrodos."""
     return [CANALES_EEG.index(c) for c in (PAPELES[canales] if isinstance(canales, str) else canales)]

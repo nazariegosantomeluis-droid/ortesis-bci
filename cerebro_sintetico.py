@@ -59,6 +59,7 @@ W_ERRP = np.array([0.90, 0.40, 1.00, 0.40, 0.60, 0.10, 0.05, 0.10])      # front
 W_VISUAL = np.array([0.05, 0.05, 0.10, 0.05, 0.30, 0.90, 1.00, 0.90])    # occipital (PO7, Oz, PO8)
 W_ALFA = np.array([0.10, 0.25, 0.25, 0.25, 0.60, 0.90, 1.00, 0.90])      # occipital
 W_PARPADEO = np.array([1.00, 0.10, 0.20, 0.10, 0.05, 0.00, 0.00, 0.00])  # frontal
+W_THETA = np.array([1.00, 0.25, 0.80, 0.25, 0.40, 0.05, 0.05, 0.05])     # theta frontal de la linea media
 
 
 def plantilla_errp(error, amp_uv, rng):
@@ -80,6 +81,16 @@ def plantilla_visual(amp_uv, rng):
     a = amp_uv * rng.uniform(0.8, 1.2)
     g = lambda mu, sd: np.exp(-((t - mu - lat) ** 2) / (2 * sd ** 2))
     return a * (0.4 * g(0.11, 0.02) - 1.0 * g(0.17, 0.025))
+
+
+def plantilla_theta(amp_uv, rng):
+    """Estallido theta (~6 Hz) tras un error, maximo hacia 400 ms y SIN fase fija: sube la
+    potencia en 4-8 Hz pero el promedio de epocas casi no lo ve. La literatura reporta un
+    aumento de la theta frontal de la linea media tras los errores; aqui solo sirve para
+    verificar que la vista theta del detector funciona (el efecto lo programamos nosotros)."""
+    t = np.arange(int(FS)) / FS
+    f, fase = rng.uniform(5.0, 7.0), rng.uniform(0, 2 * np.pi)
+    return amp_uv * np.exp(-((t - 0.4) ** 2) / (2 * 0.1 ** 2)) * np.sin(2 * np.pi * f * t + fase)
 
 
 class Cerebro:
@@ -160,6 +171,8 @@ class Cerebro:
         with self.lock:
             self.eventos.append((t, plantilla_errp(error, self.a.errp, self.rng), W_ERRP))
             self.eventos.append((t, plantilla_visual(self.a.n1, self.rng_cuerpo), W_VISUAL))
+            if error and getattr(self.a, 'theta', 0.0) > 0:
+                self.eventos.append((t, plantilla_theta(self.a.theta, self.rng_cuerpo), W_THETA))
 
     # ------------------------------------------------------------ genera EEG
     def _banda(self, clave, sos, k, n):
@@ -311,7 +324,7 @@ class Salida:
 # Banco de pruebas offline: genera sesiones completas sin LSL y en segundos,
 # para comparar decoders/detectores o elegir parametros antes del domingo.
 def _args(**k):
-    a = argparse.Namespace(erd=0.25, errp=6.0, n1=4.0, fatiga=0.0, parpadeos=0.15, cabeza=0.0,
+    a = argparse.Namespace(erd=0.25, errp=6.0, n1=4.0, theta=3.0, fatiga=0.0, parpadeos=0.15, cabeza=0.0,
                            perdidas_bt=0.0, semilla=0, caos=None, caos_desde='calibracion')
     a.__dict__.update(k)
     return a
@@ -375,6 +388,7 @@ def main():
     ap.add_argument('--erd', type=float, default=0.25, help='profundidad del ERD (0-1); mas = piloto mas facil')
     ap.add_argument('--errp', type=float, default=6.0, help='amplitud del ErrP en uV')
     ap.add_argument('--n1', type=float, default=4.0, help='amplitud de la N1 visual occipital en uV')
+    ap.add_argument('--theta', type=float, default=3.0, help='amplitud del estallido theta tras un error, en uV')
     ap.add_argument('--fatiga', type=float, default=0.0, help='0 = nunca se cansa, 1 = mucho')
     ap.add_argument('--parpadeos', type=float, default=0.15, help='parpadeos por segundo')
     ap.add_argument('--cabeza', type=float, default=0.02, help='movimientos de cabeza por segundo')

@@ -680,6 +680,39 @@ def detector_umbral_anidado():
 
 
 @prueba
+def seleccion_canales_vistas():
+    """La calibracion elige por validacion cruzada (anidada para reportar) entre los canales del
+    papel y los 8, y entre dos y tres vistas del detector (la tercera: potencia theta en Fz y Cz),
+    y registra la eleccion. Datos sinteticos donde se sabe cual deberia ganar."""
+    import hardware as hw
+    rng = np.random.default_rng(3)
+    todos = list(range(8))
+    # decoder: la diferencia entre clases esta en Oz, fuera de C3/Cz/C4 -> deben ganar los 8
+    y = np.repeat([0, 1], 30)
+    X = rng.normal(size=(60, 8, 500)); X[y == 1, 6] *= 2.0
+    dec = hw.DecoderIM().ajustar(X, y, candidatos={'C3/Cz/C4': config.indices('mi'), '8 canales': todos})
+    assert dec.eleccion == '8 canales' and dec.ba > 0.8, (dec.eleccion, dec.ba, dec.puntajes)
+    assert dec.phi(X[0]).shape == dec.w0.shape
+    # decoder: diferencia en C3 -> los 3 motores bastan (y gana el de menos canales si empatan)
+    X2 = rng.normal(size=(60, 8, 500)); X2[y == 1, 1] *= 2.0
+    dec2 = hw.DecoderIM().ajustar(X2, y, candidatos={'C3/Cz/C4': config.indices('mi'), '8 canales': todos})
+    assert dec2.ba > 0.8 and dec2.canales == (config.indices('mi') if dec2.eleccion == 'C3/Cz/C4' else todos)
+    # detector: el error solo deja un estallido theta sin fase fija (el promedio no lo ve) -> tres vistas
+    t = np.arange(250) / 250
+    ye = (rng.random(100) < 0.35).astype(int)
+    E = rng.normal(0, 3, size=(100, 8, 250))
+    for i in np.flatnonzero(ye):
+        burst = 6.0 * np.exp(-((t - 0.6) ** 2) / (2 * 0.1 ** 2)) * np.sin(2 * np.pi * 6 * t + rng.uniform(0, 2 * np.pi))
+        E[i, config.indices(['Fz', 'Cz'])] += burst
+    cand = {'dos vistas': (todos, 'dos'), 'tres vistas': (todos, 'tres')}
+    det = hw.DetectorErrP().ajustar(E, ye, candidatos=cand)
+    assert det.eleccion == 'tres vistas' and det.ba > 0.7, (det.eleccion, det.ba, det.puntajes)
+    assert 0 <= det.p_error(E[0]) <= 1 and set(det.puntajes) == set(cand)
+    return (f"decoder: {dec.eleccion} (BA {dec.ba:.2f}) y {dec2.eleccion} (BA {dec2.ba:.2f}); "
+            f"detector con theta: {det.eleccion} (BA {det.ba:.2f})")
+
+
+@prueba
 def calibracion_errp_fija():
     """La calibracion de ErrP usa siempre todas las epocas pedidas (120 por defecto): sin GO ni
     NO GO tempranos, que con pocos datos elegian estimados inflados por suerte."""
@@ -1341,6 +1374,9 @@ def cerebro_sintetico():
     dif = X[y == 1, config.CANALES_EEG.index('Cz')].mean(0) - X[y == 0, config.CANALES_EEG.index('Cz')].mean(0)
     pe, ne = dif[np.argmin(abs(t - 0.36))], dif[np.argmin(abs(t - 0.25))]
     det = hw.DetectorErrP().ajustar(X, y)
+    # tras un error, mas potencia theta (4-8 Hz) en Fz y Cz entre 200 y 600 ms
+    theta = hw._potencia_theta(X).mean(axis=1)
+    assert theta[y == 1].mean() > theta[y == 0].mean() + 0.15, (theta[y == 1].mean(), theta[y == 0].mean())
     # el ErrP es fronto-central: mayor en los canales de su papel (Fz, Cz, Pz) que en los occipitales
     amp = np.abs(X[y == 1].mean(0) - X[y == 0].mean(0)).max(axis=1)
     assert amp[config.indices('errp')].min() > amp[config.indices('visual')].max(), amp.round(1)
@@ -1491,7 +1527,7 @@ def lazo_real_caos():
 # tiempo real; --completa agrega las sesiones reales contra el gemelo.
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
-           'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']

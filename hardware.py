@@ -567,35 +567,63 @@ class DecoderIM:
     de modo que si cambia la impedancia de un electrodo o el piloto se relaja,
     el decoder se re-centra solo. Su logit lineal (w0 . phi + c0) es lo que
     corrige el agente.
+
+    Canales: ajustar() puede recibir candidatos ({'nombre': indices}) y elige por
+    validacion cruzada; la BA que reporta es anidada (la eleccion se repite dentro de
+    cada pliegue), asi elegir no la infla. La eleccion queda en self.eleccion.
     """
 
-    def __init__(self, paso_recentrado=0.02):
-        self.paso = paso_recentrado
+    def __init__(self, paso_recentrado=0.02, canales=None):
+        self.paso, self.canales = paso_recentrado, canales
 
     @staticmethod
     def _blanquear(C, M_isqrt):
         return M_isqrt @ C @ M_isqrt
 
-    def ajustar(self, X, y):
+    def _tangente(self, X):
+        """Rasgos sin etiquetas (covarianza, recentrado, espacio tangente) de todo X."""
         from pyriemann.estimation import Covariances
         from pyriemann.tangentspace import TangentSpace
         from pyriemann.utils.base import invsqrtm
         from pyriemann.utils.mean import mean_riemann
+        cov = Covariances('oas')
+        C = cov.fit_transform(X)
+        M = mean_riemann(C)
+        Mi = invsqrtm(M)
+        Cw = np.array([self._blanquear(c, Mi) for c in C])
+        ts = TangentSpace(metric='riemann').fit(Cw)
+        return cov, M, ts, ts.transform(Cw)
+
+    def ajustar(self, X, y, candidatos=None):
         from sklearn.linear_model import LogisticRegression
         from sklearn.model_selection import StratifiedKFold, cross_val_predict
-        self.cov = Covariances('oas')
-        C = self.cov.fit_transform(X)
-        self.M = mean_riemann(C)
-        Mi = invsqrtm(self.M)
-        Cw = np.array([self._blanquear(c, Mi) for c in C])
-        self.ts = TangentSpace(metric='riemann').fit(Cw)
-        Z = self.ts.transform(Cw)
+        todos = list(range(X.shape[1]))
+        if not candidatos:
+            candidatos = {'fijos': self.canales if self.canales is not None else todos}
         k = int(min(5, np.bincount(y).min()))
-        self.pred_cv = cross_val_predict(LogisticRegression(max_iter=2000), Z, y,
-                                         cv=StratifiedKFold(max(k, 2), shuffle=True, random_state=0))
+        pliegues = StratifiedKFold(max(k, 2), shuffle=True, random_state=0)
+        Z = {n: self._tangente(X[:, c])[3] for n, c in candidatos.items()}
+        lr = lambda: LogisticRegression(max_iter=2000)
+        ba_cv = lambda Zc, yc, cv: exactitud_balanceada(yc, cross_val_predict(lr(), Zc, yc, cv=cv))
+        nombres = list(candidatos)                # en empate gana el primero (el de menos canales)
+        if len(nombres) > 1:                      # eleccion repetida dentro de cada pliegue: BA sin sesgo
+            self.pred_cv = np.zeros(len(y), dtype=int)
+            for ent, pru in pliegues.split(Z[nombres[0]], y):
+                k_in = int(min(4, np.bincount(y[ent]).min()))
+                interno = StratifiedKFold(max(k_in, 2), shuffle=True, random_state=1)
+                mejor = max(nombres, key=lambda n: ba_cv(Z[n][ent], y[ent], interno))
+                self.pred_cv[pru] = lr().fit(Z[mejor][ent], y[ent]).predict(Z[mejor][pru])
+            self.puntajes = {n: ba_cv(Z[n], y, pliegues) for n in nombres}
+            self.eleccion = max(nombres, key=lambda n: self.puntajes[n])
+        else:
+            self.eleccion = nombres[0]
+            self.pred_cv = cross_val_predict(lr(), Z[self.eleccion], y, cv=pliegues)
+            self.puntajes = {self.eleccion: exactitud_balanceada(y, self.pred_cv)}
+        self.canales = list(candidatos[self.eleccion])
+        self.cov, self.M, self.ts, Zf = self._tangente(X[:, self.canales])
         self.y_cal = y
         self.ba = exactitud_balanceada(y, self.pred_cv)
-        clf = LogisticRegression(max_iter=2000).fit(Z, y)
+        clf = lr().fit(Zf, y)
         self.w0, self.c0 = clf.coef_[0].copy(), float(clf.intercept_[0])
         return self
 
@@ -605,6 +633,9 @@ class DecoderIM:
         from pyriemann.utils.geodesic import geodesic_riemann
         if not np.isfinite(x).all():
             return None                      # ventana corrupta: ni rasgos ni recentrado
+        canales = getattr(self, 'canales', None)
+        if canales is not None:
+            x = x[canales]
         C = self.cov.transform(x[None])[0]
         if actualizar_centro and self.paso > 0:
             self.M = geodesic_riemann(self.M, C, self.paso)
@@ -617,31 +648,51 @@ def _medias_por_ventana(X, fs=250, inicio=0.15, fin=0.65, ancho=0.05, pre=-confi
     return np.concatenate([X[:, :, i:j].mean(axis=2) for i, j in cortes], axis=1)
 
 
+def _subconjunto(X, canales):
+    """Los canales elegidos de cada epoca (funcion de modulo: el modelo se puede guardar)."""
+    return X[:, canales, :]
+
+
+def _potencia_theta(X, fs=250, pre=-config.EPOCA_ERRP[0]):
+    """Vista theta: log de la potencia en 4-8 Hz en Fz y Cz entre 200 y 600 ms tras el
+    movimiento. Tras un error aumenta la theta frontal de la linea media, aunque no tenga fase
+    fija (el promedio de epocas no la ve)."""
+    from scipy.signal import butter, sosfiltfilt
+    sos = butter(4, (4.0, 8.0), btype='bandpass', fs=fs, output='sos')
+    xf = sosfiltfilt(sos, X[:, config.indices(['Fz', 'Cz']), :], axis=-1)
+    tramo = xf[:, :, int((pre + 0.2) * fs):int((pre + 0.6) * fs)]
+    return np.log(np.mean(tramo ** 2, axis=2) + 1e-6)
+
+
+VISTAS_ERRP = {'dos': ('temporal', 'geometrica'), 'tres': ('temporal', 'geometrica', 'theta')}
+
+
 class DetectorErrP:
-    """Detector de ErrP de dos vistas, fusionadas y calibradas.
+    """Detector de ErrP de dos o tres vistas, fusionadas y calibradas.
 
     - Vista temporal: medias por ventana de 50 ms + LDA con encogimiento
       automatico (Ledoit-Wolf). Robusta con pocos ensayos.
     - Vista geometrica: covarianzas aumentadas con los prototipos de "error" y
       "correcto" en el espacio tangente de Riemann + regresion logistica.
       Captura la relacion espacial entre electrodos.
-    - Fusion suave de ambas y calibracion de Platt: la salida es una
-      probabilidad real, que el agente usa completa.
+    - Vista theta (opcional): potencia 4-8 Hz en Fz y Cz entre 200 y 600 ms.
+    - Fusion suave y calibracion de Platt: la salida es una probabilidad real, que
+      el agente usa completa.
     - Umbral de Neyman-Pearson: el que maximiza la exactitud balanceada con
-      especificidad >= 0.90 (no 0.5, que con clases desbalanceadas hunde la
-      sensibilidad). Solo afecta el "detecto / no detecto"; el agente usa la
-      probabilidad completa.
+      especificidad >= 0.90, elegido con validacion ANIDADA (dentro de cada
+      pliegue): asi la BA del CP3 no esta inflada.
+    - Canales y vistas: ajustar() puede recibir candidatos ({'nombre': (canales,
+      'dos' | 'tres')}) y elige por AUC de validacion cruzada, tambien dentro de
+      cada pliegue para reportar. La eleccion queda en self.eleccion.
     - Detector de rareza: distancia riemanniana a la media de calibracion.
-
-    En el cerebro sintetico con 60 epocas: temporal 0.81, geometrica 0.81,
-    fusion 0.85 de exactitud balanceada.
     """
 
-    def __init__(self, umbral_amplitud_uv=100.0, z_rareza=3.5):
+    def __init__(self, umbral_amplitud_uv=100.0, z_rareza=3.5, canales=None, vistas='dos'):
         self.umbral_amp, self.z_rareza = umbral_amplitud_uv, z_rareza
+        self.canales, self.vistas = canales, vistas
         self.umbral = 0.5
 
-    def _pipe(self):
+    def _pipe(self, canales=None, vistas=None):
         from pyriemann.estimation import ERPCovariances
         from pyriemann.tangentspace import TangentSpace
         from sklearn.calibration import CalibratedClassifierCV
@@ -649,36 +700,55 @@ class DetectorErrP:
         from sklearn.ensemble import VotingClassifier
         from sklearn.linear_model import LogisticRegression
         from sklearn.pipeline import make_pipeline
-        from sklearn.preprocessing import FunctionTransformer
-        temporal = make_pipeline(FunctionTransformer(_medias_por_ventana),
-                                 LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'))
-        geometrica = make_pipeline(ERPCovariances(estimator='oas'), TangentSpace(metric='riemann'),
-                                   LogisticRegression(class_weight='balanced', max_iter=2000))
-        fusion = VotingClassifier([('temporal', temporal), ('geometrica', geometrica)], voting='soft')
+        from sklearn.preprocessing import FunctionTransformer, StandardScaler
+        canales = canales if canales is not None else (self.canales if self.canales is not None
+                                                       else list(range(len(config.CANALES_EEG))))
+        sub = lambda: FunctionTransformer(_subconjunto, kw_args={'canales': list(canales)})
+        piezas = {
+            'temporal': make_pipeline(sub(), FunctionTransformer(_medias_por_ventana),
+                                      LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto')),
+            'geometrica': make_pipeline(sub(), ERPCovariances(estimator='oas'), TangentSpace(metric='riemann'),
+                                        LogisticRegression(class_weight='balanced', max_iter=2000)),
+            'theta': make_pipeline(FunctionTransformer(_potencia_theta), StandardScaler(),
+                                   LogisticRegression(class_weight='balanced', max_iter=2000)),
+        }
+        fusion = VotingClassifier([(v, piezas[v]) for v in VISTAS_ERRP[vistas or self.vistas]], voting='soft')
         return CalibratedClassifierCV(fusion, method='sigmoid', cv=3)
 
-    def ajustar(self, X, y):
+    def ajustar(self, X, y, candidatos=None):
         from pyriemann.estimation import Covariances
         from pyriemann.utils.distance import distance_riemann
         from pyriemann.utils.mean import mean_riemann
+        from sklearn.metrics import roc_auc_score
         from sklearn.model_selection import StratifiedKFold, cross_val_predict
+        if not candidatos:
+            candidatos = {'fijo': (self.canales if self.canales is not None
+                                   else list(range(X.shape[1])), self.vistas)}
+        nombres = list(candidatos)                # en empate gana el primero (el mas simple)
         k = int(min(4, np.bincount(y).min()))
         pliegues = StratifiedKFold(max(k, 2), shuffle=True, random_state=0)
-        # Validacion ANIDADA: en cada pliegue, el umbral se elige con puntajes de validacion
-        # cruzada del entrenamiento y se aplica a la prueba. Elegirlo sobre los mismos puntajes
-        # que se evaluan inflaba la BA reportada (maldicion del ganador).
+
+        def probas(n, Xs, ys, cv):
+            return cross_val_predict(self._pipe(*candidatos[n]), Xs, ys, method='predict_proba', cv=cv)[:, 1]
+        # Validacion ANIDADA: en cada pliegue se eligen la configuracion (por AUC) y el umbral
+        # con validacion cruzada del entrenamiento, y se aplican a la prueba. Elegir sobre los
+        # mismos puntajes que se evaluan inflaba la BA reportada (maldicion del ganador).
         self.pred_cv = np.zeros(len(y), dtype=int)
         for ent, pru in pliegues.split(X, y):
             k_in = int(min(3, np.bincount(y[ent]).min()))
-            p_ent = cross_val_predict(self._pipe(), X[ent], y[ent], method='predict_proba',
-                                      cv=StratifiedKFold(max(k_in, 2), shuffle=True, random_state=1))[:, 1]
-            u = self._umbral_neyman_pearson(p_ent, y[ent])
-            p_pru = self._pipe().fit(X[ent], y[ent]).predict_proba(X[pru])[:, 1]
+            interno = StratifiedKFold(max(k_in, 2), shuffle=True, random_state=1)
+            p_ent = {n: probas(n, X[ent], y[ent], interno) for n in nombres}
+            mejor = max(nombres, key=lambda n: roc_auc_score(y[ent], p_ent[n]))
+            u = self._umbral_neyman_pearson(p_ent[mejor], y[ent])
+            p_pru = self._pipe(*candidatos[mejor]).fit(X[ent], y[ent]).predict_proba(X[pru])[:, 1]
             self.pred_cv[pru] = (p_pru > u).astype(int)
-        # el umbral del modelo final, con los puntajes de validacion cruzada de todo
-        proba = cross_val_predict(self._pipe(), X, y, method='predict_proba', cv=pliegues)[:, 1]
+        # configuracion y umbral del modelo final, con validacion cruzada de todo
+        p_todo = {n: probas(n, X, y, pliegues) for n in nombres}
+        self.puntajes = {n: float(roc_auc_score(y, p_todo[n])) for n in nombres}
+        self.eleccion = max(nombres, key=lambda n: self.puntajes[n])
+        self.canales, self.vistas = list(candidatos[self.eleccion][0]), candidatos[self.eleccion][1]
         self.p_error_cal = float(y.mean())
-        self.umbral = self._umbral_neyman_pearson(proba, y)
+        self.umbral = self._umbral_neyman_pearson(p_todo[self.eleccion], y)
         self.y_cal = y
         self.sens = float((self.pred_cv[y == 1] == 1).mean())
         self.espec = float((self.pred_cv[y == 0] == 0).mean())

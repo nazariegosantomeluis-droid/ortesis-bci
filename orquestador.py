@@ -418,7 +418,7 @@ class BackendReal:
                 y.append(clase)
             n = k + 1
             if (n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi) and self._ajustable(y):
-                self.decoder = self.hw.DecoderIM().ajustar(np.array(X), np.array(y))
+                self.decoder = self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos('decoder'))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
                                              config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
                 if r != 'seguir':
@@ -429,7 +429,8 @@ class BackendReal:
         np.savez(config.RESULTADOS / f'calibracion_mi_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
         self.hw.guardar(self.decoder, 'decoder_im.pkl')
         return checkpoint(orq.salidas, 2, self.decoder.ba >= config.MI_EXACTITUD_MIN,
-                          f'MI: BA {self.decoder.ba:.2f} con {len(y)} ensayos (calibracion secuencial)',
+                          f'MI: BA {self.decoder.ba:.2f} con {len(y)} ensayos (calibracion secuencial; '
+                          f'canales: {self.decoder.eleccion})',
                           self.a.forzar)
 
     def calibrar_errp(self, orq):
@@ -476,7 +477,10 @@ class BackendReal:
         # secuencial elegia estimados inflados por suerte (en el gemelo: 0.87 reportado contra
         # 0.69 real). El umbral se elige con validacion anidada (DetectorErrP.ajustar).
         if self._ajustable(y):
-            self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y))
+            self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y), config.candidatos('detector'))
+            aviso('    eleccion del detector (AUC de validacion cruzada): '
+                  + ', '.join(f'{n} {v:.2f}' for n, v in self.detector.puntajes.items())
+                  + f' -> {self.detector.eleccion}')
             lo, hi = self.hw.intervalo_ba(np.array(y), self.detector.pred_cv)
             aviso(f'    [{len(y)} epocas] BA {self.detector.ba:.2f}  IC90 [{lo:.2f}, {hi:.2f}]')
         if self.detector is None:
@@ -487,7 +491,8 @@ class BackendReal:
         d = self.detector
         ok = d.ba >= config.BA_MIN and d.espec >= config.ESPEC_MIN
         return checkpoint(orq.salidas, 3, ok,
-                          f'ErrP: sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f} con {len(y)} epocas',
+                          f'ErrP: sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f} con {len(y)} epocas '
+                          f'({d.eleccion})',
                           self.a.forzar)
 
     def preparar(self, orq):
