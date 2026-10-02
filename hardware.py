@@ -39,7 +39,7 @@ def revisar_canales(x, fs, u=None):
         nombre = config.CANALES_EEG[i] if i < len(config.CANALES_EEG) else f'ch{i}'
         if np.abs(finito[i]).max() > u['canal_saturado_uv']:
             malos[nombre] = 'saturado'
-        elif finito[i].std() < u['canal_plano_uv']:
+        elif finito[i, -int(0.5 * fs):].std() < u['canal_plano_uv']:   # plano el ultimo medio segundo
             malos[nombre] = 'plano'
         elif rms[i] > u['canal_ruidoso_uv']:
             malos[nombre] = 'ruidoso'

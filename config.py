@@ -111,6 +111,16 @@ PAUSA_DURACION_MS = 1500         # abrir despacio
 RECONEXION_INICIAL_S, RECONEXION_MAX_S = 0.5, 8.0           # retroceso exponencial
 CAL_REPETICIONES_MAX = 3         # repeticiones de un ensayo de calibracion afectado por una falla
 
+# ============================ Caos ============================
+# "Caos estandar": fallas que inyecta --caos <semilla> (caos.py). cada_s = separacion media.
+CAOS_ESTANDAR = {
+    'corte_eeg':        {'cada_s': 45.0,  'duracion_s': (1.0, 5.0), 'recrear_desde_s': 3.0},
+    'rafaga_parpadeos': {'cada_s': 40.0,  'duracion_s': (2.0, 4.0), 'por_segundo': 3.0},
+    'canal':            {'cada_s': 120.0, 'duracion_s': (4.0, 10.0)},   # un canal se despega
+    'ack_perdido':      {'p': 0.03},                                    # por paso
+    'pico_latencia':    {'p': 0.05, 'ms': (80.0, 300.0)},               # por paso
+}
+
 # ============================ Maquina de estados ============================
 ESTADOS = ['IMPEDANCIAS', 'CAL_MI', 'CAL_ERRP', 'LAZO_ESTATICO',
            'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'PERTURBACION',

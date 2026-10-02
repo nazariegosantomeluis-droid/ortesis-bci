@@ -294,6 +294,77 @@ def calibracion_repeticiones():
     return f'maximo {config.CAL_REPETICIONES_MAX} repeticiones por ensayo y aviso'
 
 
+# ------------------------------------------------------------ caos
+@prueba
+def plan_caos():
+    from caos import PlanCaos
+    a, b, c = PlanCaos(7), PlanCaos(7), PlanCaos(8)
+    ts = np.arange(0, 600, 0.1)
+    for tipo in ('corte_eeg', 'rafaga_parpadeos', 'canal'):
+        ea = [a.activo(tipo, t) for t in ts]
+        assert ea == [b.activo(tipo, t) for t in ts[::-1]][::-1], tipo      # no depende del orden de consulta
+        ev = {e for e in ea if e}
+        assert 2 <= len(ev) <= 40, (tipo, len(ev))
+        lo, hi = config.CAOS_ESTANDAR[tipo]['duracion_s']
+        assert all(lo <= e[1] <= hi for e in ev), tipo
+    canales = {e[2:] for e in (a.activo('canal', t) for t in ts) if e}
+    assert all(c_ in config.CANALES_EEG and m in ('plano', 'ruidoso') for c_, m in canales), canales
+    perdidos = [a.por_paso('ack_perdido', s) for s in range(2000)]
+    assert perdidos == [b.por_paso('ack_perdido', s) for s in range(2000)]
+    assert 0.015 < np.mean(perdidos) < 0.05, np.mean(perdidos)
+    picos = [p for p in (a.por_paso('pico_latencia', s) for s in range(2000)) if p]
+    assert all(80 <= p <= 300 for p in picos) and 0.03 < len(picos) / 2000 < 0.08
+    assert [c.activo('corte_eeg', t) for t in ts] != [a.activo('corte_eeg', t) for t in ts]
+    return 'reproducible por semilla, independiente del orden y dentro de los rangos'
+
+
+def _sesion_caos(semilla, caos):
+    import orquestador
+    argv = ['sim', '--ciclo', '0', '--semilla', str(semilla), '--pasos_estatico', '60',
+            '--pasos_adaptativo', '300'] + (['--caos', str(caos)] if caos is not None else [])
+    a = orquestador.argumentos(argv)
+    orq = orquestador.Orquestador(_backend_con_fallas(orquestador, a, {}), a)
+    orquestador.correr(orq, a)
+    return orq
+
+
+@prueba
+def caos_sim():
+    """Sesion simulada con el caos estandar: termina sin excepcion, ninguna epoca tomada
+    durante un corte de EEG llega al agente y el agente no aprende en PAUSA_SEGURA."""
+    orq = _sesion_caos(0, caos=1)
+    assert orq.fsm.estado == 'EVALUACION' and orq.f_csv.closed
+    por_seq = {f['seq']: f for f in orq.filas if f['seq'] != ''}
+    assert orq.b.epocas_en_corte, 'el caos estandar debe producir al menos una epoca en un corte'
+    for seq in orq.b.epocas_en_corte:
+        f = por_seq[seq]
+        assert f['excluido'] == 'epoca_invalida' and f['P_hat'] == '', f     # sin P_hat: el agente no la vio
+    n_pausas = 0
+    for i, f in enumerate(orq.filas[1:], 1):
+        n_pausas += f['estado'] == 'PAUSA_SEGURA'
+        if f['excluido']:
+            assert f['beta'] == orq.filas[i - 1]['beta'], (i, f)
+    assert n_pausas >= 3, n_pausas
+    assert sum(1 for f in orq.filas if f['estado'] != 'PAUSA_SEGURA') == 360
+    assert set(orq.excluidos) <= set(config.MOTIVOS_EXCLUSION), orq.excluidos
+    return f'360 pasos y {n_pausas} pausas sin excepcion; excluidos {orq.excluidos}'
+
+
+@prueba
+def caos_agente_vs_sombra():
+    """EXPLORATORIO, sobre el simulador (no es una persona): con el caos estandar el
+    agente sigue claramente por debajo de la sombra tras la perturbacion."""
+    ag, so, exc = [], [], {}
+    for s in range(12):
+        orq = _sesion_caos(s, caos=100 + s)
+        ag.append(orq.error_post['agente']); so.append(orq.error_post['sombra'])
+        for k, v in orq.excluidos.items():
+            exc[k] = exc.get(k, 0) + v
+    assert np.mean(ag) < np.mean(so) - 0.05, (np.mean(ag), np.mean(so))
+    return (f'simulador, 12 sujetos, ~2 min tras perturbar: agente {np.mean(ag):.2f} vs sombra '
+            f'{np.mean(so):.2f}; excluidos por motivo {exc}')
+
+
 # ------------------------------------------------------------ hardware (sin hardware)
 @prueba
 def modelos_hardware():
@@ -341,6 +412,8 @@ def senal_valida():
     malo = x.copy(); malo[2] = 5.0; malo[7] *= 40; malo[0, 10] = 200_000.0
     assert hw.revisar_canales(malo, fs) == {'FC1': 'saturado', 'C3': 'plano', 'Fz': 'ruidoso'}
     assert hw.revisar_canales(np.empty((8, 0)), fs) == {}                           # buffer vacio
+    recien = x.copy(); recien[4, -125:] = 0.0                                       # se despego hace 0.5 s
+    assert hw.revisar_canales(recien, fs) == {'CP1': 'plano'}
     assert hw.ventana_valida(x, t, fs, edad_s=0.05, segundos=3.0)
     assert not hw.ventana_valida(x, t, fs, edad_s=2.0, segundos=3.0)               # rancia
     assert not hw.ventana_valida(x[:, :300], t[:300], fs, 0.05, 3.0)               # incompleta
@@ -578,6 +651,29 @@ def lazo_real_sintetico():
         + f'; sin pausas en falso; {excluidos}')
 
 
+@prueba
+def lazo_real_caos():
+    """El camino real contra el gemelo con el caos estandar (reutiliza los modelos que
+    acaba de calibrar lazo_real_sintetico). Cifras del gemelo, no de una persona."""
+    puente = subprocess.Popen([sys.executable, 'cerebro_sintetico.py', '--caos', '1'], cwd=config.RAIZ,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(2)
+        r = subprocess.run([sys.executable, 'orquestador.py', 'real', '--ortesis-sim', '--forzar',
+                            '--saltar-calibracion', '--caos', '1', '--seg_revision', '3',
+                            '--pasos_estatico', '30', '--pasos_adaptativo', '120'],
+                           cwd=config.RAIZ, capture_output=True, text=True, timeout=900)
+        assert r.returncode == 0, r.stderr[-1500:]
+        assert 'EVALUACION' in r.stdout and 'Traceback' not in r.stderr, r.stderr[-1500:]
+    finally:
+        puente.terminate()
+    pausas = r.stdout.count('[PAUSA SEGURA] motivo')
+    assert pausas >= 1, 'el caos estandar debio provocar al menos una pausa segura'
+    assert r.stdout.count('se reanuda') == pausas, 'alguna pausa no termino'
+    linea = lambda clave: next((l.strip() for l in r.stdout.splitlines() if clave in l), 'sin dato')
+    return f"{pausas} pausas, todas reanudadas; {linea('excluidos del analisis')}; {linea('[CP4]')}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--completa', action='store_true')
@@ -585,12 +681,14 @@ def main():
     print('Pruebas ortesis-bci')
     for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
               maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones,
+              plan_caos, caos_sim, caos_agente_vs_sombra,
               modelos_hardware, senal_valida,
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, puente_reconecta,
               cerebro_sintetico):
         p()
     if a.completa:
         lazo_real_sintetico()
+        lazo_real_caos()
     ok = sum(RESULTADOS)
     print(f'\n{ok}/{len(RESULTADOS)} pruebas pasaron')
     sys.exit(0 if ok == len(RESULTADOS) else 1)

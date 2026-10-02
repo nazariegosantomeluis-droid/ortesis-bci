@@ -6,6 +6,7 @@ Uso
   python orquestador.py sim --ciclo 0                  prueba rapida con piloto sintetico
   python orquestador.py sim                            a ritmo real (para ver el tablero)
   python orquestador.py sim --falla_detector           prueba el congelamiento
+  python orquestador.py sim --ciclo 0 --caos 1         caos estandar: cortes, ACK perdidos, canal despegado
   python orquestador.py real --ortesis-sim --forzar    casco (o placa sintetica) sin ESP32
   python orquestador.py real --puerto COM4             todo real
   python orquestador.py real --puerto COM4 --saltar-calibracion   usa modelos guardados
@@ -34,6 +35,7 @@ from pylsl import StreamOutlet, local_clock
 
 import config
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, sigmoide
+from caos import PlanCaos
 from salud import Vigilante
 
 
@@ -122,7 +124,8 @@ class BackendSim:
         self.w0, self.c0 = calibrar(mk(10_000 + a.semilla))
         self.piloto = mk(a.semilla + 1)
         self.a, self.seq, self.t = a, 0, 0
-        self.t_virtual, self.fallas, self.caos = 0.0, {}, None
+        self.t_virtual, self.fallas = 0.0, {}
+        self.caos = PlanCaos(a.caos) if getattr(a, 'caos', None) is not None else None
         self.acks_perdidos, self.ultima_latencia = 0, 0.0
         self.epocas_en_corte = []                  # seq de las epocas que tocaron un corte de EEG
 
@@ -213,7 +216,8 @@ class BackendReal:
         self.hw, self.a = hw, a
         aviso('Conectando al flujo EEG...')
         self.eeg = hw.EntradaEEG()
-        self.ortesis = hw.OrtesisSimulada() if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
+        caos = PlanCaos(a.caos) if a.caos is not None else None     # solo afecta a la ortesis simulada
+        self.ortesis = hw.OrtesisSimulada(caos=caos) if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
         self.angulo = 0.5
         self.decoder = self.detector = None
 
@@ -304,7 +308,7 @@ class BackendReal:
                 aviso('    >>> CERRAR: imagina que cierras la mano' if clase
                       else '    >>> RELAJA: imagina que abres y relajas la mano')
                 time.sleep(self.a.duracion_mi)
-                return self._ventana_mi()
+                return None if self.eeg.lecturas()['canales'] else self._ventana_mi()
             v = self._ensayo_con_reintentos(tomar, 'ensayo de MI')
             if v is not None:
                 X.append(v)
@@ -355,7 +359,8 @@ class BackendReal:
                 if t_ack is None:
                     return None                    # sin ACK no se sabe cuando empezo el movimiento
                 orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
-                return self.eeg.epoca(t_ack)
+                e = self.eeg.epoca(t_ack)
+                return None if self.eeg.lecturas()['canales'] else e
             e = self._ensayo_con_reintentos(tomar, 'ensayo de ErrP')
             if e is not None:
                 X.append(e)
@@ -710,6 +715,8 @@ def argumentos(argv=None):
     ap.add_argument('--sin_perturbacion', action='store_true')
     ap.add_argument('--semilla', type=int, default=0)
     ap.add_argument('--forzar', action='store_true', help='continua aunque un checkpoint de NO GO')
+    ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
+                    help='inyecta el caos estandar (fallas reproducibles) en el simulador o en la ortesis simulada')
     ap.add_argument('--sin_sesgo', action='store_true',
                     help='apaga el detector de sesgo (si las metas no estan balanceadas)')
     # sim

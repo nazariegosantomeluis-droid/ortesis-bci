@@ -24,6 +24,7 @@ Uso
   python cerebro_sintetico.py --erd 0.15 --errp 4   piloto dificil
   python cerebro_sintetico.py --fatiga 0.3          se cansa durante la sesion
   python cerebro_sintetico.py --banco               evalua decoder y detector en segundos
+  python cerebro_sintetico.py --caos 1              caos estandar: cortes de EEG, parpadeos, canal despegado
 """
 import argparse
 import json
@@ -35,6 +36,7 @@ from pylsl import StreamInlet, StreamOutlet, local_clock, resolve_byprop
 from scipy.signal import butter, sosfilt
 
 import config
+from caos import PlanCaos
 
 CH = config.CANALES_EEG                      # FC1 FC2 C3 C4 CP1 CP2 Cz Fz
 FS = config.FLUJOS['EEG'][2]
@@ -69,6 +71,8 @@ class Cerebro:
         self.eventos = []                        # (t0, plantilla)
         self.t0_sesion = local_clock()
         self.n_err = self.n_ok = 0
+        self.caos = PlanCaos(a.caos) if getattr(a, 'caos', None) is not None else None
+        self._canal_caos = None                  # para avisar una vez por falla
         self.lock = threading.Lock()
         n = len(CH)
         self.sos_mu = butter(4, (9, 12), btype='bandpass', fs=FS, output='sos')
@@ -159,20 +163,33 @@ class Cerebro:
                 if ts[-1] - t0 < 1.2:
                     vivos.append((t0, pl))
             self.eventos = vivos
-        # parpadeos
-        if self.rng.random() < a.parpadeos * n / FS:
+        # parpadeos (con caos: rafagas)
+        t_caos = ts[-1] - self.t0_sesion
+        tasa = a.parpadeos
+        if self.caos and self.caos.activo('rafaga_parpadeos', t_caos):
+            tasa = self.caos.tasas['rafaga_parpadeos']['por_segundo']
+        if self.rng.random() < tasa * n / FS:
             i0 = self.rng.integers(0, n)
             dur = int(0.3 * FS)
             forma = 120 * np.sin(np.linspace(0, np.pi, dur))[: n - i0]
             x[:, i0:i0 + len(forma)] += np.outer(W_PARPADEO, forma)
-        return (self.mezcla @ x).T
+        y = self.mezcla @ x
+        # caos: un canal se despega (plano, o ruido grande con mucha red electrica)
+        canal = self.caos.activo('canal', t_caos) if self.caos else None
+        if canal:
+            y[IDX[canal[2]]] = 0.0 if canal[3] == 'plano' else                 300.0 * self.rng.normal(size=n) + 200.0 * np.sin(fase)
+        if canal != self._canal_caos:
+            self._canal_caos = canal
+            if canal:
+                print(f'  [caos] canal {canal[2]} despegado ({canal[3]}) {canal[1]:.1f} s', flush=True)
+        return y.T
 
 
 # ======================================================================
 # Banco de pruebas offline: genera sesiones completas sin LSL y en segundos,
 # para comparar decoders/detectores o elegir parametros antes del domingo.
 def _args(**k):
-    a = argparse.Namespace(erd=0.25, errp=6.0, fatiga=0.0, parpadeos=0.15, semilla=0)
+    a = argparse.Namespace(erd=0.25, errp=6.0, fatiga=0.0, parpadeos=0.15, semilla=0, caos=None)
     a.__dict__.update(k)
     return a
 
@@ -238,6 +255,8 @@ def main():
     ap.add_argument('--parpadeos', type=float, default=0.15, help='parpadeos por segundo')
     ap.add_argument('--semilla', type=int, default=0)
     ap.add_argument('--banco', action='store_true', help='evalua decoder y detector offline y sale')
+    ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
+                    help='inyecta el caos estandar: cortes de EEG, rafagas de parpadeos, canal despegado')
     a = ap.parse_args()
     if a.banco:
         return banco(a)
@@ -253,9 +272,25 @@ def main():
     print(f'Cerebro sintetico publicando EEG ({len(CH)} canales, {FS} Hz): ERD {a.erd}, '
           f'ErrP {a.errp} uV, fatiga {a.fatiga}. Ctrl+C para parar.')
     t_ult, t_rep = local_clock(), time.time()
+    corte_previo = None
     try:
         while True:
             ahora = local_clock()
+            corte = cer.caos.activo('corte_eeg', ahora - cer.t0_sesion) if cer.caos else None
+            if corte:                              # caos: el EEG deja de llegar
+                if corte_previo is None:
+                    recrear = corte[1] >= cer.caos.tasas['corte_eeg']['recrear_desde_s']
+                    print(f'  [caos] corte de EEG {corte[1]:.1f} s'
+                          + (' (el flujo se destruye y se vuelve a crear)' if recrear else ''), flush=True)
+                    if recrear:
+                        outlet = None              # como desconectar y reconectar el dongle
+                corte_previo, t_ult = corte, ahora  # al volver no se rellena el hueco
+                time.sleep(0.02)
+                continue
+            if corte_previo is not None:
+                corte_previo = None
+                if outlet is None:
+                    outlet = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
             n = int((ahora - t_ult) * FS)
             if n > 0:
                 ts = t_ult + np.arange(1, n + 1) / FS
