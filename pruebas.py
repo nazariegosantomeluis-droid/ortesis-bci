@@ -298,6 +298,106 @@ def calibracion_repeticiones():
     return f'maximo {config.CAL_REPETICIONES_MAX} repeticiones por ensayo y aviso'
 
 
+# ------------------------------------------------------------ persistencia
+@prueba
+def instantanea_estado():
+    """El estado del agente y del ConfianzaDetector sobrevive a un viaje por JSON (la
+    trayectoria futura es identica), y la instantanea se escribe de forma atomica."""
+    import json
+    import orquestador
+    from agente_errp import AgenteErrP, ConfianzaDetector
+
+    def avanzar(ag, co, rng, n):
+        betas = []
+        for _ in range(n):
+            ag.decidir(rng.normal(size=3))
+            err = rng.random() < 0.3
+            det = rng.random() < (0.7 if err else 0.1)
+            fiab = co(err, det, True)
+            betas.append(ag.actualizar(0.9 if det else 0.1, False, fiab, *co.vivo())['beta'])
+        return betas
+    rng = np.random.default_rng(0)
+    ag, co = AgenteErrP(np.ones(3)), ConfianzaDetector()
+    avanzar(ag, co, rng, 80)
+    copia = json.loads(json.dumps({'a': ag.a_dict(), 'c': co.a_dict(), 'rng': rng.bit_generator.state}))
+    ag2, co2, rng2 = AgenteErrP(np.ones(3)), ConfianzaDetector(), np.random.default_rng()
+    ag2.desde_dict(copia['a']); co2.desde_dict(copia['c']); rng2.bit_generator.state = copia['rng']
+    assert avanzar(ag, co, rng, 80) == avanzar(ag2, co2, rng2, 80)
+    assert (co.congelado, co.n_validas, ag.n_cambios, ag.var) == (co2.congelado, co2.n_validas, ag2.n_cambios, ag2.var)
+    ruta = config.RESULTADOS / 'prueba_instantanea.json'
+    try:
+        assert orquestador.guardar_instantanea(ruta, {'paso': 7, 'beta': np.float64(0.5)})
+        assert orquestador.guardar_instantanea(ruta, {'paso': 8, 'beta': np.float64(0.5)})   # reemplaza
+        assert json.loads(ruta.read_text()) == {'paso': 8, 'beta': 0.5}
+        assert not ruta.with_suffix('.tmp').exists()
+    finally:
+        ruta.unlink(missing_ok=True)
+    # el backend real guarda y repone seq de la ortesis y el centro M del decoder (modelos de mentira)
+    import types
+    import hardware as hw
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.hw = types.SimpleNamespace(cargar=lambda nombre: types.SimpleNamespace(M=None, nombre=nombre))
+    b.ortesis = hw.OrtesisSimulada()
+    b.restaurar({'seq': 57, 'M': (2 * np.eye(8)).tolist()})
+    assert b.ortesis.seq == 57 and np.array_equal(b.decoder.M, 2 * np.eye(8))
+    assert b.detector.nombre == 'detector_errp.pkl'
+    assert json.loads(json.dumps(b.instantanea())) == {'seq': 57, 'M': (2 * np.eye(8)).tolist()}
+    # un fallo al guardar avisa, pero no lanza: el lazo no se cae por esto
+    assert orquestador.guardar_instantanea(config.RESULTADOS / 'no_existe' / 'x.json', {}) is False
+    return 'agente y confianza identicos tras JSON; escritura atomica; guardar nunca lanza'
+
+
+@prueba
+def reanudar():
+    """Se mata el proceso a mitad de sesion; --reanudar continua la misma sesion y el
+    mismo CSV, y el resultado es identico al de una sesion sin interrumpir."""
+    import json
+    import orquestador
+    base = ['--semilla', '4', '--pasos_estatico', '20', '--pasos_adaptativo', '90', '--caos', '3']
+    a = orquestador.argumentos(['sim', '--ciclo', '0'] + base)
+    ref = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    orquestador.correr(ref, a)
+    referencia = list(csv.DictReader(open(ref.ruta_csv)))
+    config.ESTADO_SESION_JSON.unlink(missing_ok=True)
+
+    p = subprocess.Popen([sys.executable, 'orquestador.py', 'sim', '--ciclo', '0.05'] + base,
+                         cwd=config.RAIZ, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        t_fin, paso = time.time() + 60, 0
+        while paso < 40 and time.time() < t_fin:           # se espera a que vaya a media sesion
+            time.sleep(0.05)
+            try:
+                paso = json.loads(config.ESTADO_SESION_JSON.read_text())['paso']
+            except (OSError, ValueError):
+                pass
+    finally:
+        p.kill()                                           # cierre inesperado
+        p.wait()
+    inst = json.loads(config.ESTADO_SESION_JSON.read_text())
+    assert 40 <= inst['paso'] < len(referencia) and not inst['terminada'], inst['paso']
+
+    r = subprocess.run([sys.executable, 'orquestador.py', 'sim', '--reanudar', '--ciclo', '0'],
+                       cwd=config.RAIZ, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-1500:]
+    filas = list(csv.DictReader(open(inst['ruta_csv'])))
+    # beta y el numero de paso continuan exactamente donde se quedaron
+    assert float(filas[inst['paso'] - 1]['beta']) == round(inst['agente']['beta'], 4)
+    assert len(filas) == len(referencia)
+    quitar = lambda f: {k: v for k, v in f.items() if k not in ('t_iso', 't_lsl')}
+    distintas = [i for i, (x, y) in enumerate(zip(filas, referencia)) if quitar(x) != quitar(y)]
+    assert not distintas, f'filas distintas a la sesion sin interrumpir: {distintas[:5]}'
+    assert json.loads(config.ESTADO_SESION_JSON.read_text())['terminada']
+    # sesion ya terminada, o sin instantanea: mensaje claro y sin traza
+    for caso, texto in (('terminada', 'ya termino'), ('ausente', 'No hay sesion')):
+        if caso == 'ausente':
+            config.ESTADO_SESION_JSON.unlink()
+        r2 = subprocess.run([sys.executable, 'orquestador.py', 'sim', '--reanudar'],
+                            cwd=config.RAIZ, capture_output=True, text=True, timeout=60)
+        assert r2.returncode == 2 and 'Traceback' not in r2.stderr and texto in r2.stdout + r2.stderr, (caso, r2.stderr[-300:])
+    return (f"matado en el paso {inst['paso']} de {len(referencia)}; reanudado identico a la "
+            f"sesion sin interrumpir (con caos)")
+
+
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
@@ -771,6 +871,7 @@ def main():
     for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
               maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones,
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
+              instantanea_estado, reanudar,
               modelos_hardware, senal_valida,
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, dos_flujos_eeg, puente_reconecta,
               cerebro_sintetico):

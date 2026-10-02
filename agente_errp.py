@@ -117,6 +117,17 @@ class AgenteErrP:
         self.n_cambios = {'sesgo': 0, 'prediccion': 0}
         self._pendiente: Decision | None = None
 
+    def a_dict(self):
+        """Todo lo que el agente ha aprendido, para la instantanea de la sesion (JSON)."""
+        return {'beta': self.beta, 'var': self.var, 'prior': self.prior, 'sesgo': self.sesgo,
+                'desde_cambio': self._desde_cambio, 'cusum_pred': self.cusum_pred,
+                'n_cambios': dict(self.n_cambios)}
+
+    def desde_dict(self, d):
+        self.beta, self.var, self.prior, self.sesgo = d['beta'], d['var'], d['prior'], d['sesgo']
+        self._desde_cambio, self.cusum_pred = d['desde_cambio'], d['cusum_pred']
+        self.n_cambios, self._pendiente = dict(d['n_cambios']), None
+
     @property
     def umbral_b(self):
         """Umbral equivalente sobre la salida cruda: p > b  <=>  p' > 0.5."""
@@ -276,6 +287,16 @@ class ConfianzaDetector:
         elif f > self.u_rean:
             self.congelado = False
         return 0.0 if self.congelado else f
+
+    _ESTADO = ('err_det', 'err_tot', 'ok_nodet', 'ok_tot', 'congelado', 'n_validas')
+
+    def a_dict(self):
+        """Contadores vivos, para la instantanea de la sesion (JSON)."""
+        return {k: getattr(self, k) for k in self._ESTADO}
+
+    def desde_dict(self, d):
+        for k in self._ESTADO:
+            setattr(self, k, d[k])
 
     def vivo(self):
         """(sens, espec) acotados para usarse en Bayes."""

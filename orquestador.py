@@ -11,7 +11,12 @@ Uso
   python orquestador.py real --puerto COM4             todo real
   python orquestador.py real --puerto COM4 --saltar-calibracion   usa modelos guardados
 
+  python orquestador.py real --puerto COM4 --reanudar   continua la sesion tras un cierre inesperado
+
 Antes de 'real': puente_lsl.py corriendo y LabRecorder grabando.
+
+Persistencia: despues de cada paso se guarda una instantanea atomica de la sesion en
+resultados/estado_sesion.json. --reanudar continua la misma sesion y el mismo CSV.
 
 Resiliencia: antes de cada paso el Vigilante (salud.py) revisa EEG, ortesis, reloj y
 detector. Escalera de degradacion:
@@ -26,9 +31,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from pylsl import StreamOutlet, local_clock
@@ -45,9 +52,9 @@ def aviso(txt):
 
 # ======================================================================
 class MaquinaEstados:
-    def __init__(self, salidas):
+    def __init__(self, salidas, estado=None):
         self.salidas = salidas
-        self.estado = config.ESTADOS[0]
+        self.estado = estado or config.ESTADOS[0]     # estado != None: sesion reanudada
         self.historial = [(local_clock(), self.estado)]
         salidas.marcador(config.m_bloque(self.estado))
 
@@ -96,6 +103,74 @@ def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
 
 
 # ======================================================================
+_fallos_guardado = [0]
+
+
+def guardar_instantanea(ruta, datos):
+    """Escritura atomica: archivo temporal + os.replace, asi nunca queda un JSON a medias.
+    Nunca lanza: si no se puede guardar se avisa y el lazo sigue (devuelve False)."""
+    tmp = ruta.with_suffix('.tmp')
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(datos, f, default=float)
+            f.flush()
+            os.fsync(f.fileno())
+        for intento in range(5):                 # en Windows otro proceso puede tener abierto el destino
+            try:
+                os.replace(tmp, ruta)
+                return True
+            except PermissionError:
+                time.sleep(0.01 * (intento + 1))
+    except OSError:
+        pass
+    _fallos_guardado[0] += 1
+    if _fallos_guardado[0] % 20 == 1:            # avisa la primera vez y luego cada 20
+        aviso(f'  AVISO: no se pudo guardar la instantanea de la sesion en {ruta}')
+    return False
+
+
+def cargar_instantanea():
+    """La instantanea de la sesion a reanudar. Si no hay, sale con un mensaje claro."""
+    try:
+        inst = json.loads(config.ESTADO_SESION_JSON.read_text())
+    except (OSError, ValueError):
+        aviso(f'No hay sesion que reanudar: falta {config.ESTADO_SESION_JSON} (o esta danado).')
+        sys.exit(2)
+    if inst.get('terminada'):
+        aviso('La sesion guardada ya termino: no hay nada que reanudar. Inicia una nueva sin --reanudar.')
+        sys.exit(2)
+    return inst
+
+
+_ENTEROS = ('seq', 'meta', 'direccion', 'artefacto', 'explorando', 'error_verdadero', 'error_sombra')
+_REALES = ('t_lsl', 'angulo', 'p_prima', 'delta', 'P_hat', 'fiabilidad', 'beta', 'varianza_beta',
+           'sens_viva', 'espec_viva', 'latencia_ack_ms')
+
+
+def recuperar_csv(ruta, n):
+    """Deja el CSV con las primeras n filas (las que la instantanea conoce; si el proceso
+    murio entre escribir una fila y guardar la instantanea, esa fila sobra y el paso se
+    repite) y las devuelve con sus tipos, para que evaluar() las use."""
+    with open(ruta, newline='') as f:
+        crudas = list(csv.DictReader(f))[:n]
+    if len(crudas) < n:
+        aviso(f'  AVISO: el CSV tiene {len(crudas)} filas y la instantanea esperaba {n}; se continua.')
+    with open(ruta, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=config.COLUMNAS_CSV)
+        w.writeheader()
+        w.writerows(crudas)
+    filas = []
+    for c in crudas:
+        fila = dict(c)
+        for k in _ENTEROS:
+            fila[k] = int(c[k]) if c[k] != '' else ''
+        for k in _REALES:
+            fila[k] = float(c[k]) if c[k] != '' else ''
+        filas.append(fila)
+    return filas
+
+
+# ======================================================================
 # Interfaz de un backend (la usan Orquestador.paso, revisar_salud y pausa_segura):
 #   preparar(orq) -> dict | None     calibra y devuelve lo que necesita el agente
 #   cue(meta)                        presenta la meta al piloto
@@ -105,6 +180,7 @@ def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
 #   lecturas() -> {'eeg', 'ortesis', 'reloj_ms'}             para el Vigilante
 #   posicion_segura() -> igual que mover(), despacio y a config.POSICION_SEGURA
 #   reloj() -> s ; esperar(dt) ; fin_paso() ; cerrar()
+#   instantanea() -> dict (JSON) ; restaurar(dict)           para --reanudar
 class BackendSim:
     """Piloto sintetico del simulador.
 
@@ -203,6 +279,20 @@ class BackendSim:
         if any(self._activa('canal', t) or self._activa('rafaga_parpadeos', t) for t in momentos):
             return p, True, ''                     # la epoca existe, pero es un artefacto
         return p, art, ''
+
+    def instantanea(self):
+        return {'seq': self.seq, 't': self.t, 't_virtual': self.t_virtual,
+                'acks_perdidos': self.acks_perdidos, 'ultima_latencia': self.ultima_latencia,
+                'epocas_en_corte': list(self.epocas_en_corte),
+                'rng_piloto': self.piloto.rng.bit_generator.state,
+                'detector_piloto': [self.piloto.sens, self.piloto.espec]}
+
+    def restaurar(self, d):
+        self.seq, self.t, self.t_virtual = d['seq'], d['t'], d['t_virtual']
+        self.acks_perdidos, self.ultima_latencia = d['acks_perdidos'], d['ultima_latencia']
+        self.epocas_en_corte = list(d['epocas_en_corte'])
+        self.piloto.rng.bit_generator.state = d['rng_piloto']
+        self.piloto.sens, self.piloto.espec = d['detector_piloto']
 
     def cerrar(self):
         pass
@@ -420,6 +510,17 @@ class BackendReal:
                 'salida': 'calibrada', 'p_error_cal': self.detector.p_error_cal,
                 'umbral': self.detector.umbral}
 
+    # ---------------- persistencia ----------------
+    def instantanea(self):
+        return {'seq': self.ortesis.seq, 'M': np.asarray(self.decoder.M).tolist()}
+
+    def restaurar(self, d):
+        """Sesion reanudada: modelos guardados, el centro del recentrado donde iba y seq continuo."""
+        self.decoder = self.hw.cargar('decoder_im.pkl')
+        self.detector = self.hw.cargar('detector_errp.pkl')
+        self.decoder.M = np.array(d['M'])
+        self.ortesis.seq = d['seq']
+
     # ---------------- salud ----------------
     def reloj(self):
         return local_clock()
@@ -462,17 +563,26 @@ class BackendReal:
 
 # ======================================================================
 class Orquestador:
-    def __init__(self, backend, a):
-        self.b, self.a = backend, a
+    def __init__(self, backend, a, inst=None):
+        """inst: instantanea de una sesion a reanudar (cargar_instantanea()), o None."""
+        self.b, self.a, self.inst = backend, a, inst
         self.salidas = Salidas()
         time.sleep(0.5)                              # dar tiempo a que LabRecorder/tablero se conecten
-        self.fsm = MaquinaEstados(self.salidas)
+        self.fsm = MaquinaEstados(self.salidas, inst['estado'] if inst else None)
         self.angulo, self.filas, self.desplazamiento = 0.5, [], 0.0
-        self.t_perturbacion = None
+        self.t_perturbacion = self.beta_pre = None
+        self.prog = None                             # progreso del bloque en curso (va en la instantanea)
+        self.lista = False                           # True cuando ya hay agente (preparar() dio GO)
         self.vigilante = Vigilante()
         self.avisos_salud = []                       # lo que se dijo en consola sobre la salud
         self.excluidos, self.error_post = {}, None   # los llena evaluar()
         config.RESULTADOS.mkdir(exist_ok=True)
+        if inst is not None:                         # mismo CSV, en modo anadir
+            self.ruta_csv = Path(inst['ruta_csv'])
+            self.filas = recuperar_csv(self.ruta_csv, inst['paso'])
+            self.f_csv = open(self.ruta_csv, 'a', newline='')
+            self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
+            return
         base = datetime.now().strftime(f'sesion_{a.backend}_%Y%m%d_%H%M%S')
         self.ruta_csv, k = config.RESULTADOS / f'{base}.csv', 1
         while self.ruta_csv.exists():                # dos sesiones en el mismo segundo no se pisan
@@ -483,9 +593,15 @@ class Orquestador:
         self.csv.writeheader()
 
     def preparar(self):
-        p = self.b.preparar(self)
-        if p is None:
-            return False
+        inst = self.inst
+        if inst is not None:                         # sesion reanudada: nada de calibrar
+            p = inst['preparacion']
+            self.b.restaurar(inst['backend'])
+        else:
+            p = self.b.preparar(self)
+            if p is None:
+                return False
+        self.preparacion = {k: (np.asarray(v, dtype=float).tolist() if k == 'w0' else v) for k, v in p.items()}
         cfg = ConfigAgente(modo=self.a.modo, sens=p['sens'], espec=p['espec'], eta_beta=self.a.eta,
                            salida_detector=p['salida'], p_error_calibracion=p['p_error_cal'],
                            usar_sesgo=not self.a.sin_sesgo)
@@ -494,8 +610,30 @@ class Orquestador:
         self.confianza = ConfianzaDetector(p['sens'], p['espec'])
         aviso(f"Agente '{self.a.modo}' listo (detector sens {p['sens']:.2f}, espec {p['espec']:.2f}, "
               f"salida {p['salida']}).")
-        self.fsm.ir_a('LAZO_ESTATICO')
+        self.lista = True
+        if inst is None:
+            self.fsm.ir_a('LAZO_ESTATICO')
+            return True
+        self.agente.desde_dict(inst['agente'])
+        self.confianza.desde_dict(inst['confianza'])
+        self.angulo, self.desplazamiento = inst['angulo'], inst['desplazamiento']
+        self.t_perturbacion, self.beta_pre, self.prog = inst['t_perturbacion'], inst['beta_pre'], inst['prog']
+        aviso(f"Sesion REANUDADA en el paso {inst['paso']} ({self.fsm.estado}), beta {self.agente.beta:+.3f}. "
+              f"CSV: {self.ruta_csv}")
         return True
+
+    # ---------------- persistencia ----------------
+    def instantanea(self, terminada=False):
+        """Todo lo necesario para continuar la sesion exactamente donde va."""
+        return {'version': 1, 'terminada': terminada, 'args': dict(vars(self.a)),
+                'paso': len(self.filas), 'ruta_csv': str(self.ruta_csv), 'estado': self.fsm.estado,
+                'angulo': self.angulo, 'desplazamiento': self.desplazamiento,
+                't_perturbacion': self.t_perturbacion, 'beta_pre': self.beta_pre, 'prog': self.prog,
+                'agente': self.agente.a_dict(), 'confianza': self.confianza.a_dict(),
+                'preparacion': self.preparacion, 'backend': self.b.instantanea()}
+
+    def guardar(self, terminada=False):
+        guardar_instantanea(config.ESTADO_SESION_JSON, self.instantanea(terminada))
 
     # ---------------- salud y pausa segura ----------------
     def revisar_salud(self):
@@ -628,15 +766,26 @@ class Orquestador:
             time.sleep(espera)
         return True
 
-    def bloque(self, n_pasos, aprender, perturbar_en=None):
-        rng = np.random.default_rng(self.a.semilla + 7)
-        orden = []
-        for t in range(n_pasos):
+    def bloque(self, nombre, n_pasos, aprender, perturbar_en=None):
+        """Un bloque de pasos. Su progreso vive en self.prog (y en la instantanea), asi una
+        sesion reanudada lo retoma en el mismo paso, con la misma meta y el mismo orden."""
+        p = self.prog
+        if p is None or p['bloque'] != nombre:       # bloque nuevo (no reanudado)
+            p = self.prog = {'bloque': nombre, 't': 0, 'meta': None, 'orden': [],
+                             'rng': np.random.default_rng(self.a.semilla + 7).bit_generator.state}
+        rng = np.random.default_rng()
+        rng.bit_generator.state = p['rng']
+        retomado = p['t'] % config.PASOS_ENSAYO != 0  # se reanuda a medio ensayo: repetir su cue
+        for t in range(p['t'], n_pasos):
             if t % config.PASOS_ENSAYO == 0:
-                if not orden:
-                    orden = list(rng.permutation([1, -1]))
-                meta = int(orden.pop())
-                self.presentar(meta)
+                if not p['orden']:
+                    p['orden'] = [int(v) for v in rng.permutation([1, -1])]
+                    p['rng'] = rng.bit_generator.state
+                p['meta'] = p['orden'].pop()
+                self.presentar(p['meta'])
+            elif retomado:
+                self.presentar(p['meta'])
+            retomado, meta = False, p['meta']
             if perturbar_en is not None and t == perturbar_en:
                 previo = self.fsm.estado
                 self.fsm.ir_a('PERTURBACION')
@@ -652,7 +801,10 @@ class Orquestador:
                         break
                     motivo = self.revisar_salud() or 'eeg'   # el EEG fallo justo al decidir
                 self.pausa_segura(motivo)
+                self.guardar()
                 self.presentar(meta)                 # el ensayo se retoma con su cue
+            p['t'] = t + 1
+            self.guardar()                           # instantanea atomica despues de cada paso
 
     def presentar(self, meta):
         self.salidas.marcador(config.CUE_CERRAR if meta > 0 else config.CUE_RELAJA)
@@ -733,6 +885,8 @@ def argumentos(argv=None):
     ap.add_argument('--forzar', action='store_true', help='continua aunque un checkpoint de NO GO')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
                     help='inyecta el caos estandar (fallas reproducibles) en el simulador o en la ortesis simulada')
+    ap.add_argument('--reanudar', action='store_true',
+                    help='continua la sesion guardada en resultados/estado_sesion.json (mismo CSV)')
     ap.add_argument('--sin_sesgo', action='store_true',
                     help='apaga el detector de sesgo (si las metas no estan balanceadas)')
     # sim
@@ -755,6 +909,7 @@ def argumentos(argv=None):
     sim = a.backend == 'sim'
     a.pasos_estatico = a.pasos_estatico or (60 if sim else 30)
     a.pasos_adaptativo = a.pasos_adaptativo or (300 if sim else 120)
+    a.ciclo_cli = a.ciclo                      # lo que se escribio en la linea de comandos
     if a.ciclo is None:
         a.ciclo = config.CICLO_S if sim else 0.0   # en real el ciclo lo marcan cue + epoca
     a.falla = ((a.pasos_estatico + 150, a.pasos_estatico + 200) if a.falla_detector else None)
@@ -764,29 +919,53 @@ def argumentos(argv=None):
 def correr(orq, a):
     """La sesion completa. Pase lo que pase (incluido Ctrl+C dentro de una pausa segura)
     termina en EVALUACION, con el resumen impreso y el CSV cerrado."""
+    completa = False
     try:
         if orq.preparar():
-            aviso(f'Bloque LAZO_ESTATICO ({a.pasos_estatico} pasos)...')
-            orq.bloque(a.pasos_estatico, aprender=False)
-            orq.fsm.ir_a('LAZO_ADAPTATIVO')
+            if orq.prog is None or orq.prog['bloque'] == 'estatico':
+                aviso(f'Bloque LAZO_ESTATICO ({a.pasos_estatico} pasos)...')
+                orq.bloque('estatico', a.pasos_estatico, aprender=False)
+                orq.fsm.ir_a('LAZO_ADAPTATIVO')
             aviso(f'Bloque LAZO_ADAPTATIVO ({a.pasos_adaptativo} pasos)...')
-            orq.bloque(a.pasos_adaptativo, aprender=True,
+            orq.bloque('adaptativo', a.pasos_adaptativo, aprender=True,
                        perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3)
+            completa = True
         else:
             aviso('Detenido por NO GO. Plan B: sesion grabada (puente_lsl.py --placa playback).')
     except KeyboardInterrupt:
-        aviso('\nInterrumpido por el usuario.')
+        aviso('\nInterrumpido por el usuario.'
+              + (' Para continuar esta sesion: el mismo comando con --reanudar.' if orq.lista else ''))
     finally:
         if 'EVALUACION' in config.TRANSICIONES[orq.fsm.estado]:
             orq.fsm.ir_a('EVALUACION')
         orq.evaluar()
+        if completa:
+            orq.guardar(terminada=True)              # una sesion completa ya no se reanuda
         orq.cerrar()
+
+
+def argumentos_reanudados(inst, a):
+    """Los argumentos de la sesion guardada. De la linea de comandos solo se toma lo que
+    puede cambiar tras un cierre inesperado: --ciclo, --puerto y --ortesis-sim."""
+    if inst['args']['backend'] != a.backend:
+        aviso(f"La sesion guardada es '{inst['args']['backend']}', no '{a.backend}'.")
+        sys.exit(2)
+    r = argparse.Namespace(**inst['args'])
+    r.reanudar, r.saltar_calibracion = True, True
+    r.puerto, r.ortesis_sim = a.puerto, a.ortesis_sim or r.ortesis_sim
+    if a.ciclo_cli is not None:
+        r.ciclo = a.ciclo_cli
+    return r
 
 
 def main(argv=None):
     a = argumentos(argv)
+    inst = None
+    if a.reanudar:
+        inst = cargar_instantanea()
+        a = argumentos_reanudados(inst, a)
     backend = BackendSim(a) if a.backend == 'sim' else BackendReal(a)
-    correr(Orquestador(backend, a), a)
+    correr(Orquestador(backend, a, inst), a)
 
 
 if __name__ == '__main__':
