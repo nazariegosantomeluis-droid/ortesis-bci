@@ -6,6 +6,10 @@
   4. error movil del agente contra el decoder en la sombra
   5. beta +- 2 desviaciones, confianza viva del detector y cambios detectados
 
+En la cabecera, tres semaforos de salud (EEG, ortesis, detector; gris = el detector
+aun calienta). En PAUSA_SEGURA el estado se pone en rojo y dice el motivo y, si es
+un electrodo, cual falla y por que.
+
 Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
       python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
 """
@@ -23,6 +27,9 @@ from pylsl import StreamInlet, resolve_byprop
 import config
 
 N = 300          # pasos visibles
+COLORES_SALUD = {config.VERDE: '#2ca02c', config.AMARILLO: '#e6b800', config.ROJO: '#d62728',
+                 config.CALENTANDO: '#9e9e9e'}
+SEMAFOROS = {'eeg': 'EEG', 'ortesis': 'ORTESIS', 'detector': 'DETECTOR'}
 VENTANA = 20     # para el error movil
 
 
@@ -42,6 +49,12 @@ class Tablero(QtWidgets.QWidget):
             w.setStyleSheet(f'font-size:{tam}px; font-weight:bold; padding:4px;')
         cab.addWidget(self.lbl_estado, 3)
         cab.addWidget(self.lbl_cue, 2)
+        self.semaforos = {}
+        for sub, texto in SEMAFOROS.items():
+            self.semaforos[sub] = QtWidgets.QLabel(texto)
+            self.semaforos[sub].setAlignment(QtCore.Qt.AlignCenter)
+            cab.addWidget(self.semaforos[sub], 1)
+        self._semaforos({'eeg': config.VERDE, 'ortesis': config.VERDE, 'detector': config.CALENTANDO}, {})
         lay.addLayout(cab)
         lay.addWidget(self.lbl_cp)
 
@@ -119,9 +132,24 @@ class Tablero(QtWidgets.QWidget):
         if nuevos:
             self._dibujar()
 
+    def _semaforos(self, colores, detalle):
+        for sub, lbl in self.semaforos.items():
+            color = COLORES_SALUD.get(colores.get(sub), COLORES_SALUD[config.CALENTANDO])
+            lbl.setStyleSheet(f'font-size:13px; font-weight:bold; color:white; background:{color}; '
+                              f'border-radius:8px; padding:4px 10px;')
+            lbl.setToolTip(detalle.get(sub, ''))
+
     def _procesar(self, e):
         tipo = e.get('tipo')
-        if tipo == 'cue':
+        if tipo == 'salud':
+            self._semaforos(e['colores'], e['detalle'])
+            if e['estado'] == 'PAUSA_SEGURA':
+                motivo = e.get('motivo') or ''
+                detalle = e['detalle'].get('ortesis' if motivo == 'ortesis' else 'eeg', '')
+                self.lbl_estado.setText(' · '.join(x for x in ('PAUSA SEGURA', motivo, detalle) if x))
+                self.lbl_estado.setStyleSheet(f'font-size:16px;font-weight:bold;padding:4px;'
+                                              f'color:{COLORES_SALUD[config.ROJO]};')
+        elif tipo == 'cue':
             cerrar = e['meta'] > 0
             self.lbl_cue.setText('CERRAR' if cerrar else 'RELAJA')
             self.lbl_cue.setStyleSheet(f'font-size:28px;font-weight:bold;padding:4px;'
@@ -132,6 +160,8 @@ class Tablero(QtWidgets.QWidget):
             self.lbl_cp.setStyleSheet(f'font-size:12px;font-weight:bold;color:{color};')
         elif tipo == 'paso':
             d = self.d
+            if 'salud' in e:                                     # las sesiones viejas no lo traen
+                self._semaforos(e['salud'], {})
             if d['paso'] and e['paso'] < d['paso'][-1]:          # nueva sesion
                 for q in d.values():
                     q.clear()

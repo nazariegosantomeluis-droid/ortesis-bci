@@ -294,6 +294,49 @@ def calibracion_repeticiones():
     return f'maximo {config.CAL_REPETICIONES_MAX} repeticiones por ensayo y aviso'
 
 
+# ------------------------------------------------------------ tablero
+@prueba
+def tablero_salud():
+    """El tablero (sin pantalla) pinta los tres semaforos y PAUSA_SEGURA en rojo con el electrodo."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from pyqtgraph.Qt import QtWidgets
+    import tablero
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    C = tablero.COLORES_SALUD
+    t = tablero.Tablero()
+    try:
+        t.timer.stop()
+        assert set(t.semaforos) == {'eeg', 'ortesis', 'detector'}
+        assert C[config.CALENTANDO] in t.semaforos['detector'].styleSheet()      # gris al arrancar
+        t._procesar({'tipo': 'salud', 'estado': 'PAUSA_SEGURA', 'motivo': 'canal', 'escalon': 3,
+                     'colores': {'eeg': 'ROJO', 'ortesis': 'VERDE', 'reloj': 'VERDE', 'detector': 'AMARILLO'},
+                     'detalle': {'eeg': 'C3 plano', 'ortesis': '', 'reloj': '', 'detector': 'fiabilidad 0.60'}})
+        assert C['ROJO'] in t.semaforos['eeg'].styleSheet()
+        assert C['VERDE'] in t.semaforos['ortesis'].styleSheet()
+        assert C['AMARILLO'] in t.semaforos['detector'].styleSheet()
+        txt = t.lbl_estado.text()
+        assert 'PAUSA SEGURA' in txt and 'canal' in txt and 'C3 plano' in txt, txt
+        assert C['ROJO'] in t.lbl_estado.styleSheet()
+        assert 'C3 plano' in t.semaforos['eeg'].toolTip()
+        paso = {'tipo': 'paso', 'paso': 1, 'estado': 'LAZO_ADAPTATIVO', 'meta': 1, 'angulo': 0.5,
+                'p_crudo': 0.6, 'b': 0.5, 'p_prima': 0.6, 'P_hat': None, 'error': 0, 'error_sombra': 0,
+                'beta': 0.1, 'sd_beta': 0.5, 'youden': 0.6, 'fiabilidad': 1.0, 'congelado': False,
+                'cambio': '', 'latencia_ms': None, 'perturbado': False, 'excluido': 'sin_ack',
+                'salud': {'eeg': 'VERDE', 'ortesis': 'AMARILLO', 'reloj': 'VERDE', 'detector': 'CALENTANDO'}}
+        t._procesar(paso)
+        assert 'sin ACK' in t.lbl_estado.text() and 'PAUSA' not in t.lbl_estado.text()
+        assert C['VERDE'] in t.semaforos['eeg'].styleSheet()
+        assert C['AMARILLO'] in t.semaforos['ortesis'].styleSheet()
+        assert C[config.CALENTANDO] in t.semaforos['detector'].styleSheet()
+        viejo = {k: v for k, v in paso.items() if k not in ('salud', 'excluido')}   # sesion grabada antigua
+        t._procesar({**viejo, 'paso': 2, 'latencia_ms': 8.0})
+        t._dibujar()
+    finally:
+        t.close()
+    return 'tres semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa'
+
+
 # ------------------------------------------------------------ caos
 @prueba
 def plan_caos():
@@ -681,7 +724,7 @@ def main():
     print('Pruebas ortesis-bci')
     for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
               maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones,
-              plan_caos, caos_sim, caos_agente_vs_sombra,
+              plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               modelos_hardware, senal_valida,
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, puente_reconecta,
               cerebro_sintetico):
