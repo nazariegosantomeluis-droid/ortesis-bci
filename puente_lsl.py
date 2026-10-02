@@ -22,7 +22,7 @@ from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
 from pylsl import StreamOutlet, local_clock
 
 import config
-from salud import Retroceso
+from salud import RegistroHuecos, Retroceso
 
 SILENCIO_MAX_S = 2.0     # sin datos de la placa durante este tiempo: se reconecta
 
@@ -121,6 +121,10 @@ def main():
         board.get_board_data()                  # descarta lo medido con la corriente de prueba
     outlet = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
     print(f'Publicando EEG ({a.placa}, {len(eeg)} canales, {fs} Hz). Ctrl+C para parar.')
+    # registro de huecos: paquetes perdidos (contador de paquetes de la placa) y silencios de
+    # llegada. Sirve para medir el dongle con el casco real y elegir orquestador.py --renovar-eeg.
+    canal_paquete = BoardShim.get_package_num_channel(datos_id)
+    huecos = RegistroHuecos(fs)
 
     n_total, t_ini = 0, time.time()
     t_dato, retroceso = time.time(), Retroceso()
@@ -135,9 +139,13 @@ def main():
                 outlet.push_chunk(d[eeg, :].T.tolist(), local_clock())
                 n_total += d.shape[1]
                 t_dato = time.time()
+                huecos.bloque(d[canal_paquete], t_dato)
             elif time.time() - t_dato > SILENCIO_MAX_S:
                 reconectar(board, retroceso, a.grabar)
                 t_dato = time.time()
+                huecos.reiniciar_contador()
+            if huecos.toca_resumen(time.time()):
+                print(huecos.resumen(time.time()), flush=True)
             if time.time() - t_ini > 5:
                 print(f'  {n_total / (time.time() - t_ini):.0f} muestras/s')
                 n_total, t_ini = 0, time.time()

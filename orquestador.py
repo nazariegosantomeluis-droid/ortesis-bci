@@ -201,7 +201,8 @@ class BackendSim:
         self.piloto = mk(a.semilla + 1)
         self.a, self.seq, self.t = a, 0, 0
         self.t_virtual, self.fallas = 0.0, {}
-        self.caos = PlanCaos(a.caos) if getattr(a, 'caos', None) is not None else None
+        self.caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
+                     if getattr(a, 'caos', None) is not None else None)
         self.acks_perdidos, self.ultima_latencia = 0, 0.0
         self.epocas_en_corte = []                  # seq de las epocas que tocaron un corte de EEG
 
@@ -305,8 +306,9 @@ class BackendReal:
         import hardware as hw
         self.hw, self.a = hw, a
         aviso('Conectando al flujo EEG...')
-        self.eeg = hw.EntradaEEG()
-        caos = PlanCaos(a.caos) if a.caos is not None else None     # solo afecta a la ortesis simulada
+        self.eeg = hw.EntradaEEG(renovar_s=getattr(a, 'renovar_eeg', None))
+        caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
+                if a.caos is not None else None)                    # solo afecta a la ortesis simulada
         self.ortesis = hw.OrtesisSimulada(caos=caos) if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
         self.angulo = 0.5
         self.decoder = self.detector = None
@@ -886,6 +888,8 @@ def argumentos(argv=None):
     ap.add_argument('--forzar', action='store_true', help='continua aunque un checkpoint de NO GO')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
                     help='inyecta el caos estandar (fallas reproducibles) en el simulador o en la ortesis simulada')
+    ap.add_argument('--caos-nivel', dest='caos_nivel', choices=sorted(config.CAOS), default='estandar',
+                    help='estandar (una falla cada pocos segundos) o leve (una cada 2 a 3 minutos)')
     ap.add_argument('--reanudar', action='store_true',
                     help='continua la sesion guardada en resultados/estado_sesion.json (mismo CSV)')
     ap.add_argument('--sin_sesgo', action='store_true',
@@ -897,6 +901,9 @@ def argumentos(argv=None):
     # real
     ap.add_argument('--puerto', default=config.PUERTO_ORTESIS)
     ap.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true')
+    ap.add_argument('--renovar-eeg', dest='renovar_eeg', type=float, default=config.SALUD['eeg_renovar_s'],
+                    metavar='S', help='silencio del EEG (s) tras el que se renueva la entrada de LSL; '
+                    'subelo si el dongle pierde paquetes en rafagas y el buffer se vacia seguido')
     ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
     ap.add_argument('--min_mi', type=int, default=24)

@@ -30,6 +30,70 @@ class Retroceso:
         return e
 
 
+class RegistroHuecos:
+    """Cuenta los huecos del flujo de la placa, para medir el dongle con el casco real.
+
+    - Rafagas de paquetes perdidos: saltos del contador de paquetes de la placa (el del
+      Cyton va de 0 a 255 y da la vuelta). Una rafaga de N muestras dura N / fs.
+    - Silencios de llegada: los datos tardaron mas de `silencio_s` en llegar al puente.
+    resumen() se imprime cada `periodo_s` y da la ventana reciente y el total de la sesion.
+    """
+
+    def __init__(self, fs, modulo=256, silencio_s=0.1, periodo_s=30.0):
+        self.fs, self.modulo, self.silencio_s, self.periodo_s = fs, modulo, silencio_s, periodo_s
+        self.huecos, self.silencios = [], []      # ventana actual: (t, muestras, s) y (t, s)
+        self.muestras = 0                         # recibidas en toda la sesion
+        self.total_rafagas = self.total_perdidas = self.total_silencios = 0
+        self._ultimo = self._t_bloque = self._t0 = self._t_resumen = None
+
+    def reiniciar_contador(self):
+        """Tras reconectar la placa su contador empieza de nuevo: ese salto no es un hueco."""
+        self._ultimo = self._t_bloque = None
+
+    def bloque(self, contador, t):
+        """contador: el canal de numero de paquete del bloque recien leido; t: cuando llego (s)."""
+        c = [int(v) for v in contador]
+        if not c:
+            return
+        if self._t0 is None:
+            self._t0 = self._t_resumen = t
+        if self._t_bloque is not None and t - self._t_bloque >= self.silencio_s:
+            self.silencios.append((t, t - self._t_bloque))
+            self.total_silencios += 1
+        previo = self._ultimo
+        for v in c:
+            if previo is not None and v != previo:           # un contador repetido no es un hueco
+                perdidas = (v - previo - 1) % self.modulo
+                if perdidas:
+                    self.huecos.append((t, perdidas, perdidas / self.fs))
+                    self.total_rafagas += 1
+                    self.total_perdidas += perdidas
+            previo = v
+        self._ultimo, self._t_bloque = previo, t
+        self.muestras += len(c)
+
+    def toca_resumen(self, t):
+        return self._t_resumen is not None and t - self._t_resumen >= self.periodo_s
+
+    def resumen(self, t):
+        """Texto de la ventana que termina en t (y la reinicia) mas el acumulado de la sesion."""
+        dur = [1000 * d for _, _, d in self.huecos]
+        perdidas = sum(n for _, n, _ in self.huecos)
+        txt = f'  huecos (ultimos {t - self._t_resumen:.0f} s): {len(dur)} rafagas, {perdidas} muestras perdidas'
+        if dur:
+            txt += f', media {sum(dur) / len(dur):.0f} ms, max {max(dur):.0f} ms'
+        txt += f'; {len(self.silencios)} silencios de llegada'
+        if self.silencios:
+            txt += f' (max {1000 * max(d for _, d in self.silencios):.0f} ms)'
+        minutos = max(t - self._t0, 1e-9) / 60
+        total = self.muestras + self.total_perdidas
+        txt += (f' | sesion: {self.total_rafagas} rafagas ({self.total_rafagas / minutos:.1f} por min), '
+                f'{self.total_perdidas} muestras perdidas ({100 * self.total_perdidas / max(total, 1):.2f} %), '
+                f'{self.total_silencios} silencios')
+        self.huecos, self.silencios, self._t_resumen = [], [], t
+        return txt
+
+
 class Vigilante:
     """Semaforo VERDE / AMARILLO / ROJO por subsistema.
 

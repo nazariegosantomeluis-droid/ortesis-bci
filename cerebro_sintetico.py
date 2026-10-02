@@ -71,7 +71,8 @@ class Cerebro:
         self.eventos = []                        # (t0, plantilla)
         self.t0_sesion = local_clock()
         self.n_err = self.n_ok = 0
-        self.caos = PlanCaos(a.caos) if getattr(a, 'caos', None) is not None else None
+        self.caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
+                     if getattr(a, 'caos', None) is not None else None)
         self._canal_caos = None                  # para avisar una vez por falla
         self.lock = threading.Lock()
         n = len(CH)
@@ -256,7 +257,9 @@ def main():
     ap.add_argument('--semilla', type=int, default=0)
     ap.add_argument('--banco', action='store_true', help='evalua decoder y detector offline y sale')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
-                    help='inyecta el caos estandar: cortes de EEG, rafagas de parpadeos, canal despegado')
+                    help='inyecta caos: cortes de EEG, rafagas de parpadeos, canal despegado')
+    ap.add_argument('--caos-nivel', dest='caos_nivel', choices=sorted(config.CAOS), default='estandar',
+                    help='estandar o leve (una falla cada 2 a 3 minutos)')
     a = ap.parse_args()
     if a.banco:
         return banco(a)

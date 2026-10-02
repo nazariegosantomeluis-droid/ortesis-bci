@@ -125,12 +125,16 @@ class EntradaEEG:
     Silencios sin perder el flujo (un tiron del dongle): el suavizado de marcas de LSL
     (dejitter) supone muestreo regular y, tras un hueco, deja las marcas desfasadas
     segundos durante ~10 s (medido: 2.7 s tras un hueco de 3 s). Por eso, en cuanto el
-    flujo calla mas de `eeg_edad_amarillo_s`, la entrada se RENUEVA: una entrada nueva
-    al mismo flujo empieza con el suavizado limpio y el buffer vacio.
+    flujo calla mas de `renovar_s` (config.SALUD['eeg_renovar_s'], 1 s por defecto), la
+    entrada se RENUEVA: una entrada nueva al mismo flujo empieza con el suavizado limpio
+    y el buffer vacio. Un hueco mas corto no renueva (el dongle del Cyton pierde paquetes
+    en rafagas cortas y vaciar el buffer cada vez seria peor); de ese desfase menor se
+    encarga el semaforo del reloj, que suspende el aprendizaje.
     """
 
-    def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG'):
+    def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG', renovar_s=None):
         self.nombre, self._segundos = nombre, segundos
+        self._renovar_s = config.SALUD['eeg_renovar_s'] if renovar_s is None else renovar_s
         self._uid, self._creado, self.reconexiones = None, -np.inf, 0
         self._info, self.renovaciones, self._renovada = None, 0, False
         self._llegadas = deque(maxlen=2000)       # (instante de llegada, muestras): tasa real
@@ -209,7 +213,7 @@ class EntradaEEG:
 
     def _leer(self):
         from pylsl import local_clock
-        rojo, amarillo = config.SALUD['eeg_edad_rojo_s'], config.SALUD['eeg_edad_amarillo_s']
+        rojo = config.SALUD['eeg_edad_rojo_s']
         while self._vivo:
             try:
                 datos, ts = self.inlet.pull_chunk(timeout=0.05)
@@ -226,11 +230,11 @@ class EntradaEEG:
                     self._lag.append(local_clock() - ts[-1])
                     self._llegadas.append((ahora, len(ts)))
                     self._t_llegada = ahora
-            elif time.monotonic() - self._t_llegada > rojo:
-                self._reconectar()                # mudo: quiza es otra instancia la que publica ahora
-            elif time.monotonic() - self._t_llegada > amarillo and not self._renovada:
+            elif time.monotonic() - self._t_llegada > self._renovar_s and not self._renovada:
                 self._renovar()                   # un hueco descuadra el suavizado: entrada limpia
                 self._renovada = True
+            elif time.monotonic() - self._t_llegada > rojo:
+                self._reconectar()                # mudo: quiza es otra instancia la que publica ahora
 
     def edad(self):
         """Segundos desde que llego la ultima muestra."""

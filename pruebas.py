@@ -462,13 +462,27 @@ def plan_caos():
     picos = [p for p in (a.por_paso('pico_latencia', s) for s in range(2000)) if p]
     assert all(80 <= p <= 300 for p in picos) and 0.03 < len(picos) / 2000 < 0.08
     assert [c.activo('corte_eeg', t) for t in ts] != [a.activo('corte_eeg', t) for t in ts]
-    return 'reproducible por semilla, independiente del orden y dentro de los rangos'
+    # caos leve: del orden de una falla cada 2 a 3 minutos, sumando todos los tipos
+    fallas, horas = 0, 0
+    for semilla in range(20):
+        leve = PlanCaos(semilla, config.CAOS['leve'])
+        for tipo in ('corte_eeg', 'rafaga_parpadeos', 'canal'):
+            leve.activo(tipo, 3600.0)
+            fallas += sum(1 for e in leve._lineas[tipo]['ev'] if e[0] < 3600.0)
+        pasos = int(3600 / config.CICLO_S)
+        fallas += sum(leve.por_paso('ack_perdido', s) for s in range(pasos))
+        fallas += sum(leve.por_paso('pico_latencia', s) is not None for s in range(pasos))
+        horas += 1
+    cada_min = 60.0 * horas / fallas
+    assert 2.0 <= cada_min <= 3.0, cada_min
+    assert config.CAOS['estandar'] is config.CAOS_ESTANDAR
+    return f'reproducible por semilla e independiente del orden; caos leve: una falla cada {cada_min:.1f} min'
 
 
-def _sesion_caos(semilla, caos):
+def _sesion_caos(semilla, caos, nivel='estandar'):
     import orquestador
     argv = ['sim', '--ciclo', '0', '--semilla', str(semilla), '--pasos_estatico', '60',
-            '--pasos_adaptativo', '300'] + (['--caos', str(caos)] if caos is not None else [])
+            '--pasos_adaptativo', '300', '--caos-nivel', nivel] + (['--caos', str(caos)] if caos is not None else [])
     a = orquestador.argumentos(argv)
     orq = orquestador.Orquestador(_backend_con_fallas(orquestador, a, {}), a)
     orquestador.correr(orq, a)
@@ -494,6 +508,8 @@ def caos_sim():
     assert n_pausas >= 3, n_pausas
     assert sum(1 for f in orq.filas if f['estado'] != 'PAUSA_SEGURA') == 360
     assert set(orq.excluidos) <= set(config.MOTIVOS_EXCLUSION), orq.excluidos
+    leve = _sesion_caos(0, caos=1, nivel='leve')              # el nivel leve excluye mucho menos
+    assert 0 < sum(leve.excluidos.values()) < sum(orq.excluidos.values()) / 3, (leve.excluidos, orq.excluidos)
     return f'360 pasos y {n_pausas} pausas sin excepcion; excluidos {orq.excluidos}'
 
 
@@ -777,11 +793,30 @@ def silencio_sin_recrear():
             time.sleep(0.02)
     threading.Thread(target=publicar, daemon=True).start()
     eeg = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre)
+    sensible = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre, renovar_s=0.3)
+    import orquestador                              # el umbral se ajusta por linea de comandos
+    assert orquestador.argumentos(['real']).renovar_eeg == config.SALUD['eeg_renovar_s']
+    assert orquestador.argumentos(['real', '--renovar-eeg', '0.5']).renovar_eeg == 0.5
     retraso = lambda: local_clock() - eeg.ultimo_t()
     try:
-        time.sleep(6.0)
+        time.sleep(4.0)
+        # una rafaga corta de paquetes perdidos (0.6 s) NO renueva con el umbral por defecto (1 s),
+        # para no vaciar el buffer con cada tiron del dongle; con un umbral de 0.3 s si
+        assert config.SALUD['eeg_renovar_s'] == 1.0
         antes = retraso()
         assert antes < 0.1, antes
+        pub['callado'] = True
+        time.sleep(0.6)
+        pub['callado'] = False
+        derivas = []
+        for _ in range(15):
+            time.sleep(0.1)
+            derivas.append(abs(eeg.lecturas()['reloj_ms']))
+        assert eeg.renovaciones == 0 and sensible.renovaciones == 1, (eeg.renovaciones, sensible.renovaciones)
+        # sin renovar, las marcas quedan desfasadas un rato: el semaforo del reloj lo ve (y el agente no aprende)
+        assert max(derivas) >= config.SALUD['reloj_rojo_ms'], max(derivas)
+        sensible.cerrar()
+        time.sleep(2.0)
         pub['callado'] = True
         t_corte = local_clock()
         time.sleep(2.5)
@@ -860,6 +895,29 @@ def dos_flujos_eeg():
         pub['vivo'] = False
         eeg.cerrar()
     return 'elige el mas reciente; no salta mientras el suyo viva; si muere, espera a uno mas nuevo'
+
+
+@prueba
+def registro_huecos():
+    """El registro de huecos del puente: rafagas de paquetes perdidos (saltos del contador de
+    paquetes de la placa, modulo 256) y silencios de llegada, con su resumen cada 30 s."""
+    from salud import RegistroHuecos
+    r = RegistroHuecos(fs=250, silencio_s=0.55)
+    r.bloque(np.arange(0, 100), t=0.10)                       # sin perdidas
+    r.bloque(np.arange(100, 250), t=0.50)
+    r.bloque(np.r_[250:256, 0:20], t=1.00)                    # la vuelta 255 -> 0 no es un hueco
+    assert r.huecos == [] and r.muestras == 276
+    r.bloque(np.arange(30, 60), t=1.20)                       # faltan 20..29: 10 muestras = 40 ms
+    r.bloque(np.r_[60:70, 95:120], t=1.40)                    # faltan 70..94 dentro del bloque: 100 ms
+    assert [(n, round(d, 3)) for _, n, d in r.huecos] == [(10, 0.04), (25, 0.1)], r.huecos
+    r.bloque(np.arange(120, 130), t=2.00)                     # los datos tardaron 0.6 s en llegar
+    assert [round(d, 2) for _, d in r.silencios] == [0.6], r.silencios
+    txt = r.resumen(t=30.0)
+    for trozo in ('2 rafagas', '35 muestras', 'max 100 ms', '1 silencio', '600 ms'):
+        assert trozo in txt, (trozo, txt)
+    assert '0 rafagas' in r.resumen(t=60.0) and 'sesion: 2 rafagas' in r.resumen(t=60.0)   # ventana nueva
+    assert not r.toca_resumen(t=70.0) and r.toca_resumen(t=91.0)
+    return 'cuenta rafagas de paquetes perdidos y silencios; resumen por ventana y de la sesion'
 
 
 @prueba
@@ -966,7 +1024,8 @@ def main():
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               instantanea_estado, reanudar,
               modelos_hardware, senal_valida,
-              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, puente_reconecta,
+              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, registro_huecos,
+              puente_reconecta,
               cerebro_sintetico):
         p()
     if a.completa:

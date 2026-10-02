@@ -94,6 +94,10 @@ VERDE, AMARILLO, ROJO = 'VERDE', 'AMARILLO', 'ROJO'
 CALENTANDO = 'CALENTANDO'       # solo el detector: aun no hay epocas para juzgarlo (gris en el tablero)
 SALUD = {
     'eeg_edad_amarillo_s': 0.3, 'eeg_edad_rojo_s': 1.0,     # edad de la ultima muestra
+    'eeg_renovar_s': 1.0,                                   # silencio tras el que se renueva la entrada
+                                                            # (orquestador.py --renovar-eeg). El dongle del
+                                                            # Cyton pierde paquetes en rafagas cortas: con
+                                                            # menos de 1 s se vaciaria el buffer seguido.
     'eeg_tasa_amarillo': 0.10, 'eeg_tasa_rojo': 0.25,       # desviacion relativa de la tasa real
     'hueco_max_s': 0.02,                                    # salto entre muestras que cuenta como corte
     'canal_plano_uv': 0.1, 'canal_saturado_uv': 180_000.0, 'canal_ruidoso_uv': 100.0,
@@ -120,6 +124,15 @@ CAOS_ESTANDAR = {
     'ack_perdido':      {'p': 0.03},                                    # por paso
     'pico_latencia':    {'p': 0.05, 'ms': (80.0, 300.0)},               # por paso
 }
+# "Caos leve": mismas fallas, del orden de una cada 2 a 3 minutos sumando todos los tipos.
+CAOS_LEVE = {
+    'corte_eeg':        {'cada_s': 600.0, 'duracion_s': (1.0, 5.0), 'recrear_desde_s': 3.0},
+    'rafaga_parpadeos': {'cada_s': 600.0, 'duracion_s': (2.0, 4.0), 'por_segundo': 3.0},
+    'canal':            {'cada_s': 900.0, 'duracion_s': (4.0, 10.0)},
+    'ack_perdido':      {'p': 0.002},
+    'pico_latencia':    {'p': 0.003, 'ms': (80.0, 300.0)},
+}
+CAOS = {'estandar': CAOS_ESTANDAR, 'leve': CAOS_LEVE}                   # --caos-nivel
 
 # ============================ Maquina de estados ============================
 ESTADOS = ['IMPEDANCIAS', 'CAL_MI', 'CAL_ERRP', 'LAZO_ESTATICO',
