@@ -36,7 +36,7 @@ Orden de los 17 canales del flujo combinado, unidades del EEG, contador de 1 en 
 
 - [x] 1. Contrato: montaje, papeles, flujo `IMU`, fuentes de EEG; gemelo con la topografía del montaje.
 - [x] 2. Reloj por contador: hora de cada muestra y huecos de Bluetooth (reemplaza la lógica de paquetes del Cyton).
-- [ ] 3. Gemelo: N1 visual en PO7/Oz/PO8, IMU con movimientos de cabeza, pérdidas de Bluetooth por contador, formato UnicornLSL.
+- [x] 3. Gemelo: N1 visual en PO7/Oz/PO8, IMU con movimientos de cabeza, pérdidas de Bluetooth por contador, formato UnicornLSL.
 - [ ] 4. `EntradaEEG` configurable (nombre o tipo, canales por índice, contador, IMU) y selección de canales por validación cruzada.
 - [ ] 5. `puente_lsl.py --placa unicorn --serie <num>` con flujo `IMU`; `verificar_unicorn.py`.
 - [ ] 6. CP1 robusto y sin impedancias.

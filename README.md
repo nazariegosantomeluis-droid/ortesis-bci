@@ -14,7 +14,7 @@ El casco de la demo es un **g.tec Unicorn Hybrid Black**: 8 canales de EEG a 250
 | Acelerómetro y giroscopio | Rechazo de artefactos por movimiento de cabeza |
 | Contador de muestras | Hora de cada muestra y pérdidas de Bluetooth |
 
-La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya usa este montaje. **En curso:** `puente_lsl.py --placa unicorn`, la entrada directa desde la app UnicornLSL, la IMU y el contador todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
+La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. **En curso:** `puente_lsl.py --placa unicorn`, la entrada directa desde UnicornLSL y el uso de la IMU y del contador en el orquestador todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
 
 ## Instalación
 
@@ -72,7 +72,7 @@ Con el detector de ErrP degradado a propósito, el aprendizaje baja a menos del 
 
 ## Gemelo digital del piloto
 
-`cerebro_sintetico.py` sustituye al casco. Escucha las señales y los pasos del orquestador y responde como una persona: desincroniza mu/beta sobre C3 al imaginar cerrar, genera un ErrP fronto-central (Ne ≈ 250 ms, Pe ≈ 350 ms) cuando la órtesis va al lado contrario, parpadea y, opcionalmente, se cansa. Con él se valida el camino **real** completo con verdad conocida.
+`cerebro_sintetico.py` sustituye al casco (un Unicorn Hybrid Black). Escucha las señales y los pasos del orquestador y responde como una persona: desincroniza mu/beta sobre C3 al imaginar cerrar, genera una respuesta visual occipital (N1 ≈ 170 ms en PO7/Oz/PO8) ante cada movimiento de la órtesis y un ErrP fronto-central (Ne ≈ 250 ms, Pe ≈ 350 ms en Fz/Cz/Pz) cuando va al lado contrario, parpadea, mueve la cabeza de vez en cuando (el giroscopio lo registra y el EEG se ensucia), pierde muestras por Bluetooth si se le pide y, opcionalmente, se cansa. Con él se valida el camino **real** completo con verdad conocida.
 
 Corrida completa (`orquestador.py real --ortesis-sim` contra el cerebro sintético): CP1, CP2 (MI BA 0.83), CP3 (ErrP BA 0.90) y CP4 en **GO**. Tras la perturbación, el agente tuvo un error de **0.14**; el decoder sin aprender, de 0.47.
 
@@ -80,6 +80,8 @@ Corrida completa (`orquestador.py real --ortesis-sim` contra el cerebro sintéti
 python cerebro_sintetico.py --banco          # decoder y detector offline, en segundos
 python cerebro_sintetico.py                  # terminal 1 (en lugar de puente_lsl.py)
 python cerebro_sintetico.py --erd 0.15 --errp 4 --fatiga 0.5   # piloto difícil
+python cerebro_sintetico.py --perdidas-bt 20                   # 20 pérdidas de Bluetooth por minuto
+python cerebro_sintetico.py --formato unicornlsl               # publica como la app UnicornLSL de g.tec
 ```
 
 ## Resiliencia: el lazo que no se cae

@@ -1,28 +1,37 @@
-"""Cerebro sintetico: un gemelo digital del piloto que publica el flujo 'EEG' por LSL
-y REACCIONA al lazo como lo haria una persona.
+"""Cerebro sintetico: un gemelo digital del piloto con un g.tec Unicorn Hybrid Black puesto.
+Publica por LSL lo mismo que el casco real y REACCIONA al lazo como lo haria una persona.
 
-Sustituye a puente_lsl.py cuando no hay casco. A diferencia de la placa sintetica
-de BrainFlow (ruido puro), este cerebro:
+Sustituye al casco cuando no lo hay. A diferencia de la placa sintetica de BrainFlow
+(ruido puro), este cerebro:
 
   - escucha las senales del orquestador (cue_cerrar / cue_relaja) e "imagina":
     desincronizacion (ERD) de los ritmos mu (8-13 Hz) y beta (18-26 Hz) sobre
     C3 al imaginar cerrar la mano derecha, con transicion suave;
   - mira la ortesis: escucha cada paso (flujo 'Paso') y su ACK (paso_ack:<seq>,
-    estampado a la hora real del movimiento); si el movimiento contradice la
-    intencion, genera un ErrP fronto-central (Ne ~250 ms, Pe ~350 ms, N ~500 ms)
-    con jitter de latencia y amplitud; si es correcto, solo una respuesta visual
-    pequena (lo que hace dificil, y realista, la deteccion);
-  - tiene fondo 1/f, alfa, conduccion de volumen, ruido de 60 Hz, parpadeos en
-    Fz (para probar el detector de rareza) y, opcional, fatiga: el ERD se
-    debilita y el alfa sube con el tiempo (para probar recentrado y agente).
+    estampado a la hora real del movimiento). Todo movimiento visto produce una
+    respuesta visual occipital (P1 ~110 ms, N1 ~170 ms en PO7/Oz/PO8); si ademas
+    contradice la intencion, un ErrP fronto-central (Ne ~250 ms, Pe ~350 ms,
+    N ~500 ms en Fz/Cz/Pz) con jitter de latencia y amplitud;
+  - tiene fondo 1/f, alfa occipital, conduccion de volumen, ruido de 60 Hz, parpadeos
+    en Fz y, opcional, fatiga: el ERD se debilita y el alfa sube con el tiempo;
+  - mueve la cabeza de vez en cuando: el giroscopio y el acelerometro lo registran y
+    el EEG se ensucia a la vez (para probar el rechazo de artefactos por IMU);
+  - lleva el contador de muestras del casco y puede perder muestras como el
+    Bluetooth: el contador sigue y queda un hueco.
 
-Con esto el camino REAL completo (decoder de Riemann, detector de ErrP,
-calibracion secuencial, ConfianzaDetector, agente) se valida con verdad conocida.
+Formatos de salida (--formato):
+  puente      lo que publica puente_lsl.py: flujo 'EEG' (8 canales) y flujo 'IMU' (6),
+              con la hora de cada muestra ya reconstruida; una perdida es un hueco de hora.
+  unicornlsl  lo que publica la app UnicornLSL de g.tec: UN flujo de tipo 'Data' con 17
+              canales sin etiquetas (EEG 8, acelerometro 3, giroscopio 3, bateria,
+              contador, validez), muestra por muestra y estampado a la llegada.
 
 Uso
   python cerebro_sintetico.py                       piloto "bueno"
   python cerebro_sintetico.py --erd 0.15 --errp 4   piloto dificil
   python cerebro_sintetico.py --fatiga 0.3          se cansa durante la sesion
+  python cerebro_sintetico.py --perdidas-bt 20      20 perdidas de Bluetooth por minuto
+  python cerebro_sintetico.py --formato unicornlsl  como la app UnicornLSL
   python cerebro_sintetico.py --banco               evalua decoder y detector en segundos
   python cerebro_sintetico.py --caos 1              caos estandar: cortes de EEG, parpadeos, canal despegado
 """
@@ -32,7 +41,7 @@ import threading
 import time
 
 import numpy as np
-from pylsl import StreamInlet, StreamOutlet, local_clock, resolve_byprop
+from pylsl import StreamInfo, StreamInlet, StreamOutlet, local_clock, resolve_byprop
 from scipy.signal import butter, sosfilt
 
 import config
@@ -41,18 +50,20 @@ from caos import PlanCaos
 CH = config.CANALES_EEG                      # Fz C3 Cz C4 Pz PO7 Oz PO8 (Unicorn Hybrid Black)
 FS = config.FLUJOS['EEG'][2]
 IDX = {c: i for i, c in enumerate(CH)}
+SERIE = 'UN-2099.01.01'                      # numero de serie de mentira (formato de g.tec)
 
 # pesos espaciales (0-1) de cada fuente sobre los 8 electrodos
 #                     Fz    C3    Cz    C4    Pz    PO7   Oz    PO8
 W_MU_IZQ = np.array([0.10, 1.00, 0.40, 0.15, 0.25, 0.15, 0.05, 0.05])    # corteza motora izquierda
 W_MU_DER = np.array([0.10, 0.15, 0.40, 1.00, 0.25, 0.05, 0.05, 0.15])
 W_ERRP = np.array([0.90, 0.40, 1.00, 0.40, 0.60, 0.10, 0.05, 0.10])      # fronto-central (Fz, Cz, Pz)
+W_VISUAL = np.array([0.05, 0.05, 0.10, 0.05, 0.30, 0.90, 1.00, 0.90])    # occipital (PO7, Oz, PO8)
 W_ALFA = np.array([0.10, 0.25, 0.25, 0.25, 0.60, 0.90, 1.00, 0.90])      # occipital
 W_PARPADEO = np.array([1.00, 0.10, 0.20, 0.10, 0.05, 0.00, 0.00, 0.00])  # frontal
 
 
 def plantilla_errp(error, amp_uv, rng):
-    """ERP de retroalimentacion (1 s). Error: Ne/Pe/N tardia. Correcto: P300 visual chico."""
+    """ERP de retroalimentacion (1 s). Error: Ne/Pe/N tardia. Correcto: P300 chico."""
     t = np.arange(int(FS)) / FS
     lat = rng.normal(0, 0.03)
     a = amp_uv * rng.uniform(0.7, 1.3)
@@ -63,13 +74,22 @@ def plantilla_errp(error, amp_uv, rng):
     return visual + a * (-0.7 * g(0.25, 0.035) + 1.0 * g(0.36, 0.05) - 0.5 * g(0.50, 0.06))
 
 
+def plantilla_visual(amp_uv, rng):
+    """Respuesta visual occipital a un movimiento visto (1 s): P1 ~110 ms y N1 ~170 ms."""
+    t = np.arange(int(FS)) / FS
+    lat = rng.normal(0, 0.01)
+    a = amp_uv * rng.uniform(0.8, 1.2)
+    g = lambda mu, sd: np.exp(-((t - mu - lat) ** 2) / (2 * sd ** 2))
+    return a * (0.4 * g(0.11, 0.02) - 1.0 * g(0.17, 0.025))
+
+
 class Cerebro:
     def __init__(self, a):
         self.a = a
         self.rng = np.random.default_rng(a.semilla)
         self.meta, self.dir_paso = 0, 0          # 0 = sin imaginar
         self.gan_izq = self.gan_der = 1.0        # ganancia mu/beta (1 = reposo)
-        self.eventos = []                        # (t0, plantilla)
+        self.eventos = []                        # (t0, plantilla, pesos espaciales)
         self.t0_sesion = local_clock()
         self.n_err = self.n_ok = 0
         self.caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
@@ -87,6 +107,13 @@ class Cerebro:
         # conduccion de volumen: mezcla leve entre electrodos
         self.mezcla = np.eye(n) + 0.08 * np.abs(self.rng.normal(size=(n, n)))
         self.fase60 = 0.0
+        # respuesta visual, cabeza, IMU y Bluetooth: generador aparte, para que el resto del EEG
+        # sea la misma realizacion con o sin ellos (comparaciones limpias en el banco)
+        self.rng_cuerpo = np.random.default_rng([a.semilla, 99])
+        self.cabeza = None                       # movimiento en curso: (t0, dur, eje, grados/s, uV, pesos)
+        self.imu = np.zeros((0, 6))              # IMU de las muestras de la ultima llamada a generar()
+        self.contador = 0                        # contador de muestras del casco
+        self._fin_perdida = -np.inf
 
     # ------------------------------------------------------------ escucha al lazo
     def escuchar(self):
@@ -117,8 +144,14 @@ class Cerebro:
             error = self.dir_paso != self.meta
             self.n_err += error
             self.n_ok += not error
-            with self.lock:
-                self.eventos.append((t, plantilla_errp(error, self.a.errp, self.rng)))
+            self.movimiento(t, error)
+
+    def movimiento(self, t, error):
+        """El piloto ve moverse la ortesis en t: respuesta visual occipital siempre y, si el
+        movimiento contradice su intencion, ErrP fronto-central."""
+        with self.lock:
+            self.eventos.append((t, plantilla_errp(error, self.a.errp, self.rng), W_ERRP))
+            self.eventos.append((t, plantilla_visual(self.a.n1, self.rng_cuerpo), W_VISUAL))
 
     # ------------------------------------------------------------ genera EEG
     def _banda(self, clave, sos, k, n):
@@ -127,6 +160,8 @@ class Cerebro:
         return y / self.norma[clave]
 
     def generar(self, ts):
+        """EEG (muestras x 8, en uV) de los instantes ts. Deja en self.imu la IMU de esas
+        mismas muestras (muestras x 6: acelerometro en g, giroscopio en grados/s)."""
         n, a = len(ts), self.a
         horas = (ts[-1] - self.t0_sesion) / 3600
         fatiga = min(1.0, a.fatiga * horas * 4)              # llega a "a.fatiga" en ~15 min
@@ -157,13 +192,13 @@ class Cerebro:
         # ErrP y respuestas visuales programadas
         with self.lock:
             vivos = []
-            for t0, pl in self.eventos:
+            for t0, pl, w in self.eventos:
                 k = np.round((ts - t0) * FS).astype(int)
                 ok = (k >= 0) & (k < len(pl))
                 if ok.any():
-                    x[:, ok] += np.outer(W_ERRP, pl[k[ok]])
+                    x[:, ok] += np.outer(w, pl[k[ok]])
                 if ts[-1] - t0 < 1.2:
-                    vivos.append((t0, pl))
+                    vivos.append((t0, pl, w))
             self.eventos = vivos
         # parpadeos (con caos: rafagas)
         t_caos = ts[-1] - self.t0_sesion
@@ -176,22 +211,99 @@ class Cerebro:
             forma = 120 * np.sin(np.linspace(0, np.pi, dur))[: n - i0]
             x[:, i0:i0 + len(forma)] += np.outer(W_PARPADEO, forma)
         y = self.mezcla @ x
+        y += self._cabeza_e_imu(ts)                          # el movimiento de cabeza ensucia el EEG
         # caos: un canal se despega (plano, o ruido grande con mucha red electrica)
         canal = self.caos.activo('canal', t_caos) if self.caos else None
         if canal:
-            y[IDX[canal[2]]] = 0.0 if canal[3] == 'plano' else                 300.0 * self.rng.normal(size=n) + 200.0 * np.sin(fase)
+            y[IDX[canal[2]]] = (0.0 if canal[3] == 'plano'
+                                else 300.0 * self.rng.normal(size=n) + 200.0 * np.sin(fase))
         if canal != self._canal_caos:
             self._canal_caos = canal
             if canal:
                 print(f'  [caos] canal {canal[2]} despegado ({canal[3]}) {canal[1]:.1f} s', flush=True)
+        self.contador += n
         return y.T
+
+    # ------------------------------------------------------------ cabeza e IMU
+    def _cabeza_e_imu(self, ts):
+        """Movimientos de cabeza ocasionales. Devuelve el artefacto de EEG (8 x n) y deja la
+        IMU en self.imu: gravedad (~1 g en z) mas el movimiento en el giroscopio."""
+        n, r = len(ts), self.rng_cuerpo
+        tasa = getattr(self.a, 'cabeza', 0.0)
+        if self.cabeza is None and tasa > 0 and r.random() < tasa * n / FS:
+            self.cabeza = (ts[0], r.uniform(0.5, 1.5), int(r.integers(3)), r.uniform(40, 120),
+                           r.uniform(60, 150), r.uniform(0.5, 1.0, len(CH)))
+        forma = np.zeros(n)
+        if self.cabeza is not None:
+            t0, dur = self.cabeza[0], self.cabeza[1]
+            fase = (ts - t0) / dur
+            forma = np.where((fase >= 0) & (fase <= 1), np.sin(np.pi * np.clip(fase, 0, 1)), 0.0)
+        imu = np.zeros((n, 6))
+        imu[:, :3] = [0.0, 0.0, 1.0] + r.normal(0, 0.005, (n, 3))          # gravedad
+        imu[:, 3:] = r.normal(0, 0.5, (n, 3))                               # giroscopio en reposo
+        artefacto = np.zeros((len(CH), n))
+        if self.cabeza is not None:
+            _, _, eje, vel, uv, pesos = self.cabeza
+            imu[:, 3 + eje] += vel * forma
+            imu[:, (eje + 1) % 3] += 0.2 * forma                            # la gravedad cambia de eje
+            artefacto = np.outer(pesos, uv * forma) + r.normal(0, 10.0, (len(CH), n)) * (forma > 0)
+            if ts[-1] > self.cabeza[0] + self.cabeza[1]:
+                self.cabeza = None
+        self.imu = imu
+        return artefacto
+
+    def entregadas(self, ts):
+        """Mascara de las muestras que SI llegan por Bluetooth (False = perdida; el contador
+        del casco sigue contando). --perdidas-bt da las perdidas por minuto."""
+        r, por_min = self.rng_cuerpo, getattr(self.a, 'perdidas_bt', 0.0)
+        if por_min > 0 and ts[-1] > self._fin_perdida and r.random() < por_min / 60 * len(ts) / FS:
+            self._fin_perdida = ts[0] + r.uniform(0.02, 0.2)
+        return ts > self._fin_perdida
+
+
+# ======================================================================
+class Salida:
+    """Publica por LSL en uno de los dos formatos (ver el encabezado del modulo)."""
+
+    def __init__(self, a):
+        self.formato, self.serie = a.formato, a.nombre_lsl
+        self.offset = np.random.default_rng([a.semilla, 7]).uniform(-1, 1, len(CH)) * a.offset_dc
+        self.abrir()
+
+    def abrir(self):
+        if self.formato == 'puente':
+            self.eeg = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
+            self.imu = StreamOutlet(config.crear_info('IMU'), chunk_size=10)
+        else:                                    # igual que UnicornLSL: tipo 'Data', sin etiquetas
+            f = config.FUENTES_EEG['unicornlsl']
+            self.datos = StreamOutlet(StreamInfo(self.serie, f['tipo'], f['canales'], FS, 'float32', self.serie))
+
+    def cerrar(self):
+        self.eeg = self.imu = self.datos = None
+
+    def publicar(self, eeg, imu, ts, contadores):
+        """eeg (n x 8), imu (n x 6), hora y contador de cada muestra entregada."""
+        if len(ts) == 0:
+            return
+        eeg = eeg + self.offset                  # el EEG crudo del casco trae un offset de continua
+        if self.formato == 'puente':
+            self.eeg.push_chunk(eeg.tolist(), list(ts))      # hora por muestra: un hueco es un hueco
+            self.imu.push_chunk(imu.tolist(), list(ts))
+        else:
+            f = config.FUENTES_EEG['unicornlsl']
+            fila = np.zeros((len(ts), f['canales']), dtype=np.float32)
+            fila[:, f['eeg']], fila[:, f['imu']] = eeg, imu
+            fila[:, f['bateria']], fila[:, f['contador']], fila[:, f['validez']] = 87.0, contadores, 1.0
+            for muestra in fila.tolist():
+                self.datos.push_sample(muestra)  # sin hora propia: LSL estampa la llegada
 
 
 # ======================================================================
 # Banco de pruebas offline: genera sesiones completas sin LSL y en segundos,
 # para comparar decoders/detectores o elegir parametros antes del domingo.
 def _args(**k):
-    a = argparse.Namespace(erd=0.25, errp=6.0, fatiga=0.0, parpadeos=0.15, semilla=0, caos=None)
+    a = argparse.Namespace(erd=0.25, errp=6.0, n1=4.0, fatiga=0.0, parpadeos=0.15, cabeza=0.0,
+                           perdidas_bt=0.0, semilla=0, caos=None)
     a.__dict__.update(k)
     return a
 
@@ -229,7 +341,7 @@ def sesion_errp(n=100, p_error=0.3, **k):
         err = bool(rng.random() < p_error)
         cer.meta = 1
         pre, t = _bloque(cer, t, 1.5)
-        cer.eventos.append((t + 1 / FS, plantilla_errp(err, cer.a.errp, cer.rng)))
+        cer.movimiento(t + 1 / FS, err)
         post, t = _bloque(cer, t, 1.2)
         xf = hw.filtrar(np.hstack([pre, post]), config.BANDA_ERRP, FS)
         i0 = pre.shape[1] - int(antes * FS) + 1
@@ -253,8 +365,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--erd', type=float, default=0.25, help='profundidad del ERD (0-1); mas = piloto mas facil')
     ap.add_argument('--errp', type=float, default=6.0, help='amplitud del ErrP en uV')
+    ap.add_argument('--n1', type=float, default=4.0, help='amplitud de la N1 visual occipital en uV')
     ap.add_argument('--fatiga', type=float, default=0.0, help='0 = nunca se cansa, 1 = mucho')
     ap.add_argument('--parpadeos', type=float, default=0.15, help='parpadeos por segundo')
+    ap.add_argument('--cabeza', type=float, default=0.02, help='movimientos de cabeza por segundo')
+    ap.add_argument('--perdidas-bt', dest='perdidas_bt', type=float, default=0.0,
+                    help='perdidas de Bluetooth por minuto (de 20 a 200 ms cada una)')
+    ap.add_argument('--offset-dc', dest='offset_dc', type=float, default=15000.0,
+                    help='offset de continua maximo por canal, en uV (el EEG crudo del casco lo trae)')
+    ap.add_argument('--formato', choices=['puente', 'unicornlsl'], default='puente',
+                    help="puente: flujos 'EEG' e 'IMU' del contrato; unicornlsl: un flujo 'Data' de 17 canales")
+    ap.add_argument('--nombre-lsl', dest='nombre_lsl', default=SERIE,
+                    help='nombre del flujo en formato unicornlsl (la app usa el numero de serie)')
     ap.add_argument('--semilla', type=int, default=0)
     ap.add_argument('--banco', action='store_true', help='evalua decoder y detector offline y sale')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',
@@ -266,17 +388,17 @@ def main():
         return banco(a)
 
     cer = Cerebro(a)
-    outlet = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
+    salida = Salida(a)
     threading.Thread(target=cer.escuchar, daemon=True).start()
     config.RESULTADOS.mkdir(exist_ok=True)
     rng = np.random.default_rng(a.semilla)
     config.IMPEDANCIAS_JSON.write_text(json.dumps(
         {'t': time.time(), 'simulada': True,
          'kohm': {c: float(rng.uniform(4, 14)) for c in CH}}, indent=1))
-    print(f'Cerebro sintetico publicando EEG ({len(CH)} canales, {FS} Hz): ERD {a.erd}, '
-          f'ErrP {a.errp} uV, fatiga {a.fatiga}. Ctrl+C para parar.')
+    print(f'Cerebro sintetico ({a.formato}): {len(CH)} canales de EEG e IMU a {FS} Hz; ERD {a.erd}, '
+          f'ErrP {a.errp} uV, fatiga {a.fatiga}. Ctrl+C para parar.', flush=True)
     t_ult, t_rep = local_clock(), time.time()
-    corte_previo = None
+    corte_previo, perdidas = None, 0
     try:
         while True:
             ahora = local_clock()
@@ -287,22 +409,27 @@ def main():
                     print(f'  [caos] corte de EEG {corte[1]:.1f} s'
                           + (' (el flujo se destruye y se vuelve a crear)' if recrear else ''), flush=True)
                     if recrear:
-                        outlet = None              # como desconectar y reconectar el dongle
+                        salida.cerrar()            # como apagar y encender el casco
                 corte_previo, t_ult = corte, ahora  # al volver no se rellena el hueco
                 time.sleep(0.02)
                 continue
             if corte_previo is not None:
-                corte_previo = None
-                if outlet is None:
-                    outlet = StreamOutlet(config.crear_info('EEG'), chunk_size=10)
+                recreado, corte_previo = corte_previo[1] >= cer.caos.tasas['corte_eeg']['recrear_desde_s'], None
+                if recreado:
+                    salida.abrir()
             n = int((ahora - t_ult) * FS)
             if n > 0:
                 ts = t_ult + np.arange(1, n + 1) / FS
-                outlet.push_chunk(cer.generar(ts).tolist(), ts[-1])
+                contadores = cer.contador + np.arange(1, n + 1)
+                eeg = cer.generar(ts)
+                llega = cer.entregadas(ts)
+                perdidas += int((~llega).sum())
+                salida.publicar(eeg[llega], cer.imu[llega], ts[llega], contadores[llega])
                 t_ult = ts[-1]
             if time.time() - t_rep > 10:
                 print(f'  imaginando: {["relaja", "nada", "cerrar"][cer.meta + 1]:6s} | '
-                      f'movimientos vistos: {cer.n_ok} correctos, {cer.n_err} erroneos')
+                      f'movimientos vistos: {cer.n_ok} correctos, {cer.n_err} erroneos'
+                      + (f' | muestras perdidas por Bluetooth: {perdidas}' if perdidas else ''), flush=True)
                 t_rep = time.time()
             time.sleep(0.02)
     except KeyboardInterrupt:

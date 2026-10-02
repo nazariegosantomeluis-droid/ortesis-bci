@@ -1052,6 +1052,89 @@ def cerebro_sintetico():
 
 
 @prueba
+def gemelo_unicorn():
+    """El gemelo se comporta como un Unicorn: N1 visual occipital ante cada movimiento, IMU con
+    movimientos de cabeza que ensucian el EEG, contador con perdidas de Bluetooth, y los dos
+    formatos de salida (flujos del puente y flujo unico de la app UnicornLSL)."""
+    import cerebro_sintetico as cs
+    from pylsl import StreamInlet, resolve_byprop, proc_clocksync
+    oz, fz = config.CANALES_EEG.index('Oz'), config.CANALES_EEG.index('Fz')
+    # 1) respuesta visual: N1 ~170 ms en occipital aunque el movimiento sea correcto. Se compara
+    #    con la MISMA realizacion sin N1 (tiene su propio generador), para no medir ruido.
+    X, y = cs.sesion_errp(80, semilla=1)
+    X0, _ = cs.sesion_errp(80, semilla=1, n1=0.0)
+    t = np.arange(X.shape[2]) / cs.FS + config.EPOCA_ERRP[0]
+    efecto = np.median(X[y == 0], axis=0) - np.median(X0[y == 0], axis=0)
+    v = (t > 0.10) & (t < 0.25)
+    n1, lat = efecto[oz, v].min(), t[v][np.argmin(efecto[oz, v])]
+    en_n1 = efecto[:, np.argmin(np.abs(t - lat))]
+    assert n1 < -2.0 and 0.14 < lat < 0.20, (n1, lat)
+    assert en_n1[config.indices('visual')].max() < -2.0 and abs(en_n1[fz]) < 1.0, en_n1.round(2)
+    # 2) IMU: ~1 g en reposo; al mover la cabeza gira el giroscopio y el EEG se ensucia
+    cer, tt, eeg, imu = cs.Cerebro(cs._args(cabeza=0.5, semilla=2)), 0.0, [], []
+    for _ in range(120):
+        x, tt = cs._bloque(cer, tt, 0.5)
+        eeg.append(x); imu.append(cer.imu)
+    eeg, imu = np.hstack(eeg), np.vstack(imu)
+    assert imu.shape == (eeg.shape[1], 6) and cer.contador == eeg.shape[1]
+    assert 0.95 < np.median(np.linalg.norm(imu[:, :3], axis=1)) < 1.05
+    moviendo = np.abs(imu[:, 3:]).max(axis=1) > 20
+    assert 0.02 < moviendo.mean() < 0.8, moviendo.mean()
+    assert np.abs(eeg[:, moviendo]).mean() > 2 * np.abs(eeg[:, ~moviendo]).mean()
+    quieto = cs.Cerebro(cs._args())
+    cs._bloque(quieto, 0.0, 10.0)
+    assert np.abs(quieto.imu[:, 3:]).max() < 5
+
+    def escuchar(extra, clave, valor, segundos, otro=None):
+        """Lanza el gemelo, toma `segundos` de su flujo (y de `otro`) y lo cierra."""
+        g = subprocess.Popen([sys.executable, 'cerebro_sintetico.py', '--semilla', '5'] + extra, cwd=config.RAIZ,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            s = resolve_byprop(clave, valor, timeout=20)
+            assert s, f'no aparecio el flujo {clave}={valor}'
+            entradas = [StreamInlet(s[0], processing_flags=proc_clocksync)]
+            if otro:
+                s2 = resolve_byprop('name', otro, timeout=10)
+                assert s2, f'no aparecio el flujo {otro}'
+                entradas.append(StreamInlet(s2[0], processing_flags=proc_clocksync))
+            datos = [([], []) for _ in entradas]
+            t_fin = time.time() + segundos
+            while time.time() < t_fin:
+                for e, (xs, ts) in zip(entradas, datos):
+                    x, tm = e.pull_chunk(timeout=0.05)
+                    xs.extend(x); ts.extend(tm)
+            return [e.info() for e in entradas], [(np.array(x), np.array(tm)) for x, tm in datos]
+        finally:
+            g.terminate()
+            g.wait()
+
+    # 3) formato del puente: flujos EEG e IMU; una perdida de Bluetooth es un hueco en la hora
+    infos, ((x, ts), (xi, ti)) = escuchar(['--perdidas-bt', '120'], 'name', 'EEG', 7.0, otro='IMU')
+    assert infos[1].type() == 'IMU' and infos[1].channel_count() == 6 and xi.shape[1] == 6
+    d = np.diff(ts)
+    assert abs(np.median(d) - 1 / cs.FS) < 0.0005
+    huecos = d[d > 0.018]
+    assert len(huecos) >= 3 and huecos.max() < 0.6, huecos      # dos perdidas pueden encadenarse
+    comun = (max(ts[0], ti[0]), min(ts[-1], ti[-1]))             # EEG e IMU: las mismas muestras
+    dentro = lambda tm: int(((tm >= comun[0]) & (tm <= comun[1])).sum())
+    assert dentro(ts) > 1000 and abs(dentro(ts) - dentro(ti)) <= 5, (dentro(ts), dentro(ti))
+    assert (np.abs(x.mean(axis=0)) > 100).sum() >= 6, x.mean(axis=0)       # offset de continua, como el casco
+    # 4) formato UnicornLSL: un flujo 'Data' de 17 canales sin etiquetas, con contador
+    f = config.FUENTES_EEG['unicornlsl']
+    infos, ((x, ts),) = escuchar(['--formato', 'unicornlsl', '--nombre-lsl', 'UN-PRUEBA', '--perdidas-bt', '120'],
+                                 'type', f['tipo'], 6.0)
+    info = infos[0]
+    assert (info.name(), info.source_id(), info.channel_count(), info.nominal_srate()) == ('UN-PRUEBA', 'UN-PRUEBA', 17, 250)
+    assert info.desc().child('channels').empty()
+    pasos = np.diff(x[:, f['contador']])
+    assert pasos.min() >= 1 and (pasos == 1).mean() > 0.9 and (pasos > 4).any(), np.unique(pasos)
+    assert 0.9 < np.median(np.linalg.norm(x[:, f['imu'][:3]], axis=1)) < 1.1
+    assert 0 < x[:, f['bateria']].min() <= x[:, f['bateria']].max() <= 100 and (x[:, f['validez']] == 1).all()
+    return (f'N1 occipital {n1:.1f} uV a {1000 * lat:.0f} ms; IMU y artefacto de cabeza; perdidas de Bluetooth '
+            f'como huecos ({len(huecos)}) y en el contador; formatos puente y UnicornLSL')
+
+
+@prueba
 def lazo_real_sintetico():
     puente = subprocess.Popen([sys.executable, 'cerebro_sintetico.py'], cwd=config.RAIZ,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1118,7 +1201,7 @@ def main():
               ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, registro_huecos,
               reloj_contador,
               puente_reconecta,
-              cerebro_sintetico):
+              cerebro_sintetico, gemelo_unicorn):
         p()
     if a.completa:
         lazo_real_sintetico()
