@@ -752,6 +752,57 @@ def reconexion_eeg():
 
 
 @prueba
+def silencio_sin_recrear():
+    """El flujo enmudece 2.5 s y sigue con la MISMA instancia (un tiron del dongle). El
+    suavizado de marcas de LSL (dejitter) quedaria desfasado segundos; EntradaEEG renueva
+    su entrada y las marcas vuelven a coincidir con el reloj en cuanto regresan los datos."""
+    import threading
+    import hardware as hw
+    from pylsl import StreamInfo, StreamOutlet, local_clock
+    fs, nombre = 250, 'EEG_prueba3'
+    out = StreamOutlet(StreamInfo(nombre, 'EEG', 8, fs, 'float32', ''), chunk_size=10)
+    pub = {'vivo': True, 'callado': False, 't': local_clock()}
+    rng = np.random.default_rng(0)
+
+    def publicar():
+        while pub['vivo']:
+            ahora = local_clock()
+            if pub['callado']:
+                pub['t'] = ahora                   # al volver no rellena el hueco (como el gemelo)
+            else:
+                n = int((ahora - pub['t']) * fs)
+                if n > 0:
+                    pub['t'] += n / fs
+                    out.push_chunk(rng.normal(0, 10, size=(n, 8)).tolist(), pub['t'])
+            time.sleep(0.02)
+    threading.Thread(target=publicar, daemon=True).start()
+    eeg = hw.EntradaEEG(segundos=10.0, timeout=8.0, nombre=nombre)
+    retraso = lambda: local_clock() - eeg.ultimo_t()
+    try:
+        time.sleep(6.0)
+        antes = retraso()
+        assert antes < 0.1, antes
+        pub['callado'] = True
+        t_corte = local_clock()
+        time.sleep(2.5)
+        pub['callado'] = False
+        time.sleep(2.0)
+        despues = retraso()
+        assert abs(despues - antes) < 0.1, f'marcas desfasadas {1000 * (despues - antes):.0f} ms tras el silencio'
+        assert eeg.reconexiones == 0 and eeg.renovaciones >= 1, (eeg.reconexiones, eeg.renovaciones)
+        assert eeg.ventana(3.0) == (None, None)            # aun no hay 3 s limpios tras el hueco
+        assert eeg.epoca(t_corte + 2.0) is None            # la epoca cruzaria el hueco
+        time.sleep(2.5)
+        x, t = eeg.ventana(3.0)
+        assert x is not None and t[0] > t_corte + 2.0
+        assert abs(eeg.lecturas()['reloj_ms']) < config.SALUD['reloj_rojo_ms']
+    finally:
+        pub['vivo'] = False
+        eeg.cerrar()
+    return f'tras 2.5 s de silencio las marcas coinciden con el reloj (diferencia {1000 * (despues - antes):+.0f} ms)'
+
+
+@prueba
 def dos_flujos_eeg():
     """Dos flujos con el mismo nombre en la red (por ejemplo, un gemelo olvidado en otra
     terminal): EntradaEEG elige el mas reciente, NO salta al otro mientras el suyo viva y,
@@ -790,7 +841,7 @@ def dos_flujos_eeg():
         x, _ = eeg._crudo(1.0)
         assert eeg.reconexiones == 0 and x.max() == 0.0, (eeg.reconexiones, x.max())
         assert eeg.lecturas()['edad_s'] < 0.5
-        assert 200 < eeg.lecturas()['tasa_hz'] < 300, eeg.lecturas()['tasa_hz']   # tasa por muestras llegadas
+        assert 200 < eeg.lecturas()['tasa_hz'] < 400, eeg.lecturas()['tasa_hz']   # por muestras llegadas (una rafaga al volver puede pasar de 250)
         # su flujo muere: el viejo sigue ahi, pero ya fue descartado al arrancar; no se conecta a el
         with candado:
             pub['nuevo'] = None
@@ -910,7 +961,7 @@ def main():
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               instantanea_estado, reanudar,
               modelos_hardware, senal_valida,
-              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, dos_flujos_eeg, puente_reconecta,
+              ortesis_sin_ack, ortesis_serial_reconecta, reconexion_eeg, silencio_sin_recrear, dos_flujos_eeg, puente_reconecta,
               cerebro_sintetico):
         p()
     if a.completa:

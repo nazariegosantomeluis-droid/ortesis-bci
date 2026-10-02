@@ -121,11 +121,18 @@ class EntradaEEG:
     mientras el propio siga publicado, aunque enmudezca un rato. Si el propio muere,
     solo se acepta un flujo creado DESPUES que el: uno mas viejo ya fue descartado al
     arrancar y no es la fuente que volvio.
+
+    Silencios sin perder el flujo (un tiron del dongle): el suavizado de marcas de LSL
+    (dejitter) supone muestreo regular y, tras un hueco, deja las marcas desfasadas
+    segundos durante ~10 s (medido: 2.7 s tras un hueco de 3 s). Por eso, en cuanto el
+    flujo calla mas de `eeg_edad_amarillo_s`, la entrada se RENUEVA: una entrada nueva
+    al mismo flujo empieza con el suavizado limpio y el buffer vacio.
     """
 
     def __init__(self, segundos=30.0, timeout=10.0, nombre='EEG'):
         self.nombre, self._segundos = nombre, segundos
         self._uid, self._creado, self.reconexiones = None, -np.inf, 0
+        self._info, self.renovaciones, self._renovada = None, 0, False
         self._llegadas = deque(maxlen=2000)       # (instante de llegada, muestras): tasa real
         self.inlet = self._resolver(timeout)
         if self.inlet is None:
@@ -156,10 +163,27 @@ class EntradaEEG:
             print(f"  AVISO: hay {len(s)} flujos '{self.nombre}' en la red ("
                   + ', '.join(f'{x.hostname()} {x.uid()[:8]}' for x in s)
                   + f'). Uso el mas reciente ({elegido.uid()[:8]}); cierra los demas.', flush=True)
-        self._uid, self._creado = elegido.uid(), elegido.created_at()
+        self._uid, self._creado, self._info = elegido.uid(), elegido.created_at(), elegido
         self.fs = float(elegido.nominal_srate())
-        return StreamInlet(elegido, max_buflen=int(self._segundos) + 5,
+        return self._abrir()
+
+    def _abrir(self):
+        from pylsl import StreamInlet, proc_clocksync, proc_dejitter
+        return StreamInlet(self._info, max_buflen=int(self._segundos) + 5,
                            processing_flags=proc_clocksync | proc_dejitter, recover=False)
+
+    def _renovar(self):
+        """Entrada nueva al MISMO flujo: suavizado de marcas limpio y buffer vacio."""
+        try:
+            nueva = self._abrir()
+        except Exception:
+            return
+        with self._lock:
+            self.inlet = nueva
+            self._x.clear()
+            self._t.clear()
+            self._reiniciar_reloj()
+        self.renovaciones += 1
 
     def _reiniciar_reloj(self):
         self._lag.clear()
@@ -184,7 +208,7 @@ class EntradaEEG:
 
     def _leer(self):
         from pylsl import local_clock
-        rojo = config.SALUD['eeg_edad_rojo_s']
+        rojo, amarillo = config.SALUD['eeg_edad_rojo_s'], config.SALUD['eeg_edad_amarillo_s']
         while self._vivo:
             try:
                 datos, ts = self.inlet.pull_chunk(timeout=0.05)
@@ -194,9 +218,8 @@ class EntradaEEG:
                 continue
             if ts:
                 ahora = time.monotonic()
+                self._renovada = False
                 with self._lock:
-                    if ahora - self._t_llegada > rojo:
-                        self._reiniciar_reloj()   # vuelve tras un silencio: el retraso se mide de nuevo
                     self._x.extend(datos)
                     self._t.extend(ts)
                     self._lag.append(local_clock() - ts[-1])
@@ -204,6 +227,9 @@ class EntradaEEG:
                     self._t_llegada = ahora
             elif time.monotonic() - self._t_llegada > rojo:
                 self._reconectar()                # mudo: quiza es otra instancia la que publica ahora
+            elif time.monotonic() - self._t_llegada > amarillo and not self._renovada:
+                self._renovar()                   # un hueco descuadra el suavizado: entrada limpia
+                self._renovada = True
 
     def edad(self):
         """Segundos desde que llego la ultima muestra."""

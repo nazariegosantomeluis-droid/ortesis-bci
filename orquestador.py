@@ -662,7 +662,8 @@ class Orquestador:
         """Protege al piloto y espera a que la salud vuelva. El agente no aprende aqui."""
         previo = self.fsm.estado
         self.fsm.ir_a('PAUSA_SEGURA')
-        detalle = self.vigilante.detalle['ortesis' if motivo == 'ortesis' else 'eeg']
+        detalle = (self.vigilante.detalle['ortesis' if motivo == 'ortesis' else 'eeg']
+                   or 'no hay ventana de EEG fresca y continua')
         txt = f'  [PAUSA SEGURA] motivo: {motivo} ({detalle}). El agente no aprende; la sesion sigue viva.'
         aviso(txt)
         self.avisos_salud.append(txt)
