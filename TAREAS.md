@@ -6,6 +6,8 @@ Lee `CLAUDE.md` primero. Para cada tarea: diseña, implementa, **mide en el geme
 
 ## Tarea 1 — Resiliencia: el lazo que no se cae
 
+> **Hecha el 2 de octubre de 2026** (rama `tarea1-resiliencia`). Especificación y plan en `docs/`; resultados en el README, sección "Resiliencia". Pendiente: probar la reconexión de `puente_lsl.py` con el Cyton real, y repetir la corrida con caos contra el gemelo con más semillas (una sola corrida no es concluyente).
+
 **Objetivo:** si se desconecta el dongle del Cyton, se reinicia el ESP32, se congela LSL o llega una época corrupta a media demo, el sistema lo detecta, se protege, se recupera solo y **no pierde la sesión**. Hoy cualquiera de esas fallas truena el orquestador.
 
 ### Diseño

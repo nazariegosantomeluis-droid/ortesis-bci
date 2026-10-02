@@ -257,3 +257,30 @@ una persona.
 - Resincronizar el ángulo con la telemetría `T` del ESP32 (cada `M` lleva el ángulo
   absoluto, así que el estado se corrige solo en el siguiente paso).
 - Seguir operando con menos de 8 canales.
+
+## Cambios durante la implementación
+
+Decididos al medir; cada uno tiene su prueba en `pruebas.py`.
+
+- **Frescura y tasa del EEG por llegada real.** La edad se mide con el reloj de pared de
+  la última llegada y la tasa con las muestras que de verdad llegaron (solo cuenta el
+  déficit). Las marcas de tiempo suavizadas no sirven para medir ninguna de las dos.
+- **Varios flujos `EEG` en la red.** Se usa el más reciente y se avisa; no se salta a
+  otro mientras el propio siga publicado; si el propio muere, solo se acepta uno creado
+  después (`dos_flujos_eeg`). Se encontró porque había un gemelo olvidado en otra terminal.
+- **Renovación de la entrada tras un silencio.** El suavizado de marcas de LSL (dejitter)
+  deja las marcas atrasadas tras un hueco (2.7 s tras un hueco de 3 s). En cuanto el flujo
+  calla 0.3 s se abre una entrada nueva al mismo flujo (`silencio_sin_recrear`).
+- **Deriva del reloj contra una mediana móvil** de ~30 s en lugar de una línea base fija:
+  detecta un cambio de desfase y lo absorbe, así el reloj nunca queda en ROJO para siempre
+  (`deriva_reloj`). Sustituye al reinicio de línea base como mecanismo principal; el
+  reinicio al reconectar se conserva.
+- **Detector en `CALENTANDO`** hasta 15 épocas válidas.
+- **Canal plano** evaluado sobre el último medio segundo (detección en 0.5 s).
+- **Exclusiones.** Un canal despegado o una ráfaga de parpadeos a media época cuenta
+  como artefacto, no como paso excluido; solo un corte de EEG da `epoca_invalida`.
+- **`Ctrl+C` no termina la sesión:** sigue siendo reanudable; solo una sesión completa
+  queda marcada como terminada.
+- **Pruebas añadidas fuera del plan:** `ortesis_serial_reconecta`, `puente_reconecta`,
+  `dos_flujos_eeg`, `silencio_sin_recrear`, `deriva_reloj`, `instantanea_estado`,
+  `tablero_salud`.

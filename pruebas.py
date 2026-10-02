@@ -908,12 +908,17 @@ def lazo_real_sintetico():
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         time.sleep(2)
-        r = subprocess.run([sys.executable, 'orquestador.py', 'real', '--ortesis-sim', '--forzar',
-                            '--ensayos_mi', '24', '--min_mi', '24', '--duracion_mi', '2.5',
-                            '--espera', '0.3', '--ensayos_errp', '60', '--min_errp', '60',
-                            '--seg_revision', '3',
-                            '--pasos_estatico', '5', '--pasos_adaptativo', '10'],
-                           cwd=config.RAIZ, capture_output=True, text=True, timeout=400)
+        try:
+            r = subprocess.run([sys.executable, 'orquestador.py', 'real', '--ortesis-sim', '--forzar',
+                                '--ensayos_mi', '24', '--min_mi', '24', '--duracion_mi', '2.5',
+                                '--espera', '0.3', '--ensayos_errp', '60', '--min_errp', '60',
+                                '--seg_revision', '3',
+                                '--pasos_estatico', '5', '--pasos_adaptativo', '10'],
+                               cwd=config.RAIZ, capture_output=True, text=True, timeout=400)
+        except subprocess.TimeoutExpired as e:      # que se vea en que iba, no solo que tardo
+            salida = e.stdout.decode(errors='ignore') if isinstance(e.stdout, bytes) else (e.stdout or '')
+            raise AssertionError('no termino en 400 s; ultimas lineas:\n' + '\n'.join(
+                l for l in salida.splitlines() if 'INFO' not in l)[-1500:])
         assert r.returncode == 0, r.stderr[-1500:]
         assert 'EVALUACION' in r.stdout and '[CP3]' in r.stdout, r.stdout[-1500:]
     finally:

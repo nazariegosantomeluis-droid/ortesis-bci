@@ -184,6 +184,7 @@ class EntradaEEG:
             self._t.clear()
             self._reiniciar_reloj()
         self.renovaciones += 1
+        print(f"  [eeg] silencio en '{self.nombre}': entrada renovada ({self.renovaciones})", flush=True)
 
     def _reiniciar_reloj(self):
         self._lag.clear()

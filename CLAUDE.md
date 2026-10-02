@@ -21,11 +21,13 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | Archivo | Rol |
 |---|---|
 | `config.py` | Contrato: flujos LSL, marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
+| `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector; el detector empieza en CALENTANDO) y `Retroceso` (esperas de reconexión). Clase pura, sin hardware. |
+| `caos.py` | `PlanCaos(semilla)`: fallas reproducibles (cortes de EEG, ACK perdidos, picos de latencia, parpadeos, canal despegado). Tasas en `config.CAOS_ESTANDAR`. |
 | `agente_errp.py` | `AgenteErrP` (filtro de Kalman sobre la corrección `beta` del logit; P_hat bayesiano; detectores de cambio por sesgo y chequeo predictivo) y `ConfianzaDetector` (sens/espec vivas del detector de ErrP con posteriores Beta; congela el aprendizaje si el detector deja de informar). |
 | `simulador_lazo.py` | Piloto sintético rápido a nivel de rasgos, para comparar agentes con muchos sujetos. |
 | `cerebro_sintetico.py` | Gemelo digital del piloto: publica EEG por LSL que reacciona al lazo (ERD mu/beta en C3, ErrP fronto-central ante movimientos erróneos, parpadeos, fatiga). Tiene banco offline (`sesion_mi`, `sesion_errp`, `--banco`). |
 | `hardware.py` | `EntradaEEG` (LSL con buffer y reloj sincronizado), `OrtesisSerial`/`OrtesisSimulada` (ACK con latencia medida), `DecoderIM` (Riemann con recentrado no supervisado), `DetectorErrP` (fusión temporal + geométrica, calibrado, umbral de Neyman-Pearson, detector de rareza), calibración secuencial (`intervalo_ba`). |
-| `orquestador.py` | Máquina de estados, checkpoints go/no go (CP1-CP4), calibraciones, lazo, CSV, flujos `Marcadores`/`Paso`/`Estado`. Backends `sim` y `real`. |
+| `orquestador.py` | Máquina de estados, checkpoints go/no go (CP1-CP4), calibraciones, lazo, CSV, flujos `Marcadores`/`Paso`/`Estado`. Backends `sim` y `real`. Revisa la salud antes de cada paso, entra y sale de `PAUSA_SEGURA`, marca pasos excluidos, guarda una instantánea por paso y reanuda con `--reanudar`. |
 | `puente_lsl.py` | BrainFlow → LSL (sintética, Cyton, playback) e impedancias. |
 | `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). |
 | `ver_flujos.py`, `pruebas.py` | Diagnóstico LSL y pruebas automáticas. |
@@ -42,7 +44,16 @@ python cerebro_sintetico.py --banco   # decoder y detector offline
 python cerebro_sintetico.py           # terminal 1: gemelo
 python tablero.py                     # terminal 2
 python orquestador.py real --ortesis-sim   # terminal 3: camino real completo
+python orquestador.py sim --ciclo 0 --caos 1   # caos estándar en el simulador
+python orquestador.py real --ortesis-sim --reanudar   # continuar una sesión interrumpida
 ```
+
+## Cosas que muerden
+
+- **Un solo flujo `EEG` en la red.** Un `cerebro_sintetico.py` olvidado en otra terminal contamina cualquier medición contra el gemelo. Antes de medir: `python ver_flujos.py`.
+- `pruebas.py --completa`: `lazo_real_sintetico` excedió sus 400 s una vez de tres (2 de octubre) y no se reprodujo; si vuelve a pasar, la prueba ya muestra las últimas líneas de la sesión.
+- **No correr `pruebas.py` mientras hay una sesión `real` en marcha:** las pruebas publican flujos `Marcadores` y `Paso` con los mismos nombres.
+- Un paso con `excluido` no vacío queda fuera de `EVALUACION`; el agente no aprendió de él.
 
 ## Resultados de referencia (para no retroceder)
 
@@ -51,6 +62,8 @@ Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11,
 - Simulador (`python simulador_lazo.py --semillas 30`), perturbación de 2.4 logits — error en los primeros 2 min tras perturbar: estático 0.325, eta fijo 0.246, **bayes 0.214**. Antes de perturbar: 0.165 / 0.170 / 0.169; después de los 2 min: 0.316 / 0.178 / 0.175.
 - Con el detector degradado a propósito (prueba `confianza_detector`, 12 sujetos): aprendizaje al 8 %, congelado 88 % de la falla, 1 % de congelamientos en falso.
 - Banco offline del gemelo (`python cerebro_sintetico.py --banco`): decoder MI BA 0.71; detector ErrP sensibilidad 0.66, especificidad 0.91, BA 0.79.
-- Corrida real completa contra el gemelo: CP1–CP4 en GO; error tras perturbar agente 0.14 vs sombra 0.47. **Medida anterior, no repetida el 2 de octubre**; la calibración no usa semilla fija, así que varía entre corridas.
+- Corrida real completa contra el gemelo (una corrida, 2 de octubre): CP1–CP4 en GO (MI BA 0.92, ErrP BA 0.92); error tras perturbar agente 0.26 vs sombra 0.46; ninguna pausa en falso. La calibración no usa semilla fija, así que varía entre corridas (una medida anterior dio 0.14 vs 0.47).
+- Caos estándar, simulador (30 sujetos, `orquestador.py sim --caos`): tras perturbar agente 0.222 vs sombra 0.333 (sin caos: 0.235 vs 0.323); excluidas 1109 de 11 425 filas.
+- Caos estándar, gemelo (tres corridas): 9 a 10 pausas por corrida, todas reanudadas; CP4 en GO; tras perturbar agente/sombra 0.44/0.49, 0.30/0.53 y 0.46/0.47 (no concluyente).
 
 Las tareas pendientes, en orden, están en `TAREAS.md`.
