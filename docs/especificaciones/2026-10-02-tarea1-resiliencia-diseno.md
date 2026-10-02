@@ -94,6 +94,10 @@ y no pierde la sesión.
   - Reloj en ROJO no pausa: el agente no aprende de ese paso.
   - Detector: ROJO si está congelado, AMARILLO si la fiabilidad está bajo el umbral
     de reanudación, VERDE en otro caso.
+  - Detector en `CALENTANDO` (ajuste de Luis, gris en el tablero): mientras el
+    `ConfianzaDetector` tenga menos de 15 épocas válidas, el semáforo no opina ni
+    emite cambios ni marcadores. Solo afecta al semáforo: la lógica de
+    congelamiento del aprendizaje no cambia.
 - **`Retroceso(inicial, maximo)`**: esperas 0.5, 1, 2, 4, 8, 8... con `reiniciar()`.
   Lo usan `EntradaEEG`, `OrtesisSerial` y `puente_lsl.py`.
 

@@ -66,8 +66,16 @@ def vigilante():
     bien_eeg = {'edad_s': 0.02, 'tasa_hz': 250.0, 'canales': {}}
     bien_ort = {'puerto_ok': True, 'acks_perdidos': 0, 'latencia_ms': 8.0}
     v = Vigilante()
-    assert v.actualizar(0.0, eeg=bien_eeg, ortesis=bien_ort, reloj_ms=0.0,
-                        detector={'fiabilidad': 1.0, 'congelado': False}) == []
+    # calentamiento: con menos de 15 epocas validas el detector no opina ni emite cambios,
+    # aunque el ConfianzaDetector ya este congelado
+    minimo = config.SALUD['detector_epocas_min']
+    assert v.colores['detector'] == config.CALENTANDO
+    for n in (0, 5, minimo - 1):
+        assert v.actualizar(0.0, eeg=bien_eeg, ortesis=bien_ort, reloj_ms=0.0,
+                            detector={'fiabilidad': 0.3, 'congelado': True, 'epocas': n}) == []
+    assert v.codigo() == 'VVVC' and v.escalon() == 1 and v.motivo_pausa() is None
+    # al terminar de calentar publica su primer color real
+    assert v.actualizar(0.0, detector={'fiabilidad': 1.0, 'congelado': False, 'epocas': minimo})         == [('detector', config.VERDE)]
     assert v.codigo() == 'VVVV' and v.escalon() == 1 and v.motivo_pausa() is None
     # corte de EEG: rojo inmediato, con marcador de cambio
     assert v.actualizar(1.0, eeg={**bien_eeg, 'edad_s': 1.4}) == [('eeg', R)]
@@ -93,7 +101,7 @@ def vigilante():
     v.actualizar(13.0, reloj_ms=60.0)
     assert v.colores['reloj'] == R and v.escalon() == 2 and v.motivo_pausa() is None
     assert not v.listo_para_reanudar(99.0)            # el reloj en rojo bloquea la salida
-    v.actualizar(14.0, reloj_ms=5.0, detector={'fiabilidad': 0.2, 'congelado': True})
+    v.actualizar(14.0, reloj_ms=5.0, detector={'fiabilidad': 0.2, 'congelado': True, 'epocas': 40})
     assert v.colores['detector'] == R and v.escalon() == 2
     assert v.listo_para_reanudar(17.0)                # el detector no la bloquea
     return 'semaforos, detalle del electrodo, verde continuo y escalones'
@@ -248,7 +256,11 @@ def pausa_segura():
     for i, f in enumerate(filas):
         if f['excluido'] and i:
             assert f['beta'] == filas[i - 1]['beta'], (i, f)
-        assert len(f['salud']) == 4 and set(f['salud']) <= set('VAR'), f
+        assert len(f['salud']) == 4 and set(f['salud']) <= set('VARC'), f
+    # el detector calienta sus primeras 15 epocas validas sin emitir marcadores de salud
+    assert [f['salud'][3] for f in filas[:15]] == ['C'] * 15 and filas[20]['salud'][3] != 'C'
+    i_det = next(i for i, m in enumerate(orq.salidas.marcadores) if m.startswith('salud:detector:'))
+    assert sum(m.startswith('paso_ack:') for m in orq.salidas.marcadores[:i_det]) >= 15
     assert orq.fsm.estado == 'EVALUACION'
     estados = [e for _, e in orq.fsm.historial]
     for i, e in enumerate(estados):

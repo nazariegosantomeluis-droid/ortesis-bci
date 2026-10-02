@@ -240,6 +240,7 @@ class ConfianzaDetector:
         self.j0 = sensibilidad + especificidad - 1
         self.olvido, self.u_cong, self.u_rean = olvido, congelar, reanudar
         self.err_det = self.err_tot = self.ok_nodet = self.ok_tot = 0.0
+        self.n_validas = 0                 # epocas validas vistas (sin olvido; solo informa)
         self.congelado = False
 
     @property
@@ -260,6 +261,7 @@ class ConfianzaDetector:
 
     def __call__(self, erroneo, detectado, valido=True) -> float:
         if valido:
+            self.n_validas += 1
             l = self.olvido
             self.err_det *= l; self.err_tot *= l; self.ok_nodet *= l; self.ok_tot *= l
             if erroneo:

@@ -483,7 +483,8 @@ class Orquestador:
         l = self.b.lecturas()
         cambios = self.vigilante.actualizar(
             self.b.reloj(), eeg=l['eeg'], ortesis=l['ortesis'], reloj_ms=l['reloj_ms'],
-            detector={'fiabilidad': self.confianza.fiabilidad_bruta, 'congelado': self.confianza.congelado})
+            detector={'fiabilidad': self.confianza.fiabilidad_bruta, 'congelado': self.confianza.congelado,
+                      'epocas': self.confianza.n_validas})
         for sub, color in cambios:
             self.salidas.marcador(config.m_salud(sub, color))
             detalle = self.vigilante.detalle[sub]

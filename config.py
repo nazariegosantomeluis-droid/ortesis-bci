@@ -48,7 +48,7 @@ COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'meta', 'angulo', 'p_prima',
                 'direccion', 'delta', 'P_hat', 'artefacto', 'fiabilidad', 'beta',
                 'varianza_beta', 'sens_viva', 'espec_viva', 'cambio', 'explorando',
                 'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido']
-# salud: una letra por subsistema (V/A/R) en el orden de SUBSISTEMAS.
+# salud: una letra por subsistema (V/A/R, o C = detector calentando) en el orden de SUBSISTEMAS.
 # excluido: vacio = paso valido; si no, el motivo (el paso queda fuera del analisis).
 MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'epoca_invalida']
 
@@ -91,6 +91,7 @@ DURACION_PASO_MS = 250
 # ============================ Salud ============================
 SUBSISTEMAS = ['eeg', 'ortesis', 'reloj', 'detector']
 VERDE, AMARILLO, ROJO = 'VERDE', 'AMARILLO', 'ROJO'
+CALENTANDO = 'CALENTANDO'       # solo el detector: aun no hay epocas para juzgarlo (gris en el tablero)
 SALUD = {
     'eeg_edad_amarillo_s': 0.3, 'eeg_edad_rojo_s': 1.0,     # edad de la ultima muestra
     'eeg_tasa_amarillo': 0.10, 'eeg_tasa_rojo': 0.25,       # desviacion relativa de la tasa real
@@ -102,6 +103,7 @@ SALUD = {
     'reloj_amarillo_ms': 20.0, 'reloj_rojo_ms': 50.0,       # deriva del retraso contra su linea base
     'reloj_lecturas_base': 40,                              # lecturas para (re)medir la linea base
     'detector_amarillo': 0.7,                               # fiabilidad bajo este valor
+    'detector_epocas_min': 15,                              # epocas validas antes de opinar del detector
     'verde_para_reanudar_s': 3.0,                           # VERDE continuo para salir de la pausa
 }
 POSICION_SEGURA   = 0.0          # abierta

@@ -37,12 +37,17 @@ class Vigilante:
       eeg      = {'edad_s', 'tasa_hz', 'canales': {electrodo: motivo}}
       ortesis  = {'puerto_ok', 'acks_perdidos', 'latencia_ms'}
       reloj_ms = deriva del retraso del EEG contra su linea base
-      detector = {'fiabilidad', 'congelado'}
+      detector = {'fiabilidad', 'congelado', 'epocas'}
+
+    El detector empieza en CALENTANDO: con menos de `detector_epocas_min` epocas
+    validas su fiabilidad viva todavia es ruido, asi que no opina ni emite cambios.
+    Esto solo afecta al semaforo; el congelamiento del aprendizaje no cambia.
     """
 
     def __init__(self, umbrales=None):
         self.u = umbrales or config.SALUD
         self.colores = {s: V for s in config.SUBSISTEMAS}
+        self.colores['detector'] = config.CALENTANDO
         self.detalle = {s: '' for s in config.SUBSISTEMAS}
         self._canal_malo = False
         self._t_verde = None
@@ -57,7 +62,7 @@ class Vigilante:
         if reloj_ms is not None:
             self._poner('reloj', self._nivel(abs(reloj_ms), 'reloj_amarillo_ms', 'reloj_rojo_ms'),
                         f'deriva {reloj_ms:+.0f} ms')
-        if detector is not None:
+        if detector is not None and detector['epocas'] >= self.u['detector_epocas_min']:
             color = R if detector['congelado'] else (
                 A if detector['fiabilidad'] < self.u['detector_amarillo'] else V)
             self._poner('detector', color, f"fiabilidad {detector['fiabilidad']:.2f}")
