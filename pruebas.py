@@ -583,6 +583,25 @@ def senal_valida():
 
 
 @prueba
+def deriva_reloj():
+    """La deriva del reloj se mide contra una mediana movil: detecta un cambio de desfase,
+    pero el reloj nunca queda en ROJO para siempre (ni por un transitorio al volver los datos)."""
+    import hardware as hw
+    rng = np.random.default_rng(0)
+    rojo = config.SALUD['reloj_rojo_ms']
+    estable = list(0.020 + rng.normal(0, 0.003, 600))
+    assert hw.deriva_reloj([]) == 0.0 and hw.deriva_reloj(estable[:10]) == 0.0      # aun sin datos
+    assert abs(hw.deriva_reloj(estable)) < 5
+    salto = estable + list(0.080 + rng.normal(0, 0.003, 40))                         # el desfase cambia 60 ms
+    assert hw.deriva_reloj(salto) > rojo                                             # se nota de inmediato
+    asentado = estable + list(0.080 + rng.normal(0, 0.003, 900))                     # ...y pasa a ser lo normal
+    assert abs(hw.deriva_reloj(asentado)) < 5
+    transitorio = list(-0.030 + rng.normal(0, 0.003, 60)) + list(0.020 + rng.normal(0, 0.003, 200))
+    assert abs(hw.deriva_reloj(transitorio)) < 5                                     # arranque raro tras un corte
+    return 'detecta el cambio de desfase y lo absorbe; un transitorio inicial no deja el reloj en ROJO'
+
+
+@prueba
 def ortesis_sin_ack():
     import hardware as hw
 
@@ -887,7 +906,7 @@ def main():
     a = ap.parse_args()
     print('Pruebas ortesis-bci')
     for p in (contrato, vigilante, retroceso, agente_basico, agente_aprende, agente_sin_sesgo, confianza_detector,
-              maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones,
+              maquina_estados, orquestador_sim, pausa_segura, calibracion_repeticiones, deriva_reloj,
               plan_caos, caos_sim, caos_agente_vs_sombra, tablero_salud,
               instantanea_estado, reanudar,
               modelos_hardware, senal_valida,

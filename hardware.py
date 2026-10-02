@@ -61,6 +61,21 @@ def ventana_valida(x, t, fs, edad_s, segundos, u=None):
     return bool(np.isfinite(x[:, -n:]).all() and _sin_huecos(t[-n:], u))
 
 
+VENTANA_RELOJ = 1500      # lecturas de retraso que se recuerdan (~30 s)
+
+
+def deriva_reloj(retrasos, u=None):
+    """Deriva (ms) del retraso del EEG: mediana de las ultimas lecturas contra la mediana
+    de la ventana larga. Detecta un CAMBIO de desfase; cuando el desfase nuevo ya es la
+    mayoria de la ventana pasa a ser lo normal, asi el reloj nunca queda en ROJO para
+    siempre. Con pocas lecturas (arranque, reconexion) vale 0."""
+    u = u or config.SALUD
+    r = np.asarray(retrasos, dtype=float)[-VENTANA_RELOJ:]
+    if r.size < u['reloj_lecturas_base']:
+        return 0.0
+    return float(np.median(r[-25:]) - np.median(r)) * 1000
+
+
 def cortar_epoca(x, t, t0, fs, antes=-config.EPOCA_ERRP[0], despues=config.EPOCA_ERRP[1],
                  banda=config.BANDA_ERRP):
     """Epoca filtrada y con linea base alrededor de t0, o None si no es de fiar.
@@ -117,7 +132,7 @@ class EntradaEEG:
             raise RuntimeError(f"No encontre el flujo '{nombre}'. ¿Esta corriendo puente_lsl.py?")
         n = int(segundos * self.fs)
         self._x, self._t = deque(maxlen=n), deque(maxlen=n)
-        self._lag, self._lag_base = deque(maxlen=200), None
+        self._lag = deque(maxlen=VENTANA_RELOJ)   # retraso (reloj local - ultima marca) por lectura
         self._t_llegada = time.monotonic()        # reloj de pared: no depende del desfase del flujo
         self._retroceso, self._proximo_intento = Retroceso(), 0.0
         self._lock = threading.Lock()
@@ -148,7 +163,6 @@ class EntradaEEG:
 
     def _reiniciar_reloj(self):
         self._lag.clear()
-        self._lag_base = None
 
     def _reconectar(self):
         """Un intento de volver a resolver el flujo; los intentos se espacian con retroceso."""
@@ -225,14 +239,11 @@ class EntradaEEG:
             llegadas = sum(n for cuando, n in self._llegadas if cuando > desde)
         if t.size == 0:
             return {'edad_s': edad, 'tasa_hz': 0.0, 'canales': {}, 'reloj_ms': 0.0}
-        if self._lag_base is None and lag.size >= u['reloj_lecturas_base']:
-            self._lag_base = float(np.median(lag[:u['reloj_lecturas_base']]))
-        deriva = 0.0 if self._lag_base is None else (float(np.median(lag[-20:])) - self._lag_base) * 1000
         fresco = edad <= u['eeg_edad_rojo_s']
         return {'edad_s': edad,
                 'tasa_hz': llegadas / u['ventana_canales_s'],     # muestras que de verdad llegaron
                 'canales': revisar_canales(x, self.fs) if fresco else {},
-                'reloj_ms': deriva}
+                'reloj_ms': deriva_reloj(lag)}
 
     def esperar_hasta(self, t_lsl, timeout=2.0):
         t_fin = time.time() + timeout
