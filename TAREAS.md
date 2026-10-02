@@ -4,6 +4,50 @@ Lee `CLAUDE.md` primero. Para cada tarea: diseña, implementa, **mide en el geme
 
 ---
 
+## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black
+
+El domingo se usa un Unicorn Hybrid Black, no un Cyton: 8 EEG (Fz, C3, Cz, C4, Pz, PO7, Oz, PO8), 250 Hz, Bluetooth, acelerómetro y giroscopio de 3 ejes, batería y contador de muestras. **El casco no llega hasta el domingo**: todo se prepara con el gemelo.
+
+### Verificado
+
+- BrainFlow 5.23 (instalado): `BoardIds.UNICORN_BOARD`; `Unicorn.dll` viene en el paquete; `serial_number` opcional; hay que emparejar el casco con **su dongle**, no con el Bluetooth de la laptop. Filas: EEG 0–7, acelerómetro 8–10, giroscopio 11–13, batería 14, contador 15, validez 16; 250 Hz.
+- UnicornLSL (código fuente de g.tec): un flujo de tipo `Data`, 17 canales `float32` a 250 Hz, **sin etiquetas**, una muestra por envío y sin marca de tiempo propia (LSL estampa la llegada). El nombre es el que se escriba en la app o, vacío, el número de serie. Modo dividido: `<nombre>_EEG` (tipo `EEG`), `_ACC`, `_GYR`, `_CNT`, `_BAT`, `_VALID`.
+- Solo una aplicación puede conectarse al casco a la vez.
+
+### Sin verificar hasta tener el casco (lo comprueba `verificar_unicorn.py`)
+
+Orden de los 17 canales del flujo combinado, unidades del EEG, contador de 1 en 1, acelerómetro ~1 g en reposo, batería, validez, rango de ±750 mV, y que `Unicorn.dll` conecte sin la Unicorn Suite.
+
+### Decisiones de Luis
+
+1. **Fuente:** BrainFlow por `puente_lsl.py` como principal; UnicornLSL de respaldo.
+2. **Canales:** no se fija el montaje con el gemelo (sería circular). La calibración real elige por validación cruzada entre los canales del papel y los 8, por separado para el decoder (C3/Cz/C4 contra 8) y para el detector (Fz/Cz/Pz contra 8), y registra la elección. El gemelo solo sirve para probar que la selección funciona.
+3. **Movimiento de cabeza:** el paso se marca como artefacto (el agente no aprende, no se recentra); sin pausa.
+4. **CP1 robusto:**
+   - el caos solo actúa desde `LAZO_ESTATICO`, con la opción `--caos-desde calibracion`;
+   - 40 movimientos y tres métricas con umbral en `config`: MAD ≤ 15 ms, p95 ≤ 60 ms, ACK perdidos ≤ 10 %;
+   - prueba: 39 normales más un pico de 300 ms da GO; jitter típico de 40 ms da NO GO.
+   - Sin impedancias: calidad de señal por canal.
+5. **Bug de `P_hat`:** en el bloque estático, y con el aprendizaje congelado, se pasa fiabilidad 0 al agente y con salida calibrada `P_hat` queda igual al prior, sin reflejar el ErrP.
+6. **Brecha calibración → lazo:** en `resultados/sesion_real_20261002_114317.csv`, MI con BA 0.88 en calibración contra 0.37 de error en el bloque estático; ErrP con especificidad 0.96 calibrada contra 0.72 en vivo. Investigar (recentrado en línea, tiempos de ventana calibración contra lazo, paso fijo de 0.15 en `CAL_ERRP` contra pasos variables) y **reportar la causa antes de corregir**.
+7. **Alcance:** P0 más Tarea 2 mínima. De la Tarea 3 solo corregir que la órtesis casi nunca cierra completa. Transferencia con PhysioNet: fuera. Si hay que recortar dentro del P0, lo primero que sale es el semáforo PILOTO.
+
+### P0, en orden de commits (rama `p0-unicorn`)
+
+- [x] 1. Contrato: montaje, papeles, flujo `IMU`, fuentes de EEG; gemelo con la topografía del montaje.
+- [ ] 2. Reloj por contador: hora de cada muestra y huecos de Bluetooth (reemplaza la lógica de paquetes del Cyton).
+- [ ] 3. Gemelo: N1 visual en PO7/Oz/PO8, IMU con movimientos de cabeza, pérdidas de Bluetooth por contador, formato UnicornLSL.
+- [ ] 4. `EntradaEEG` configurable (nombre o tipo, canales por índice, contador, IMU) y selección de canales por validación cruzada.
+- [ ] 5. `puente_lsl.py --placa unicorn --serie <num>` con flujo `IMU`; `verificar_unicorn.py`.
+- [ ] 6. CP1 robusto y sin impedancias.
+- [ ] 7. Rechazo por movimiento de cabeza.
+- [ ] 8. Brecha calibración → lazo (reportar causa) y bug de `P_hat`.
+- [ ] 9. Semáforo PILOTO (alfa occipital), si alcanza.
+
+Después: Tarea 2 mínima, con la atenuación sensorial en PO7/Oz/PO8 como firma principal del contraste movimiento propio contra ajeno.
+
+---
+
 ## Tarea 1 — Resiliencia: el lazo que no se cae
 
 > **Hecha el 2 de octubre de 2026** (rama `tarea1-resiliencia`). Especificación y plan en `docs/`; resultados en el README, sección "Resiliencia". Pendiente: probar la reconexión de `puente_lsl.py` con el Cyton real, y repetir la corrida con caos contra el gemelo con más semillas (una sola corrida no es concluyente).

@@ -38,16 +38,17 @@ from scipy.signal import butter, sosfilt
 import config
 from caos import PlanCaos
 
-CH = config.CANALES_EEG                      # FC1 FC2 C3 C4 CP1 CP2 Cz Fz
+CH = config.CANALES_EEG                      # Fz C3 Cz C4 Pz PO7 Oz PO8 (Unicorn Hybrid Black)
 FS = config.FLUJOS['EEG'][2]
 IDX = {c: i for i, c in enumerate(CH)}
 
 # pesos espaciales (0-1) de cada fuente sobre los 8 electrodos
-W_MU_IZQ = np.array([0.4, 0.1, 1.0, 0.15, 0.5, 0.1, 0.3, 0.05])    # corteza motora izquierda
-W_MU_DER = np.array([0.1, 0.4, 0.15, 1.0, 0.1, 0.5, 0.3, 0.05])
-W_ERRP = np.array([0.8, 0.8, 0.4, 0.4, 0.3, 0.3, 1.0, 0.9])         # fronto-central
-W_ALFA = np.array([0.2, 0.2, 0.4, 0.4, 0.9, 0.9, 0.3, 0.1])         # posterior
-W_PARPADEO = np.array([0.3, 0.3, 0.05, 0.05, 0.0, 0.0, 0.15, 1.0])
+#                     Fz    C3    Cz    C4    Pz    PO7   Oz    PO8
+W_MU_IZQ = np.array([0.10, 1.00, 0.40, 0.15, 0.25, 0.15, 0.05, 0.05])    # corteza motora izquierda
+W_MU_DER = np.array([0.10, 0.15, 0.40, 1.00, 0.25, 0.05, 0.05, 0.15])
+W_ERRP = np.array([0.90, 0.40, 1.00, 0.40, 0.60, 0.10, 0.05, 0.10])      # fronto-central (Fz, Cz, Pz)
+W_ALFA = np.array([0.10, 0.25, 0.25, 0.25, 0.60, 0.90, 1.00, 0.90])      # occipital
+W_PARPADEO = np.array([1.00, 0.10, 0.20, 0.10, 0.05, 0.00, 0.00, 0.00])  # frontal
 
 
 def plantilla_errp(error, amp_uv, rng):

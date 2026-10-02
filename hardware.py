@@ -302,7 +302,7 @@ class EntradaEEG:
         P = np.abs(np.fft.rfft(X, axis=1)) ** 2
         red = P[:, (f > config.RED_HZ - 2) & (f < config.RED_HZ + 2)].sum(1) / \
               (P[:, (f > 1) & (f < 100)].sum(1) + 1e-12)
-        sat = (np.abs(x) > 180_000).mean(1)
+        sat = (np.abs(x) > config.SALUD['canal_saturado_uv']).mean(1)
         filas = []
         for i, (r, z, s) in enumerate(zip(xf.std(1), red, sat)):
             nombre = config.CANALES_EEG[i] if i < len(config.CANALES_EEG) else f'ch{i}'

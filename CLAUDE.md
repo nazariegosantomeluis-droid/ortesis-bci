@@ -1,6 +1,6 @@
 # ortesis-bci — contexto para Claude Code
 
-Órtesis de mano controlada por imaginación motora (MI). Un agente corrige el decoder en línea usando el **potencial de error (ErrP)** del cerebro como señal de aprendizaje. Proyecto de Luis (rol P1: orquestador, agente e integración) para una competencia internacional de neurotecnología. La demo con casco real (OpenBCI Cyton, 8 canales, 250 Hz) es el domingo 4 de octubre de 2026; **antes de eso no hay casco**: todo se valida con `cerebro_sintetico.py`.
+Órtesis de mano controlada por imaginación motora (MI). Un agente corrige el decoder en línea usando el **potencial de error (ErrP)** del cerebro como señal de aprendizaje. Proyecto de Luis (rol P1: orquestador, agente e integración) para una competencia internacional de neurotecnología. La demo con casco real (**g.tec Unicorn Hybrid Black**: 8 EEG en Fz, C3, Cz, C4, Pz, PO7, Oz, PO8 a 250 Hz por Bluetooth, con acelerómetro, giroscopio, batería y contador de muestras; hasta el 2 de octubre se planeaba un OpenBCI Cyton) es el domingo 4 de octubre de 2026; **antes de eso no hay casco**: todo se valida con `cerebro_sintetico.py`.
 
 ## Reglas del proyecto (obligatorias)
 
@@ -20,7 +20,7 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 
 | Archivo | Rol |
 |---|---|
-| `config.py` | Contrato: flujos LSL, marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
+| `config.py` | Contrato: flujos LSL (`EEG`, `IMU`...), montaje del Unicorn y papel de cada sensor (`PAPELES`), fuentes de EEG (`FUENTES_EEG`: puente propio o app UnicornLSL), marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
 | `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector; el detector empieza en CALENTANDO) y `Retroceso` (esperas de reconexión). Clase pura, sin hardware. |
 | `caos.py` | `PlanCaos(semilla)`: fallas reproducibles (cortes de EEG, ACK perdidos, picos de latencia, parpadeos, canal despegado). Tasas en `config.CAOS_ESTANDAR`. |
 | `agente_errp.py` | `AgenteErrP` (filtro de Kalman sobre la corrección `beta` del logit; P_hat bayesiano; detectores de cambio por sesgo y chequeo predictivo) y `ConfianzaDetector` (sens/espec vivas del detector de ErrP con posteriores Beta; congela el aprendizaje si el detector deja de informar). |
@@ -62,7 +62,8 @@ Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11,
 
 - Simulador (`python simulador_lazo.py --semillas 30`), perturbación de 2.4 logits — error en los primeros 2 min tras perturbar: estático 0.325, eta fijo 0.246, **bayes 0.214**. Antes de perturbar: 0.165 / 0.170 / 0.169; después de los 2 min: 0.316 / 0.178 / 0.175.
 - Con el detector degradado a propósito (prueba `confianza_detector`, 12 sujetos): aprendizaje al 8 %, congelado 88 % de la falla, 1 % de congelamientos en falso.
-- Banco offline del gemelo (`python cerebro_sintetico.py --banco`): decoder MI BA 0.71; detector ErrP sensibilidad 0.66, especificidad 0.91, BA 0.79.
+- Banco offline del gemelo con el montaje del Unicorn (`python cerebro_sintetico.py --banco`, semilla 0): decoder MI BA 0.72; detector ErrP sensibilidad 0.61, especificidad 0.90, BA 0.75. Con semillas 1 a 3: MI 0.74 / 0.92 / 0.82; ErrP BA 0.77 / 0.83 / 0.73. (Con el montaje anterior, semilla 0: MI 0.71; ErrP 0.66 / 0.91 / 0.79.)
+- **Las cifras de lazo y de caos de abajo son del montaje anterior** (FC1, FC2, C3, C4, CP1, CP2, Cz, Fz); hay que repetirlas con el montaje del Unicorn.
 - Corrida real completa contra el gemelo (una corrida, 2 de octubre): CP1–CP4 en GO (MI BA 0.92, ErrP BA 0.92); error tras perturbar agente 0.26 vs sombra 0.46; ninguna pausa en falso. La calibración no usa semilla fija, así que varía entre corridas (una medida anterior dio 0.14 vs 0.47).
 - Caos, simulador (30 sujetos, `orquestador.py sim --caos`): tras perturbar agente/sombra 0.222/0.333 con el estándar (1109 de 11 425 filas excluidas) y 0.232/0.326 con el leve (105 de 10 867); sin caos 0.235/0.323.
 - Caos, gemelo (una corrida por condición, mismos modelos que la limpia, renovación a 1 s): leve 0.37/0.47 con 1 pausa; estándar 0.37/0.47 con 10 pausas, todas reanudadas; CP4 en GO. No concluyente. Con renovación a 0.3 s, tres corridas estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47.

@@ -2,6 +2,20 @@
 
 Órtesis de mano controlada por imaginación motora, con un agente que se corrige solo usando el **potencial de error (ErrP)** del cerebro como recompensa.
 
+## Hardware
+
+El casco de la demo es un **g.tec Unicorn Hybrid Black**: 8 canales de EEG a 250 Hz por Bluetooth, más acelerómetro y giroscopio de 3 ejes, batería, contador de muestras e indicador de validez. El contrato (`config.py`) usa su montaje y le da un papel a cada sensor:
+
+| Sensores | Papel |
+|---|---|
+| C3, Cz, C4 | Imaginación motora (ERD mu/beta) |
+| Fz, Cz, Pz | Potencial de error (ErrP) |
+| PO7, Oz, PO8 | Respuesta visual al movimiento (Tarea 2) y alfa occipital (semáforo PILOTO) |
+| Acelerómetro y giroscopio | Rechazo de artefactos por movimiento de cabeza |
+| Contador de muestras | Hora de cada muestra y pérdidas de Bluetooth |
+
+La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya usa este montaje. **En curso:** `puente_lsl.py --placa unicorn`, la entrada directa desde la app UnicornLSL, la IMU y el contador todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
+
 ## Instalación
 
 ```bash

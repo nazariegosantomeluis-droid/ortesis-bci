@@ -8,14 +8,47 @@ from pathlib import Path
 # ============================ Flujos LSL ============================
 # nombre: (tipo, canales, Hz [0 = irregular], formato, source_id, quien lo produce)
 FLUJOS = {
-    'EEG':        ('EEG',     8, 250, 'float32', 'cyton-01',  'puente_lsl.py'),
+    'EEG':        ('EEG',     8, 250, 'float32', 'unicorn-01', 'puente_lsl.py (o el gemelo)'),
+    'IMU':        ('IMU',     6, 250, 'float32', 'unicorn-imu-01', 'puente_lsl.py (o el gemelo)'),
     'Intencion':  ('Control', 1, 16,  'float32', 'mi-01',     'decoder MI (B1)'),
     'Marcadores': ('Markers', 1, 0,   'string',  'orq-01',    'orquestador'),
     'Paso':       ('Control', 3, 0,   'float32', 'agente-01', 'orquestador'),
     'Error':      ('Control', 3, 0,   'float32', 'errp-01',   'detector ErrP (B2)'),
     'Estado':     ('Markers', 1, 0,   'string',  'estado-01', 'orquestador (JSON por paso, para el tablero)'),
 }
-CANALES_EEG   = ['FC1', 'FC2', 'C3', 'C4', 'CP1', 'CP2', 'Cz', 'Fz']
+# Montaje del g.tec Unicorn Hybrid Black, en el orden en que lo entrega el casco (BrainFlow
+# UNICORN_BOARD y la API de g.tec): 8 EEG a 250 Hz por Bluetooth, mas IMU, bateria,
+# contador de muestras e indicador de validez.
+CANALES_EEG   = ['Fz', 'C3', 'Cz', 'C4', 'Pz', 'PO7', 'Oz', 'PO8']
+CANALES_IMU   = ['acc_x', 'acc_y', 'acc_z', 'gyr_x', 'gyr_y', 'gyr_z']    # g y grados/s
+# Papel de cada sensor. La calibracion decide, por validacion cruzada, si cada modelo usa
+# solo los canales de su papel o los 8 (no se fija aqui ni con el gemelo: seria circular).
+PAPELES = {
+    'mi':     ['C3', 'Cz', 'C4'],        # imaginacion motora (ERD mu/beta)
+    'errp':   ['Fz', 'Cz', 'Pz'],        # potencial de error
+    'visual': ['PO7', 'Oz', 'PO8'],      # respuesta visual al movimiento (Tarea 2)
+    'alfa':   ['PO7', 'Oz', 'PO8'],      # alfa occipital: semaforo PILOTO (somnolencia / atencion)
+}
+
+
+def indices(canales):
+    """Posiciones en CANALES_EEG de un papel ('mi', 'errp'...) o de una lista de electrodos."""
+    return [CANALES_EEG.index(c) for c in (PAPELES[canales] if isinstance(canales, str) else canales)]
+
+
+# De donde puede venir el EEG y en que canal del flujo esta cada cosa.
+#   puente:     flujo del contrato (puente_lsl.py o el gemelo). 8 canales de EEG ya estampados
+#               con la hora reconstruida por contador; la IMU va en el flujo 'IMU'.
+#   unicornlsl: la app UnicornLSL de g.tec (respaldo). Un solo flujo de tipo 'Data' con 17
+#               canales SIN etiquetas, estampado a la llegada; su nombre es el que se escriba
+#               en la app (por defecto, el numero de serie). El orden es el de la API de g.tec;
+#               verificar_unicorn.py lo comprueba con el casco real.
+FUENTES_EEG = {
+    'puente':     {'nombre': 'EEG', 'tipo': None, 'canales': 8, 'eeg': list(range(8)), 'imu': None,
+                   'bateria': None, 'contador': None, 'validez': None},
+    'unicornlsl': {'nombre': None, 'tipo': 'Data', 'canales': 17, 'eeg': list(range(8)),
+                   'imu': list(range(8, 14)), 'bateria': 14, 'contador': 15, 'validez': 16},
+}
 CANALES_PASO  = ['p_prima', 'direccion', 'delta']
 CANALES_ERROR = ['p_errp', 'artefacto', 'youden']
 
@@ -25,12 +58,14 @@ def crear_info(nombre):
     from pylsl import StreamInfo
     tipo, n, fs, fmt, sid, _ = FLUJOS[nombre]
     info = StreamInfo(nombre, tipo, n, fs, fmt, sid)
-    if nombre == 'EEG':
+    etiquetas = {'EEG': [(c, 'microvolts') for c in CANALES_EEG],
+                 'IMU': [(c, 'g' if c.startswith('acc') else 'deg/s') for c in CANALES_IMU]}
+    if nombre in etiquetas:
         chns = info.desc().append_child('channels')
-        for c in CANALES_EEG:
+        for c, unidad in etiquetas[nombre]:
             ch = chns.append_child('channel')
             ch.append_child_value('label', c)
-            ch.append_child_value('unit', 'microvolts')
+            ch.append_child_value('unit', unidad)
     return info
 
 
@@ -100,7 +135,8 @@ SALUD = {
                                                             # menos de 1 s se vaciaria el buffer seguido.
     'eeg_tasa_amarillo': 0.10, 'eeg_tasa_rojo': 0.25,       # desviacion relativa de la tasa real
     'hueco_max_s': 0.02,                                    # salto entre muestras que cuenta como corte
-    'canal_plano_uv': 0.1, 'canal_saturado_uv': 180_000.0, 'canal_ruidoso_uv': 100.0,
+    # saturado: el Unicorn mide +-750 mV (dato de g.tec, por confirmar con verificar_unicorn.py)
+    'canal_plano_uv': 0.1, 'canal_saturado_uv': 700_000.0, 'canal_ruidoso_uv': 100.0,
     'ventana_canales_s': 2.0,
     'acks_amarillo': 1, 'acks_rojo': 3,                     # ACK perdidos consecutivos
     'latencia_pico_ms': 80.0,

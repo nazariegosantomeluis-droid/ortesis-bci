@@ -55,6 +55,18 @@ def contrato():
         'LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'EVALUACION'}
     assert config.m_salud('eeg', config.ROJO) == 'salud:eeg:ROJO'
     assert config.COLUMNAS_CSV[-2:] == ['salud', 'excluido']
+    # montaje del Unicorn Hybrid Black y el papel de cada sensor
+    assert config.CANALES_EEG == ['Fz', 'C3', 'Cz', 'C4', 'Pz', 'PO7', 'Oz', 'PO8']
+    assert config.PAPELES == {'mi': ['C3', 'Cz', 'C4'], 'errp': ['Fz', 'Cz', 'Pz'],
+                              'visual': ['PO7', 'Oz', 'PO8'], 'alfa': ['PO7', 'Oz', 'PO8']}
+    assert config.indices('mi') == [1, 2, 3] and config.indices(['Oz', 'Fz']) == [6, 0]
+    assert config.FLUJOS['IMU'][1] == len(config.CANALES_IMU) == 6
+    for nombre, f in config.FUENTES_EEG.items():      # mapa de canales de cada fuente de EEG
+        usados = f['eeg'] + (f['imu'] or []) + [f[k] for k in ('bateria', 'contador', 'validez') if f[k] is not None]
+        assert len(f['eeg']) == 8 and len(set(usados)) == len(usados) and max(usados) < f['canales'], nombre
+    assert config.FUENTES_EEG['puente']['nombre'] == 'EEG' and config.FUENTES_EEG['puente']['contador'] is None
+    lsl = config.FUENTES_EEG['unicornlsl']             # la app de g.tec: 17 canales de tipo 'Data'
+    assert (lsl['tipo'], lsl['canales'], lsl['contador'], lsl['validez']) == ('Data', 17, 15, 16)
     return f'{len(config.FLUJOS)} flujos, {len(config.ESTADOS)} estados'
 
 
@@ -572,11 +584,11 @@ def senal_valida():
     fs, rng = 250, np.random.default_rng(0)
     x = rng.normal(0, 10, size=(8, 1000)); t = 100 + np.arange(1000) / fs
     assert hw.revisar_canales(x, fs) == {}
-    malo = x.copy(); malo[2] = 5.0; malo[7] *= 40; malo[0, 10] = 200_000.0
-    assert hw.revisar_canales(malo, fs) == {'FC1': 'saturado', 'C3': 'plano', 'Fz': 'ruidoso'}
+    malo = x.copy(); malo[2] = 5.0; malo[7] *= 40; malo[0, 10] = 1.5 * config.SALUD['canal_saturado_uv']
+    assert hw.revisar_canales(malo, fs) == {'Fz': 'saturado', 'Cz': 'plano', 'PO8': 'ruidoso'}
     assert hw.revisar_canales(np.empty((8, 0)), fs) == {}                           # buffer vacio
     recien = x.copy(); recien[4, -125:] = 0.0                                       # se despego hace 0.5 s
-    assert hw.revisar_canales(recien, fs) == {'CP1': 'plano'}
+    assert hw.revisar_canales(recien, fs) == {'Pz': 'plano'}
     assert hw.ventana_valida(x, t, fs, edad_s=0.05, segundos=3.0)
     assert not hw.ventana_valida(x, t, fs, edad_s=2.0, segundos=3.0)               # rancia
     assert not hw.ventana_valida(x[:, :300], t[:300], fs, 0.05, 3.0)               # incompleta
@@ -951,12 +963,22 @@ def cerebro_sintetico():
     import hardware as hw
     X, y = cs.sesion_mi(40, semilla=3)
     ba_mi = hw.DecoderIM().ajustar(X, y).ba
+    # montaje del Unicorn: el ERD de imaginar la mano derecha es maximo en C3 y el alfa es occipital
+    potencia = lambda sel: X[sel].var(axis=(0, 2))
+    erd = potencia(y == 1) / potencia(y == 0)
+    assert config.CANALES_EEG[int(np.argmin(erd))] == 'C3', dict(zip(config.CANALES_EEG, erd.round(2)))
+    alfa = potencia(y == 0)
+    assert alfa[config.indices('alfa')].min() > 2 * alfa[config.indices(['Fz'])[0]], alfa.round(1)
     X, y = cs.sesion_errp(120, semilla=3)
     t = np.arange(X.shape[2]) / cs.FS + config.EPOCA_ERRP[0]
     dif = X[y == 1, config.CANALES_EEG.index('Cz')].mean(0) - X[y == 0, config.CANALES_EEG.index('Cz')].mean(0)
     pe, ne = dif[np.argmin(abs(t - 0.36))], dif[np.argmin(abs(t - 0.25))]
     det = hw.DetectorErrP().ajustar(X, y)
-    assert 0.65 < ba_mi < 1.0 and pe > 2 and ne < 0 and det.ba > 0.75, (ba_mi, pe, ne, det.ba)
+    # el ErrP es fronto-central: mayor en los canales de su papel (Fz, Cz, Pz) que en los occipitales
+    amp = np.abs(X[y == 1].mean(0) - X[y == 0].mean(0)).max(axis=1)
+    assert amp[config.indices('errp')].min() > amp[config.indices('visual')].max(), amp.round(1)
+    # det.ba > 0.70 (antes 0.75): el montaje del Unicorn tiene 3 electrodos fronto-centrales, no 5
+    assert 0.65 < ba_mi < 1.0 and pe > 2 and ne < 0 and det.ba > 0.70, (ba_mi, pe, ne, det.ba)
     return f'MI BA {ba_mi:.2f}; ErrP Pe {pe:+.1f} uV, Ne {ne:+.1f} uV; detector BA {det.ba:.2f} (espec {det.espec:.2f})'
 
 
