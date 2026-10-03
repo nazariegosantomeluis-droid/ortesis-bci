@@ -4,6 +4,89 @@ Lee `CLAUDE.md` primero. Para cada tarea: diseña, implementa, **mide en el geme
 
 ---
 
+## Bloque final: la IA como tercera escala de aprendizaje (3 a 5 de octubre de 2026)
+
+Especificación de Luis del 3 de octubre por la noche. **Sustituye** dos decisiones anteriores: el código ya no se congela el sábado a las 20:00 y PhysioNet ya no está fuera.
+
+### Fechas y ramas
+
+- Domingo 4 de octubre: demo con el casco, con la etiqueta **`v-demo` intacta**.
+- Lunes 5 de octubre: **el código se congela a las 10:00**; el evento termina a la 1 p.m.
+- Todo lo nuevo entra a `main` **detrás de banderas apagadas por defecto**. El domingo en la noche Luis decide qué se enciende para la final.
+- Sin retroalimentación táctil: no habrá motores de vibración.
+
+### Visión para la presentación (documentarla así en el README)
+
+El sistema aprende en tres escalas de tiempo:
+
+| Escala | Quién | Cada cuánto |
+|---|---|---|
+| Rápida | Agente bayesiano | cada paso |
+| Media | Detector co-adaptativo | cada ~20 pasos |
+| Lenta | Claude como co-investigador | entre bloques |
+
+### Reglas para toda la IA
+
+- Llave en `ANTHROPIC_API_KEY`, leída de un `.env` que está en `.gitignore`.
+- Verificar en la documentación oficial el modelo vigente y la API de herramientas.
+- A la API solo van métricas agregadas y anónimas: nunca EEG crudo ni nombres.
+- Nada de la IA dentro del lazo de control.
+- Sin conexión o sin llave, todo funciona con plantillas o reglas deterministas.
+- Todo lleva prueba en `pruebas.py` que funciona con la API simulada.
+
+### Orden de trabajo
+
+#### 1. Control causal en vivo con sham (`--sham`)
+
+**Objetivo:** demostrar frente al jurado que es el ErrP del piloto lo que corrige la máquina.
+
+- Analizar la rama `origin/b1-b2-sham-errp` de jusren (`c71f477`), quedarse con las ideas útiles, escribir implementación propia y acreditar la idea a jusren en el README. Luis (3 de octubre): sus dos controles (B1, la órtesis se mueve sola con el piloto en reposo y `p(t)` no debe seguirla; B2, especificidad del ErrP por dirección) son muy útiles y también deben quedar en `main`, con implementación propia.
+- Dos bloques adaptativos del mismo largo, real y sham, en orden contrabalanceado (el orden se elige al azar y se registra). Cada bloque arranca con beta, varianza y prior reiniciados y sin perturbación, y recibe su propia perturbación de 2.4 logits en el mismo paso relativo.
+- En el bloque sham el agente recibe los `p_errp` permutados al azar entre los pasos recientes del mismo bloque: misma distribución, sin relación con los errores reales. En ese bloque el `ConfianzaDetector` no congela ni escala el aprendizaje (fiabilidad fija en la calibrada), para que el contraste sea limpio: el agente aprende igual de rápido, solo que de una señal sin información.
+- Ciego simple: el piloto no sabe qué bloque es cuál; el tablero lo muestra solo cuando el operador lo pide.
+- Marcadores `bloque:real` y `bloque:sham` en el contrato. `EVALUACION` y el tablero comparan los bloques lado a lado: error tras perturbar con intervalo del 90 %, tiempo de recuperación y si se recuperó.
+- Duración: cada bloque de 60 a 80 pasos, para que los dos quepan en unos 4 minutos.
+- **Criterio de aceptación** (gemelo, 16 sesiones, duración de la demo): el bloque real se recupera en al menos 12 de 16 y el sham en 3 de 16 o menos; la diferencia de error tiene un intervalo que excluye el 0. Si con esa duración no se alcanza, reportar a Luis cuánto haría falta **antes de alargar nada**.
+
+#### 2. Copiloto clínico (`copiloto.py`, `--copiloto`)
+
+**Objetivo:** preguntas en lenguaje natural sobre una sesión, respondidas solo con los datos reales.
+
+- Herramientas que consultan el CSV, los marcadores y los checkpoints:
+  - `resumen_sesion()`;
+  - `eventos(desde, hasta, tipo)`: pausas, congelamientos, cambios detectados, perturbaciones, checkpoints, cambios de semáforo;
+  - `metrica(nombre, bloque)`: error del agente y de la sombra con intervalo, tiempo de recuperación, BA viva, fiabilidad, latencia del ACK, excluidos por motivo, alfa occipital;
+  - `pasos(desde, hasta, columnas)`: filas puntuales, con un límite de filas;
+  - `comparar_sesiones(rutas)`.
+- Preguntas que debe responder bien, como prueba: «¿por qué se congeló el aprendizaje en el paso N?», «¿cuánto tardó en recuperarse tras la perturbación?», «¿el agente le ganó a la sombra y con qué certeza?», «¿hubo señales de fatiga?», «¿cuántos pasos se excluyeron y por qué?» y «¿cómo se compara con la sesión anterior?».
+- Toda respuesta cita los pasos y valores que usó. Si el dato no existe, lo dice; nunca inventa.
+- Interfaz: `python copiloto.py --sesion <csv> "pregunta"`, un modo interactivo y una caja de texto en el tablero.
+- Informe entre sesiones: compara la sesión con las anteriores del mismo piloto y genera dos versiones en Markdown, una para el terapeuta y otra sencilla para el paciente, en español e inglés, con las figuras clave. Incluye una propuesta para la próxima sesión en JSON, con el mismo esquema y la misma validación de rangos seguros que el co-investigador, y requiere aprobación humana.
+- Pruebas con la API simulada: las herramientas devuelven las cifras correctas, una pregunta sin datos produce «no hay dato» y una propuesta fuera de rango se rechaza.
+
+#### 3. Co-investigador entre bloques
+
+- Al terminar cada bloque, Claude recibe un resumen agregado (exactitud, error contra sombra, BA viva, fiabilidad, pasos excluidos y motivos, alfa occipital, pasos sin ErrP por tamaño de paso) y devuelve una propuesta en JSON con esquema fijo: acción (continuar, pausa, ajustar parámetro, recalibrar) y justificación breve.
+- El código valida cada parámetro contra rangos seguros en `config`.
+- El tablero muestra la propuesta con botones Aprobar y Rechazar, y todo queda registrado (propuesta, decisión, efecto).
+- Sin conexión o sin llave se usa un conjunto de reglas determinista equivalente.
+- **Nunca modifica nada sin aprobación humana.**
+
+#### 4. Narrador para el jurado
+
+- Un proceso aparte que escucha el flujo `Estado` y, ante eventos relevantes (perturbación, congelamiento, pausa, recuperación, checkpoints), pide a Claude una frase corta en español o inglés basada solo en los datos del evento.
+- Nunca bloquea el lazo; si la API tarda o falla, usa plantillas.
+
+#### 5. Transferencia con PhysioNet
+
+- EEGMMIDB vía `mne.datasets.eegbci`, corridas de imaginación motora (`mne` entra como dependencia).
+- Pre-entrenar «mano derecha imaginada contra reposo» con los 8 canales del Unicorn remuestreados a 250 Hz, adaptar con recentrado riemanniano y medir cuántos ensayos de calibración ahorra.
+- Si funciona, que la calibración pueda arrancar desde el modelo pre-entrenado.
+
+### Decisiones de implementación y hallazgos (se anotan aquí conforme salen)
+
+---
+
 ## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black
 
 El domingo se usa un Unicorn Hybrid Black, no un Cyton: 8 EEG (Fz, C3, Cz, C4, Pz, PO7, Oz, PO8), 250 Hz, Bluetooth, acelerómetro y giroscopio de 3 ejes, batería y contador de muestras. **El casco no llega hasta el domingo**: todo se prepara con el gemelo.
