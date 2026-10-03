@@ -713,6 +713,43 @@ def seleccion_canales_vistas():
 
 
 @prueba
+def detector_coadaptativo():
+    """Detector co-adaptativo con el gemelo: cada epoca valida del lazo se puntua con el modelo
+    vigente ANTES de usarse para entrenar (evaluacion secuencial honesta); cada 20 epocas nuevas
+    se re-entrena en otro hilo; el modelo nuevo se prueba en sombra y solo reemplaza al vigente
+    si no empeora. La BA secuencial crece con las epocas del lazo y el ciclo no se bloquea."""
+    import hardware as hw
+    import cerebro_sintetico as cs
+    X, y = cs.sesion_errp(340, semilla=4)
+    det = hw.DetectorErrP().ajustar(X[:40], y[:40])               # calibracion corta: hay de donde mejorar
+    cambios = []
+    co = hw.DetectorCoadaptativo(det, X[:40], y[:40], cada=20, prueba=config.COADAPTAR_PRUEBA, al_cambiar=cambios.append)
+    lento = 0.0
+    for k, (e, err) in enumerate(zip(X[40:], y[40:])):
+        t0 = time.perf_counter()
+        p = co.actual.p_error(e)
+        co.observar(e, bool(err), p, artefacto=False)            # nunca espera al entrenamiento
+        lento = max(lento, time.perf_counter() - t0)
+        if k % 20 == 19:
+            co.esperar()       # en el lazo real 20 epocas son ~18 s, mas de lo que tarda re-entrenar
+    co.esperar()
+    primeras, ultimas = co.ba_secuencial(desde=0, hasta=100), co.ba_secuencial(desde=-100)
+    assert ultimas > primeras + 0.03, (primeras, ultimas, co.version, co.descartes)
+    assert co.version > 1 and cambios and cambios[-1] is co.actual and lento < 0.25, (co.version, lento)
+    # un candidato peor se descarta
+    malo = hw.DetectorCoadaptativo(det, X[:40], y[:40], cada=20, prueba=20)
+    malo._entrenar = lambda Xs, ys: hw.DetectorErrP().ajustar(np.array(Xs), np.random.default_rng(0).permutation(ys))
+    for k, (e, err) in enumerate(zip(X[40:200], y[40:200])):
+        malo.observar(e, bool(err), malo.actual.p_error(e), artefacto=False)
+        if k % 20 == 19:
+            malo.esperar()
+    malo.esperar()
+    assert malo.descartes >= 1 and malo.actual is det, (malo.descartes, malo.version)
+    return (f'BA secuencial en vivo: {primeras:.2f} en las primeras 100 epocas del lazo, {ultimas:.2f} en las ultimas 100; '
+            f'{co.version - 1} cambios de modelo, {co.descartes} descartados; paso mas lento {1000 * lento:.0f} ms')
+
+
+@prueba
 def calibracion_errp_fija():
     """La calibracion de ErrP usa siempre todas las epocas pedidas (120 por defecto): sin GO ni
     NO GO tempranos, que con pocos datos elegian estimados inflados por suerte."""
@@ -1524,14 +1561,14 @@ def lazo_real_caos():
 
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
-# tiempo real; --completa agrega las sesiones reales contra el gemelo.
+# tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
-CON_LSL = ['reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
+CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos']
 

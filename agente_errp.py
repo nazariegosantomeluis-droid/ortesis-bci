@@ -302,6 +302,13 @@ class ConfianzaDetector:
         for k in self._ESTADO:
             setattr(self, k, d[k])
 
+    def rebase(self, sensibilidad, especificidad):
+        """Nueva linea base (cambio de modelo del detector): el prior pasa a ser el del modelo
+        nuevo; la evidencia viva acumulada se conserva."""
+        if sensibilidad + especificidad > 1:
+            self.s0, self.e0 = sensibilidad, especificidad
+            self.j0 = sensibilidad + especificidad - 1
+
     def vivo(self):
         """(sens, espec) acotados para usarse en Bayes."""
         return float(np.clip(self.sens, 0.51, 0.99)), float(np.clip(self.espec, 0.51, 0.99))

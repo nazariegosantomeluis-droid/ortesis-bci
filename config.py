@@ -86,6 +86,7 @@ PERTURBACION_ON = 'perturbacion:on'
 def m_paso_ack(seq): return f'paso_ack:{seq}'
 def m_bloque(nombre): return f'bloque:{nombre}'
 def m_salud(subsistema, color): return f'salud:{subsistema}:{color}'
+def m_detector(version): return f'detector:v{version}'      # cambio de modelo del detector co-adaptativo
 
 
 # ============================ CSV (una fila por paso) ============================
@@ -167,6 +168,8 @@ POSICION_SEGURA   = 0.0          # abierta
 PAUSA_DURACION_MS = 1500         # abrir despacio
 RECONEXION_INICIAL_S, RECONEXION_MAX_S = 0.5, 8.0           # retroceso exponencial
 CAL_REPETICIONES_MAX = 3         # repeticiones de un ensayo de calibracion afectado por una falla
+COADAPTAR_CADA = 20             # epocas nuevas del lazo entre re-entrenamientos del detector
+COADAPTAR_PRUEBA = 30           # epocas con que se prueba en sombra un modelo nuevo (20 era muy ruidoso)
 
 # ============================ Caos ============================
 # "Caos estandar": fallas que inyecta --caos <semilla> (caos.py). cada_s = separacion media.

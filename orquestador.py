@@ -487,6 +487,8 @@ class BackendReal:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
             return False
         np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
+        config.MODELOS.mkdir(exist_ok=True)
+        np.savez(config.MODELOS / 'detector_errp_datos.npz', X=np.array(X), y=np.array(y))   # para co-adaptar
         self.hw.guardar(self.detector, 'detector_errp.pkl')
         d = self.detector
         ok = d.ba >= config.BA_MIN and d.espec >= config.ESPEC_MIN
@@ -510,11 +512,24 @@ class BackendReal:
             orq.fsm.ir_a('CAL_ERRP')
             if not self.calibrar_errp(orq):
                 return None
+        self.preparar_coadaptacion(orq)
         sens = float(np.clip(self.detector.sens, 0.51, 0.99))
         espec = float(np.clip(self.detector.espec, 0.51, 0.99))
         return {'w0': self.decoder.w0, 'c0': self.decoder.c0, 'sens': sens, 'espec': espec,
                 'salida': 'calibrada', 'p_error_cal': self.detector.p_error_cal,
                 'umbral': self.detector.umbral}
+
+    # ---------------- detector co-adaptativo ----------------
+    def preparar_coadaptacion(self, orq):
+        """Con los datos de calibracion, el detector sigue aprendiendo en el lazo."""
+        ruta = config.MODELOS / 'detector_errp_datos.npz'
+        self.coadapta = None
+        if not ruta.exists():
+            aviso('  (sin datos de calibracion del detector guardados: no se co-adapta)')
+            return
+        d = np.load(ruta)
+        self.coadapta = self.hw.DetectorCoadaptativo(self.detector, d['X'], d['y'], config.COADAPTAR_CADA,
+                                                     config.COADAPTAR_PRUEBA, al_cambiar=orq.detector_cambiado)
 
     # ---------------- persistencia ----------------
     def instantanea(self):
@@ -526,6 +541,7 @@ class BackendReal:
         self.detector = self.hw.cargar('detector_errp.pkl')
         self.decoder.M = np.array(d['M'])
         self.ortesis.seq = d['seq']
+        self.coadapta = None                      # se rearma en Orquestador.preparar
 
     # ---------------- salud ----------------
     def reloj(self):
@@ -560,11 +576,17 @@ class BackendReal:
         e = self.eeg.epoca(t_ack)
         if e is None:
             return float('nan'), True, 'epoca_invalida'
-        return self.detector.p_error(e), self.detector.artefacto(e), ''
+        p, art = self.detector.p_error(e), self.detector.artefacto(e)
+        if getattr(self, 'coadapta', None) is not None:
+            self.coadapta.observar(e, erroneo, p, art)   # puntuada antes de entrenar con ella
+            self.detector = self.coadapta.actual
+        return p, art, ''
 
     def cerrar(self):
         self.ortesis.cerrar()
         self.eeg.cerrar()
+        if getattr(self, 'coadapta', None) is not None:
+            self.coadapta.esperar()
 
 
 # ======================================================================
@@ -629,6 +651,18 @@ class Orquestador:
         aviso(f"Sesion REANUDADA en el paso {inst['paso']} ({self.fsm.estado}), beta {self.agente.beta:+.3f}. "
               f"CSV: {self.ruta_csv}")
         return True
+
+    def detector_cambiado(self, det):
+        """El detector co-adaptativo cambio de modelo: umbral, agente y ConfianzaDetector se
+        actualizan juntos para seguir siendo coherentes con el modelo vigente."""
+        sens, espec = float(np.clip(det.sens, 0.51, 0.99)), float(np.clip(det.espec, 0.51, 0.99))
+        self.umbral_errp = det.umbral
+        self.agente.cfg.sens, self.agente.cfg.espec = sens, espec
+        self.agente.cfg.p_error_calibracion = det.p_error_cal
+        self.confianza.rebase(sens, espec)
+        version = self.b.coadapta.version
+        self.salidas.marcador(config.m_detector(version))
+        aviso(f'  [detector] modelo v{version} (en sombra: sens {det.sens:.2f}, espec {det.espec:.2f})')
 
     # ---------------- persistencia ----------------
     def instantanea(self, terminada=False):
@@ -877,6 +911,12 @@ class Orquestador:
                                f'no se recupero dentro del bloque; error tras perturbar: agente '
                                f'{self.error_post["agente"]:.2f} vs sombra {self.error_post["sombra"]:.2f}',
                                False, informativo=True)
+        co = getattr(self.b, 'coadapta', None)
+        if co is not None:
+            ba = co.ba_secuencial()
+            aviso(f'  detector en vivo (cada epoca puntuada antes de entrenar con ella): BA '
+                  + (f'{ba:.2f}' if ba is not None else 's/d') + f' en {len(co.historial)} epocas; '
+                  f'{co.version - 1} cambios de modelo, {co.descartes} descartados')
         aviso(f'  beta final = {self.filas[-1]["beta"]}  |  cambios detectados = {self.agente.n_cambios}'
               f'  |  detector vivo: sens {self.confianza.sens:.2f}, espec {self.confianza.espec:.2f}')
         aviso(f'  CSV: {self.ruta_csv}')

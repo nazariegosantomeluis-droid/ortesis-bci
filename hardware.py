@@ -715,7 +715,9 @@ class DetectorErrP:
         fusion = VotingClassifier([(v, piezas[v]) for v in VISTAS_ERRP[vistas or self.vistas]], voting='soft')
         return CalibratedClassifierCV(fusion, method='sigmoid', cv=3)
 
-    def ajustar(self, X, y, candidatos=None):
+    def ajustar(self, X, y, candidatos=None, evaluar=True):
+        """evaluar=False: sin la validacion anidada que estima sens / espec / BA (para re-entrenar
+        en el lazo, donde el modelo nuevo se evalua en sombra con epocas que no vio)."""
         from pyriemann.estimation import Covariances
         from pyriemann.utils.distance import distance_riemann
         from pyriemann.utils.mean import mean_riemann
@@ -734,7 +736,7 @@ class DetectorErrP:
         # con validacion cruzada del entrenamiento, y se aplican a la prueba. Elegir sobre los
         # mismos puntajes que se evaluan inflaba la BA reportada (maldicion del ganador).
         self.pred_cv = np.zeros(len(y), dtype=int)
-        for ent, pru in pliegues.split(X, y):
+        for ent, pru in (pliegues.split(X, y) if evaluar else []):
             k_in = int(min(3, np.bincount(y[ent]).min()))
             interno = StratifiedKFold(max(k_in, 2), shuffle=True, random_state=1)
             p_ent = {n: probas(n, X[ent], y[ent], interno) for n in nombres}
@@ -750,9 +752,10 @@ class DetectorErrP:
         self.p_error_cal = float(y.mean())
         self.umbral = self._umbral_neyman_pearson(p_todo[self.eleccion], y)
         self.y_cal = y
-        self.sens = float((self.pred_cv[y == 1] == 1).mean())
-        self.espec = float((self.pred_cv[y == 0] == 0).mean())
-        self.ba = 0.5 * (self.sens + self.espec)
+        if evaluar:
+            self.sens = float((self.pred_cv[y == 1] == 1).mean())
+            self.espec = float((self.pred_cv[y == 0] == 0).mean())
+            self.ba = 0.5 * (self.sens + self.espec)
         self.pipe = self._pipe().fit(X, y)
         self._cov = Covariances('oas')
         C = self._cov.fit_transform(X)
@@ -785,6 +788,96 @@ class DetectorErrP:
 
     def p_error(self, e):
         return float(self.pipe.predict_proba(e[None])[0, 1])
+
+
+class DetectorCoadaptativo:
+    """El detector de ErrP sigue aprendiendo en el lazo, con las epocas que el piloto genera en
+    el contexto real (en bloques con senal se sabe que pasos fueron erroneos).
+
+    - Evaluacion secuencial honesta: cada epoca se puntua con el modelo vigente ANTES de usarse
+      para entrenar. ba_secuencial() es la BA en vivo.
+    - Cada `cada` epocas nuevas (sin artefacto) se re-entrena en otro hilo con calibracion + lazo,
+      con la misma configuracion (canales y vistas) que eligio la calibracion.
+    - El modelo nuevo no se evalua con las epocas con que se entreno: se prueba EN SOMBRA con las
+      `prueba` epocas siguientes, y solo reemplaza al vigente si su BA no es peor. Si empeora, se
+      descarta.
+    - El cambio es atomico y ocurre en el hilo del lazo (dentro de observar), asi que no hay
+      carreras con quien usa self.actual. al_cambiar(nuevo) avisa para actualizar el umbral, el
+      agente y el ConfianzaDetector de forma coherente.
+    """
+
+    def __init__(self, detector, X_cal, y_cal, cada=20, prueba=20, al_cambiar=None):
+        self.actual, self.cada, self.prueba, self.al_cambiar = detector, cada, prueba, al_cambiar
+        self._X, self._y = [np.asarray(x) for x in X_cal], [int(v) for v in y_cal]
+        self.historial = []                      # (detecto el vigente, era error), en orden
+        self.version, self.descartes, self.nuevas = 1, 0, 0
+        self.candidato, self._sombra = None, []  # (detecta candidato, detecta vigente, error)
+        self._hilo, self._listo = None, None
+
+    def _entrenar(self, X, y):
+        return DetectorErrP(canales=self.actual.canales, vistas=self.actual.vistas).ajustar(
+            np.array(X), np.array(y), evaluar=False)
+
+    def _en_hilo(self, X, y):
+        try:
+            self._listo = self._entrenar(X, y)
+        except Exception as e:                   # un re-entrenamiento fallido no tumba el lazo
+            print(f'  [detector] no se pudo re-entrenar: {e}', flush=True)
+            self._listo = None
+
+    def observar(self, e, erroneo, p, artefacto=False):
+        """e: epoca del paso; p: puntaje que le dio el modelo vigente (ya calculado)."""
+        erroneo = int(bool(erroneo))
+        if artefacto or e is None:
+            return
+        self.historial.append((int(p > self.actual.umbral), erroneo))
+        if self._hilo is not None and not self._hilo.is_alive():   # termino de entrenar: a la sombra
+            self._hilo, self.candidato, self._listo, self._sombra = None, self._listo, None, []
+        if self.candidato is not None:
+            c = int(self.candidato.p_error(e) > self.candidato.umbral)
+            self._sombra.append((c, self.historial[-1][0], erroneo))
+            if len(self._sombra) >= self.prueba:
+                self._decidir()
+        self._X.append(np.asarray(e)); self._y.append(erroneo)
+        self.nuevas += 1
+        if self.nuevas >= self.cada and self._hilo is None and self.candidato is None:
+            self.nuevas = 0
+            self._hilo = threading.Thread(target=self._en_hilo, args=(list(self._X), list(self._y)), daemon=True)
+            self._hilo.start()
+
+    def _decidir(self):
+        s = np.array(self._sombra)
+        ba = lambda col: _ba_o_none(s[:, 2], s[:, col])
+        nuevo, vigente = ba(0), ba(1)
+        if nuevo is not None and vigente is not None and nuevo >= vigente:
+            errores, aciertos = s[s[:, 2] == 1, 0], s[s[:, 2] == 0, 0]
+            # sens y espec del nuevo, medidas en sombra con epocas que no vio
+            self.candidato.sens = float(errores.mean()) if len(errores) else self.actual.sens
+            self.candidato.espec = float(1 - aciertos.mean()) if len(aciertos) else self.actual.espec
+            self.candidato.ba = 0.5 * (self.candidato.sens + self.candidato.espec)
+            self.actual, self.version = self.candidato, self.version + 1
+            if self.al_cambiar:
+                self.al_cambiar(self.actual)
+        else:
+            self.descartes += 1
+        self.candidato, self._sombra = None, []
+
+    def ba_secuencial(self, desde=0, hasta=None):
+        """BA en vivo (cada epoca puntuada antes de entrenar con ella), o None sin las dos clases."""
+        h = np.array(self.historial[desde:hasta]).reshape(-1, 2)
+        return _ba_o_none(h[:, 1], h[:, 0])
+
+    def esperar(self):
+        """Espera a que termine el re-entrenamiento en curso (para pruebas y al cerrar)."""
+        if self._hilo is not None:
+            self._hilo.join()
+
+
+def _ba_o_none(y, pred):
+    y, pred = np.asarray(y), np.asarray(pred)
+    if not ((y == 1).any() and (y == 0).any()):
+        return None
+    return exactitud_balanceada(y, pred)
 
 
 def exactitud_balanceada(y, pred):
