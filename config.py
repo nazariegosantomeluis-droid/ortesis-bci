@@ -85,6 +85,7 @@ CUE_RELAJA      = 'cue_relaja'
 PERTURBACION_ON = 'perturbacion:on'
 def m_paso_ack(seq): return f'paso_ack:{seq}'
 def m_bloque(nombre): return f'bloque:{nombre}'
+def m_paso_inicio(seq): return f'paso_inicio:{seq}'           # inicio real del movimiento (telemetria)
 def m_salud(subsistema, color): return f'salud:{subsistema}:{color}'
 def m_detector(version): return f'detector:v{version}'      # cambio de modelo del detector co-adaptativo
 
@@ -93,7 +94,9 @@ def m_detector(version): return f'detector:v{version}'      # cambio de modelo d
 COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'meta', 'angulo', 'p_prima',
                 'direccion', 'delta', 'P_hat', 'artefacto', 'fiabilidad', 'beta',
                 'varianza_beta', 'sens_viva', 'espec_viva', 'cambio', 'explorando',
-                'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido']
+                'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido', 'alineacion']
+# alineacion: a que se alineo la epoca del ErrP: 'telemetria' (inicio real del movimiento),
+# 'ack+latencia' (ACK mas la latencia mecanica media medida) o 'ack'.
 # salud: una letra por subsistema (V/A/R, o C = detector calentando) en el orden de SUBSISTEMAS.
 # excluido: vacio = paso valido; si no, el motivo (el paso queda fuera del analisis).
 MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'epoca_invalida']
@@ -139,6 +142,10 @@ PERTURBACION_LOGITS = 2.4
 PUERTO_ORTESIS = 'COM4'
 BAUDIOS        = 115200
 DURACION_PASO_MS = 250
+# inicio real del movimiento (telemetria T del ESP32): el angulo se aleja del previo mas que esto
+UMBRAL_INICIO_ANGULO = 5          # en unidades del firmware (0-1000)
+TELEMETRIA_HZ = 50
+LATENCIA_MECANICA_SIM_MS = (30.0, 150.0)   # la de la ortesis simulada (y la que usa el gemelo)
 # PC -> ESP32:  "M,<seq>,<angulo 0-1000>,<duracion_ms>\n"
 # ESP32 -> PC:  "A,<seq>,<t_us>\n"      ACK al aplicar el primer pulso
 #               "T,<t_us>,<angulo>,<fsr>\n"   telemetria a 50 Hz

@@ -750,6 +750,41 @@ def detector_coadaptativo():
 
 
 @prueba
+def inicio_movimiento():
+    """La epoca del ErrP se alinea al inicio REAL del movimiento: la telemetria T del ESP32 dice
+    cuando el angulo empieza a cambiar (interpolando entre muestras), y su reloj se convierte al de
+    la PC con los pares (t_us del ACK, hora de llegada). Sin telemetria, ACK + latencia media."""
+    import hardware as hw
+    import verificar_ortesis as vo
+    o = hw.OrtesisSimulada(timeout_ack=0.0)                  # latencia mecanica de 30 a 150 ms
+    errores, alineaciones = [], set()
+    for k in range(10):                                       # como en el lazo: un movimiento termina
+        time.sleep(0.45)                                      # antes de mandar el siguiente
+        seq, t_ack, _ = o.mover(0.3 if k % 2 else 0.7)
+        t0, como = o.inicio_movimiento(seq, t_ack, espera_s=0.0)
+        verdad = t_ack + hw.latencia_mecanica_simulada(seq)
+        errores.append(t0 - verdad); alineaciones.add(como)
+    assert alineaciones == {'telemetria'} and np.abs(errores).max() < 0.012, (alineaciones, np.abs(errores).max())
+    assert 0.03 <= np.median(o.latencias_mecanicas) <= 0.15
+    # sin telemetria: ACK mas la latencia media medida (o el ACK solo, si no hay ninguna medida)
+    sin = hw.OrtesisSimulada(timeout_ack=0.0, telemetria=False)
+    seq, t_ack, _ = sin.mover(0.6)
+    assert sin.inicio_movimiento(seq, t_ack, espera_s=0.0) == (t_ack, 'ack')
+    o.con_telemetria = False                                  # el ESP32 deja de mandar telemetria
+    time.sleep(0.45)
+    seq, t_ack, _ = o.mover(0.2)
+    t0, como = o.inicio_movimiento(seq, t_ack, espera_s=0.0)
+    assert como == 'ack+latencia' and abs(t0 - t_ack - np.mean(o.latencias_mecanicas)) < 1e-9
+    # el CSV dice que alineacion se uso en cada paso
+    assert 'alineacion' in config.COLUMNAS_CSV
+    # verificar_ortesis.py mide la latencia mecanica para el domingo
+    r = vo.medir(hw.OrtesisSimulada(timeout_ack=0.0), movimientos=6, pausa_s=0.45, salida=lambda *a: None)
+    assert r['detectados'] == 6 and 30 <= r['mediana_ms'] <= 150 and r['veredicto'].startswith('OK'), r
+    return (f'inicio por telemetria con error maximo {1000 * np.abs(errores).max():.1f} ms; latencia mecanica '
+            f'mediana {1000 * np.median(o.latencias_mecanicas):.0f} ms; sin telemetria: ACK + latencia media')
+
+
+@prueba
 def calibracion_errp_fija():
     """La calibracion de ErrP usa siempre todas las epocas pedidas (120 por defecto): sin GO ni
     NO GO tempranos, que con pocos datos elegian estimados inflados por suerte."""
@@ -1564,7 +1599,8 @@ def lazo_real_caos():
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
-           'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
+           'inicio_movimiento', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']

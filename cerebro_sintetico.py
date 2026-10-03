@@ -163,6 +163,11 @@ class Cerebro:
             error = self.dir_paso != self.meta
             self.n_err += error
             self.n_ok += not error
+            # el cerebro reacciona cuando VE moverse la ortesis, no cuando llega el ACK: la ortesis
+            # simulada empieza a moverse entre 30 y 150 ms despues (misma funcion y semilla)
+            if getattr(self.a, 'latencia_mecanica', True):
+                import hardware as hw
+                t += hw.latencia_mecanica_simulada(int(txt.split(':')[1]), getattr(self.a, 'semilla_ortesis', 0))
             self.movimiento(t, error)
 
     def movimiento(self, t, error):
@@ -400,6 +405,8 @@ def main():
                     help="puente: flujos 'EEG' e 'IMU' del contrato; unicornlsl: un flujo 'Data' de 17 canales")
     ap.add_argument('--nombre-lsl', dest='nombre_lsl', default=SERIE,
                     help='nombre del flujo en formato unicornlsl (la app usa el numero de serie)')
+    ap.add_argument('--sin-latencia-mecanica', dest='latencia_mecanica', action='store_false',
+                    help='el ErrP se ancla al ACK y no al inicio real del movimiento de la ortesis simulada')
     ap.add_argument('--semilla', type=int, default=0)
     ap.add_argument('--banco', action='store_true', help='evalua decoder y detector offline y sale')
     ap.add_argument('--caos', type=int, default=None, metavar='SEMILLA',

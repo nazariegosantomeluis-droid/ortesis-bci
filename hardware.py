@@ -388,6 +388,53 @@ class EntradaEEG:
 
 
 # ============================ Ortesis ============================
+def latencia_mecanica_simulada(seq, semilla=0):
+    """Segundos entre el ACK y el inicio real del movimiento en la ortesis simulada. Es una
+    funcion de (semilla, seq) para que el gemelo ancle el ErrP al mismo instante."""
+    lo, hi = config.LATENCIA_MECANICA_SIM_MS
+    return float(np.random.default_rng([semilla, 7, int(seq)]).uniform(lo, hi)) / 1000.0
+
+
+def inicio_por_telemetria(tele, t_us_ack, umbral=config.UMBRAL_INICIO_ANGULO):
+    """t_us del inicio real del movimiento: el primer instante tras el ACK en que el angulo se
+    aleja del previo mas que `umbral`, interpolando entre muestras. tele: (n, 2) de (t_us,
+    angulo) ordenado. None si no se ve el inicio."""
+    tele = np.asarray(tele, dtype=float).reshape(-1, 2)
+    antes = tele[tele[:, 0] <= t_us_ack]
+    if not len(antes):
+        return None
+    base, previo = antes[-1, 1], antes[-1]
+    for t, a in tele[tele[:, 0] > t_us_ack]:
+        if abs(a - base) > umbral:
+            d0, d1 = abs(previo[1] - base), abs(a - base)
+            frac = (umbral - d0) / (d1 - d0) if d1 > d0 else 1.0
+            return float(previo[0] + np.clip(frac, 0, 1) * (t - previo[0]))
+        previo = (t, a)
+    return None
+
+
+class RelojEsp32:
+    """Convierte el t_us del ESP32 al reloj de la PC con los pares (t_us del ACK, hora local de
+    llegada del ACK): ajuste lineal, que absorbe la deriva entre los dos relojes."""
+
+    def __init__(self, n=50):
+        self.pares = deque(maxlen=n)
+
+    def agregar(self, t_us, t_local):
+        self.pares.append((float(t_us), float(t_local)))
+
+    def a_local(self, t_us):
+        if not self.pares:
+            return None
+        p = np.array(self.pares)
+        if len(p) < 3 or p[-1, 0] - p[0, 0] < 1e6:          # pocos pares: solo el desfase
+            return float(t_us / 1e6 + np.median(p[:, 1] - p[:, 0] / 1e6))
+        # el minimo retardo de llegada es el bueno: se ajusta y se desplaza al borde inferior
+        m, b = np.polyfit(p[:, 0] / 1e6, p[:, 1], 1)
+        b += np.min(p[:, 1] - (m * p[:, 0] / 1e6 + b))
+        return float(m * t_us / 1e6 + b)
+
+
 class _OrtesisBase:
     """Interfaz comun. mover() bloquea hasta el ACK y devuelve (seq, t_ack_lsl, latencia_ms).
 
@@ -402,6 +449,10 @@ class _OrtesisBase:
         self.acks_perdidos = 0            # consecutivos
         self.puerto_ok = True
         self.ultima_latencia = 0.0
+        self._tele = deque(maxlen=3000)   # telemetria (t_us del ESP32, angulo)
+        self._acks_us = {}                # seq -> t_us del ACK
+        self._reloj_esp = RelojEsp32()
+        self.latencias_mecanicas = deque(maxlen=100)   # s entre el ACK y el inicio real
 
     def jitter(self):
         lat = np.array(self.latencias_ms)
@@ -427,6 +478,25 @@ class _OrtesisBase:
     @staticmethod
     def _a_firmware(fraccion):
         return int(round(np.clip(fraccion, 0.0, 1.0) * 1000))
+
+    def inicio_movimiento(self, seq, t_ack, espera_s=0.4):
+        """(hora local del inicio real del movimiento, como se obtuvo). Con telemetria: el
+        primer cambio del angulo tras el ACK. Si no hay telemetria o no se ve el inicio: el ACK
+        mas la latencia mecanica media medida ('ack+latencia') o el ACK solo ('ack')."""
+        t_us_ack = self._acks_us.get(seq)
+        if t_us_ack is not None:
+            t_fin = time.time() + espera_s        # que llegue telemetria de despues del inicio
+            while time.time() < t_fin and not (self._tele and self._tele[-1][0] > t_us_ack + 300_000):
+                time.sleep(0.01)
+            t_us0 = inicio_por_telemetria(list(self._tele), t_us_ack) if self._tele else None
+            if t_us0 is not None:
+                t0 = self._reloj_esp.a_local(t_us0)
+                if t0 is not None and 0.0 <= t0 - t_ack <= 0.5:
+                    self.latencias_mecanicas.append(t0 - t_ack)
+                    return t0, 'telemetria'
+        if self.latencias_mecanicas:
+            return t_ack + float(np.mean(self.latencias_mecanicas)), 'ack+latencia'
+        return t_ack, 'ack'
 
 
 class OrtesisSerial(_OrtesisBase):
@@ -472,9 +542,13 @@ class OrtesisSerial(_OrtesisBase):
             with self._cv:
                 self._acks[int(partes[1])] = t
                 self._cv.notify_all()
+            if len(partes) >= 3:                  # A,<seq>,<t_us>: par para el reloj del ESP32
+                self._acks_us[int(partes[1])] = int(partes[2])
+                self._reloj_esp.agregar(int(partes[2]), t)
         elif partes[0] == 'T' and len(partes) >= 4:
             self.telemetria = {'t_us': int(partes[1]), 'angulo': int(partes[2]),
                                'fsr': int(partes[3])}
+            self._tele.append((int(partes[1]), int(partes[2])))
 
     def _leer(self):
         buf, retroceso = b'', Retroceso()
@@ -527,16 +601,34 @@ class OrtesisSerial(_OrtesisBase):
 class OrtesisSimulada(_OrtesisBase):
     """Misma interfaz, sin ESP32. Latencia y jitter configurables para probar el lazo.
 
-    Con `caos` (un PlanCaos) pierde ACK y mete picos de latencia de forma reproducible."""
+    Con `caos` (un PlanCaos) pierde ACK y mete picos de latencia de forma reproducible.
+    Simula tambien la mecanica: el movimiento empieza entre 30 y 150 ms despues del ACK
+    (latencia_mecanica_simulada) y emite telemetria a 50 Hz con un reloj de ESP32 propio,
+    desfasado y con deriva, como el real."""
 
-    def __init__(self, latencia_ms=8.0, jitter_ms=1.5, semilla=0, caos=None, timeout_ack=0.3):
+    def __init__(self, latencia_ms=8.0, jitter_ms=1.5, semilla=0, caos=None, timeout_ack=0.3, telemetria=True):
         super().__init__()
         from pylsl import local_clock
         self._clock = local_clock
         self.lat, self.jit = latencia_ms, jitter_ms
         self.rng = np.random.default_rng(semilla)
+        self.semilla = semilla
         self.caos, self.timeout_ack = caos, timeout_ack
         self.angulo = 0.0
+        self.con_telemetria = telemetria
+        self._esp0 = local_clock()
+
+    def _t_us(self, t_local):
+        """Reloj del ESP32 simulado: otro origen y 30 ppm de deriva."""
+        return (t_local - self._esp0) * 1e6 * (1 + 30e-6) + 123_456.0
+
+    def _telemetria(self, t_ack, desde, hacia, dur_ms):
+        """Muestras (t_us, angulo) a 50 Hz alrededor del movimiento."""
+        t0 = t_ack + latencia_mecanica_simulada(self.seq, self.semilla)
+        for t in np.arange(t_ack - 0.1, t0 + dur_ms / 1000 + 0.1, 1 / config.TELEMETRIA_HZ):
+            avance = np.clip((t - t0) / (dur_ms / 1000), 0, 1)
+            angulo = desde + avance * (hacia - desde) + self.rng.normal(0, 1.0)
+            self._tele.append((self._t_us(t + self.rng.uniform(0, 0.002)), angulo))
 
     def mover(self, fraccion, dur_ms=config.DURACION_PASO_MS):
         self.seq += 1
@@ -549,8 +641,13 @@ class OrtesisSimulada(_OrtesisBase):
             latencia = self.caos.por_paso('pico_latencia', self.seq) or latencia
         time.sleep(latencia / 1000)
         t_ack = self._clock()
+        desde = self._a_firmware(self.angulo)
         self.angulo = float(np.clip(fraccion, 0, 1))
         self.telemetria = {'angulo': self._a_firmware(self.angulo), 'fsr': 0}
+        if self.con_telemetria:
+            self._acks_us[self.seq] = self._t_us(t_ack)
+            self._reloj_esp.agregar(self._t_us(t_ack), t_ack + self.rng.uniform(0, 0.003))
+            self._telemetria(t_ack, desde, self._a_firmware(self.angulo), dur_ms)
         return self._con_ack(self.seq, t_envio, t_ack)
 
     def cerrar(self):

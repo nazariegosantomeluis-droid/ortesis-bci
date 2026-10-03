@@ -271,6 +271,9 @@ class BackendSim:
     def posicion_segura(self):
         return self.mover(config.POSICION_SEGURA)
 
+    def inicio(self, seq, t_ack):
+        return t_ack, 'ack'
+
     def errp(self, seq, t_ack, erroneo, delta):
         p, art = self.piloto.errp(erroneo, delta)  # siempre: consumo fijo de aleatorios
         momentos = [self.t_virtual + d for d in (0.0, self.EPOCA_S / 2, self.EPOCA_S)]
@@ -464,7 +467,9 @@ class BackendReal:
                     self.falla = 'la ortesis no confirmo el movimiento'
                     return None                    # sin ACK no se sabe cuando empezo el movimiento
                 orq.salidas.marcador(config.m_paso_ack(seq), t_ack)
-                e = self.eeg.epoca(t_ack)
+                t0, _ = self.ortesis.inicio_movimiento(seq, t_ack)    # la epoca, al inicio real
+                orq.salidas.marcador(config.m_paso_inicio(seq), t0)
+                e = self.eeg.epoca(t0)
                 if self._canales_malos():
                     return None
                 self.falla = 'epoca incompleta o con un corte de EEG'
@@ -571,6 +576,10 @@ class BackendReal:
 
     def mover(self, fraccion):
         return self.ortesis.mover(fraccion)
+
+    def inicio(self, seq, t_ack):
+        """Inicio real del movimiento (telemetria) o, si no hay, ACK + latencia mecanica media."""
+        return self.ortesis.inicio_movimiento(seq, t_ack)
 
     def errp(self, seq, t_ack, erroneo, delta):
         e = self.eeg.epoca(t_ack)
@@ -764,11 +773,15 @@ class Orquestador:
         seq, t_ack, lat = self.b.mover(self.angulo)
         erroneo = dec.direccion != meta
 
+        alineacion = ''
         if t_ack is None:                            # sin ACK no hay instante del movimiento: sin epoca
             p_errp, art, excluido, t_ack = float('nan'), True, 'sin_ack', local_clock()
         else:
             self.salidas.marcador(config.m_paso_ack(seq), t_ack)   # estampado a la hora del ACK
-            p_errp, art, excluido = self.b.errp(seq, t_ack, erroneo, dec.delta)
+            t0, alineacion = self.b.inicio(seq, t_ack)              # la epoca, al inicio real del movimiento
+            if alineacion != 'ack':
+                self.salidas.marcador(config.m_paso_inicio(seq), t0)
+            p_errp, art, excluido = self.b.errp(seq, t0, erroneo, dec.delta)
         valido = not excluido
         detectado = bool(np.isfinite(p_errp) and p_errp > self.umbral_errp)
         fiab = self.confianza(erroneo, detectado, valido and not art)
@@ -794,7 +807,8 @@ class Orquestador:
             varianza_beta=round(info['varianza'], 4), sens_viva=round(sens_v, 3),
             espec_viva=round(espec_v, 3), cambio=info['cambio'], explorando=int(dec.explorando),
             error_verdadero=int(erroneo), error_sombra=int(dec.direccion_sombra != meta),
-            latencia_ack_ms='' if not np.isfinite(lat) else round(lat, 2), excluido=excluido)
+            latencia_ack_ms='' if not np.isfinite(lat) else round(lat, 2), excluido=excluido,
+            alineacion=alineacion)
         self.salidas.estado(
             tipo='paso', paso=len(self.filas), estado=self.fsm.estado, meta=meta,
             angulo=self.angulo, p_crudo=float(sigmoide(dec.z)), b=self.agente.umbral_b,
