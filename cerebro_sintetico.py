@@ -61,6 +61,11 @@ W_ALFA = np.array([0.10, 0.25, 0.25, 0.25, 0.60, 0.90, 1.00, 0.90])      # occip
 W_PARPADEO = np.array([1.00, 0.10, 0.20, 0.10, 0.05, 0.00, 0.00, 0.00])  # frontal
 W_THETA = np.array([1.00, 0.25, 0.80, 0.25, 0.40, 0.05, 0.05, 0.05])     # theta frontal de la linea media
 
+# Tarea 2 (embodiment): con --embodiment e, la respuesta visual a un movimiento PROPIO se atenua
+# a (1 - ATENUACION_MAX * e); la de un movimiento ajeno no. El efecto lo programamos nosotros:
+# el gemelo solo sirve para verificar que el IIC lo recupera, no para afirmar que existe.
+ATENUACION_MAX = 0.5
+
 
 def plantilla_errp(error, amp_uv, rng):
     """ERP de retroalimentacion (1 s). Error: Ne/Pe/N tardia. Correcto: P300 chico."""
@@ -169,13 +174,21 @@ class Cerebro:
                 import hardware as hw
                 t += hw.latencia_mecanica_simulada(int(txt.split(':')[1]), getattr(self.a, 'semilla_ortesis', 0))
             self.movimiento(t, error)
+        elif txt.startswith('paso_ajeno:') and self.meta != 0:
+            # movimiento ajeno, anunciado y siempre hacia la meta: sin error y sin atenuacion
+            if getattr(self.a, 'latencia_mecanica', True):
+                import hardware as hw
+                t += hw.latencia_mecanica_simulada(int(txt.split(':')[1]), getattr(self.a, 'semilla_ortesis', 0))
+            self.movimiento(t, False, propio=False)
 
-    def movimiento(self, t, error):
-        """El piloto ve moverse la ortesis en t: respuesta visual occipital siempre y, si el
-        movimiento contradice su intencion, ErrP fronto-central."""
+    def movimiento(self, t, error, propio=True):
+        """El piloto ve moverse la ortesis en t: respuesta visual occipital siempre (atenuada
+        segun el embodiment si el movimiento es propio) y, si el movimiento contradice su
+        intencion, ErrP fronto-central."""
+        n1 = self.a.n1 * (1 - ATENUACION_MAX * getattr(self.a, 'embodiment', 0.0) if propio else 1.0)
         with self.lock:
             self.eventos.append((t, plantilla_errp(error, self.a.errp, self.rng), W_ERRP))
-            self.eventos.append((t, plantilla_visual(self.a.n1, self.rng_cuerpo), W_VISUAL))
+            self.eventos.append((t, plantilla_visual(n1, self.rng_cuerpo), W_VISUAL))
             if error and getattr(self.a, 'theta', 0.0) > 0:
                 self.eventos.append((t, plantilla_theta(self.a.theta, self.rng_cuerpo), W_THETA))
 
@@ -335,7 +348,7 @@ class Salida:
 # para comparar decoders/detectores o elegir parametros antes del domingo.
 def _args(**k):
     a = argparse.Namespace(erd=0.25, errp=6.0, n1=4.0, theta=3.0, fatiga=0.0, parpadeos=0.15, cabeza=0.0,
-                           perdidas_bt=0.0, semilla=0, caos=None, caos_desde='calibracion')
+                           perdidas_bt=0.0, semilla=0, caos=None, caos_desde='calibracion', embodiment=0.5)
     a.__dict__.update(k)
     return a
 
@@ -383,6 +396,30 @@ def sesion_errp(n=100, p_error=0.3, **k):
     return np.array(X), np.array(y)
 
 
+def sesion_embodiment(n=300, p_error=0.2, **k):
+    """Epocas (n, canales, 1 s) de los movimientos de un lazo con movimientos ajenos (Tarea 2):
+    uno de cada config.AJENOS_CADA, anunciado y hacia la meta. Devuelve (X, ajeno, correcto)."""
+    import hardware as hw
+    cer = Cerebro(_args(**k))
+    rng = np.random.default_rng(cer.a.semilla + 3)
+    t, X, aj, ok = 0.0, [], [], []
+    antes = -config.EPOCA_ERRP[0]
+    for i in range(n):
+        ajeno = i % config.AJENOS_CADA == 1
+        err = not ajeno and bool(rng.random() < p_error)
+        cer.meta = 1
+        pre, t = _bloque(cer, t, 1.5)
+        cer.movimiento(t + 1 / FS, err, propio=not ajeno)
+        post, t = _bloque(cer, t, 1.2)
+        xf = hw.filtrar(np.hstack([pre, post]), config.BANDA_ERRP, FS)
+        i0 = pre.shape[1] - int(antes * FS) + 1
+        e = xf[:, i0:i0 + int(FS)]
+        X.append(e - e[:, :int(antes * FS)].mean(axis=1, keepdims=True))
+        aj.append(ajeno)
+        ok.append(not err)
+    return np.array(X), np.array(aj), np.array(ok)
+
+
 def banco(a):
     import hardware as hw
     print(f'Banco offline: ERD {a.erd}, ErrP {a.errp} uV, fatiga {a.fatiga}')
@@ -399,6 +436,8 @@ def main():
     ap.add_argument('--errp', type=float, default=6.0, help='amplitud del ErrP en uV')
     ap.add_argument('--n1', type=float, default=4.0, help='amplitud de la N1 visual occipital en uV')
     ap.add_argument('--theta', type=float, default=3.0, help='amplitud del estallido theta tras un error, en uV')
+    ap.add_argument('--embodiment', type=float, default=0.5,
+                    help='0-1: cuanto atenua el piloto la N1 de sus propios movimientos (Tarea 2)')
     ap.add_argument('--fatiga', type=float, default=0.0, help='0 = nunca se cansa, 1 = mucho')
     ap.add_argument('--parpadeos', type=float, default=0.15, help='parpadeos por segundo')
     ap.add_argument('--cabeza', type=float, default=0.02, help='movimientos de cabeza por segundo')

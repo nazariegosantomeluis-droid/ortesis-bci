@@ -41,6 +41,7 @@ import numpy as np
 from pylsl import StreamOutlet, local_clock
 
 import config
+import embodiment as emb
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, sigmoide
 from caos import PlanCaos
 from salud import Vigilante
@@ -142,9 +143,9 @@ def cargar_instantanea():
     return inst
 
 
-_ENTEROS = ('seq', 'meta', 'direccion', 'artefacto', 'explorando', 'error_verdadero', 'error_sombra')
+_ENTEROS = ('seq', 'meta', 'direccion', 'artefacto', 'explorando', 'error_verdadero', 'error_sombra', 'ajeno')
 _REALES = ('t_lsl', 'angulo', 'p_prima', 'delta', 'P_hat', 'fiabilidad', 'beta', 'varianza_beta',
-           'sens_viva', 'espec_viva', 'latencia_ack_ms')
+           'sens_viva', 'espec_viva', 'latencia_ack_ms', 'n1_uv', 'iic')
 
 
 def recuperar_csv(ruta, n):
@@ -177,6 +178,7 @@ def recuperar_csv(ruta, n):
 #   phi(meta) -> rasgos | None       None = no hay ventana de EEG valida (no se decide)
 #   mover(fraccion) -> (seq, t_ack | None, latencia_ms)      nunca lanza
 #   errp(seq, t_ack, erroneo, delta) -> (p_errp, artefacto, excluido)
+#   aviso_ajeno(meta) ; n1(seq, t0, ajeno, art) -> uV | ''   Tarea 2 (movimientos ajenos y N1)
 #   lecturas() -> {'eeg', 'ortesis', 'reloj_ms'}             para el Vigilante
 #   posicion_segura() -> igual que mover(), despacio y a config.POSICION_SEGURA
 #   reloj() -> s ; esperar(dt) ; fin_paso() ; cerrar()
@@ -206,6 +208,7 @@ class BackendSim:
         self.acks_perdidos, self.ultima_latencia = 0, 0.0
         self.epocas_en_corte = []                  # seq de las epocas que tocaron un corte de EEG
         self.epocas_en_perdida = []                # seq de las epocas cruzadas por una perdida de Bluetooth
+        self.rng_n1 = np.random.default_rng(a.semilla + 31)   # aparte: no cambia los demas aleatorios
 
     def preparar(self, orq):
         orq.fsm.ir_a('CAL_MI')
@@ -278,6 +281,19 @@ class BackendSim:
     def centrar(self, angulo):
         pass
 
+    # Tarea 2: N1 simulada con el tamano medido en el gemelo (~3.5 uV, ruido por epoca ~4.5 uV);
+    # la de un movimiento propio se atenua como en el gemelo: a (1 - 0.5 * embodiment)
+    N1_UV, N1_RUIDO_UV, ATENUACION_MAX = 3.5, 4.5, 0.5
+
+    def aviso_ajeno(self, meta):
+        pass
+
+    def n1(self, seq, t0, ajeno, art=False):
+        if art:
+            return ''
+        atenua = 1.0 if ajeno else 1 - self.ATENUACION_MAX * self.a.embodiment
+        return round(float(self.N1_UV * atenua + self.rng_n1.normal(0, self.N1_RUIDO_UV)), 3)
+
     def errp(self, seq, t_ack, erroneo, delta):
         p, art = self.piloto.errp(erroneo, delta)  # siempre: consumo fijo de aleatorios
         momentos = [self.t_virtual + d for d in (0.0, self.EPOCA_S / 2, self.EPOCA_S)]
@@ -297,7 +313,7 @@ class BackendSim:
         return {'seq': self.seq, 't': self.t, 't_virtual': self.t_virtual,
                 'acks_perdidos': self.acks_perdidos, 'ultima_latencia': self.ultima_latencia,
                 'epocas_en_corte': list(self.epocas_en_corte), 'epocas_en_perdida': list(self.epocas_en_perdida),
-                'rng_piloto': self.piloto.rng.bit_generator.state,
+                'rng_piloto': self.piloto.rng.bit_generator.state, 'rng_n1': self.rng_n1.bit_generator.state,
                 'detector_piloto': [self.piloto.sens, self.piloto.espec]}
 
     def restaurar(self, d):
@@ -306,6 +322,8 @@ class BackendSim:
         self.epocas_en_corte = list(d['epocas_en_corte'])
         self.epocas_en_perdida = list(d.get('epocas_en_perdida', []))
         self.piloto.rng.bit_generator.state = d['rng_piloto']
+        if 'rng_n1' in d:
+            self.rng_n1.bit_generator.state = d['rng_n1']
         self.piloto.sens, self.piloto.espec = d['detector_piloto']
 
     def cerrar(self):
@@ -606,6 +624,20 @@ class BackendReal:
         """Lleva la ortesis al punto medio antes del cue. No es un paso: sin epoca de ErrP."""
         self.ortesis.mover(angulo, config.CENTRADO_DURACION_MS)
 
+    def aviso_ajeno(self, meta):
+        aviso('    >>> AUTOMATICO: la ortesis se mueve sola, solo observala')
+        time.sleep(config.AVISO_AJENO_S)
+
+    def n1(self, seq, t0, ajeno, art=None):
+        """Amplitud de la N1 visual del movimiento (Tarea 2), o '' si la epoca no sirve."""
+        e = self.eeg.epoca(t0)
+        if e is None:
+            return ''
+        if art is None:
+            art = self.detector.artefacto(e) or \
+                self._cabeza_movida(t0 + config.EPOCA_ERRP[0], t0 + config.EPOCA_ERRP[1])
+        return '' if art else round(emb.amplitud_n1(e, self.eeg.fs), 3)
+
     def inicio(self, seq, t_ack):
         """Inicio real del movimiento (telemetria) o, si no hay, ACK + latencia mecanica media."""
         return self.ortesis.inicio_movimiento(seq, t_ack)
@@ -644,10 +676,16 @@ class Orquestador:
         self.vigilante = Vigilante()
         self.avisos_salud = []                       # lo que se dijo en consola sobre la salud
         self.excluidos, self.error_post = {}, None   # los llena evaluar()
+        # Tarea 2 (EXPLORATORIO): N1 de los movimientos propios y ajenos -> IIC
+        self.embodiment = emb.IndiceEmbodiment(semilla=a.semilla)
+        self.iic, self.con_ajenos = self.embodiment.estimar(), False
         config.RESULTADOS.mkdir(exist_ok=True)
         if inst is not None:                         # mismo CSV, en modo anadir
             self.ruta_csv = Path(inst['ruta_csv'])
             self.filas = recuperar_csv(self.ruta_csv, inst['paso'])
+            for k, f in enumerate(self.filas):       # el IIC se rehace con las N1 del CSV
+                self.embodiment.observar(k, f['n1_uv'], f['ajeno'] == 1, f['error_verdadero'] == 0)
+            self.iic = self.embodiment.estimar()
             self.f_csv = open(self.ruta_csv, 'a', newline='')
             self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
             return
@@ -804,15 +842,19 @@ class Orquestador:
         seq, t_ack, lat = self.b.mover(self.angulo)
         erroneo = dec.direccion != meta
 
-        alineacion = ''
+        alineacion, n1 = '', ''
         if t_ack is None:                            # sin ACK no hay instante del movimiento: sin epoca
             p_errp, art, excluido, t_ack = float('nan'), True, 'sin_ack', local_clock()
         else:
             self.salidas.marcador(config.m_paso_ack(seq), t_ack)   # estampado a la hora del ACK
-            t0, alineacion = self.b.inicio(seq, t_ack)              # la epoca, al inicio real del movimiento
+            t_ini, alineacion = self.b.inicio(seq, t_ack)           # la epoca, al inicio real del movimiento
             if alineacion != 'ack':
-                self.salidas.marcador(config.m_paso_inicio(seq), t0)
-            p_errp, art, excluido = self.b.errp(seq, t0, erroneo, dec.delta)
+                self.salidas.marcador(config.m_paso_inicio(seq), t_ini)
+            p_errp, art, excluido = self.b.errp(seq, t_ini, erroneo, dec.delta)
+            if self.con_ajenos and not excluido:     # Tarea 2: la N1 del movimiento propio
+                n1 = self.b.n1(seq, t_ini, False, art)
+                self.embodiment.observar(len(self.filas), n1, ajeno=False, correcto=not erroneo)
+        self.iic = self.embodiment.estimar(con_ic=False) | {'ic': self.iic['ic']}
         valido = not excluido
         detectado = bool(np.isfinite(p_errp) and p_errp > self.umbral_errp)
         fiab = self.confianza(erroneo, detectado, valido and not art)
@@ -839,7 +881,7 @@ class Orquestador:
             espec_viva=round(espec_v, 3), cambio=info['cambio'], explorando=int(dec.explorando),
             error_verdadero=int(erroneo), error_sombra=int(dec.direccion_sombra != meta),
             latencia_ack_ms='' if not np.isfinite(lat) else round(lat, 2), excluido=excluido,
-            alineacion=alineacion)
+            alineacion=alineacion, ajeno=0, n1_uv=n1, iic=self._iic_csv())
         self.salidas.estado(
             tipo='paso', paso=len(self.filas), estado=self.fsm.estado, meta=meta,
             angulo=self.angulo, p_crudo=float(sigmoide(dec.z)), b=self.agente.umbral_b,
@@ -848,7 +890,8 @@ class Orquestador:
             sd_beta=float(np.sqrt(info['varianza'])), youden=self.confianza.youden,
             fiabilidad=fiab, congelado=self.confianza.congelado, cambio=info['cambio'],
             latencia_ms=None if not np.isfinite(lat) else lat,
-            perturbado=self.desplazamiento != 0, salud=self.vigilante.colores, excluido=excluido)
+            perturbado=self.desplazamiento != 0, salud=self.vigilante.colores, excluido=excluido,
+            ajeno=False, iic=self.iic)
 
         self.b.fin_paso()
         espera = self.a.ciclo - (time.perf_counter() - t0)
@@ -856,9 +899,61 @@ class Orquestador:
             time.sleep(espera)
         return True
 
-    def bloque(self, nombre, n_pasos, aprender, perturbar_en=None):
+    def _iic_csv(self):
+        return '' if self.iic['iic'] is None else round(self.iic['iic'], 3)
+
+    def paso_ajeno(self, meta):
+        """Movimiento ajeno (Tarea 2, EXPLORATORIO): la pantalla lo anuncia y la ortesis se mueve
+        sola hacia la meta. No lo decide el decoder: el agente, la confianza del detector y el
+        detector co-adaptativo no aprenden de el, y queda fuera del analisis del lazo. Su N1
+        entra al IIC. Devuelve True (no necesita una ventana de EEG para moverse)."""
+        t0 = time.perf_counter()
+        self.salidas.marcador(config.AVISO_AJENO)
+        self.salidas.estado(tipo='aviso_ajeno', meta=meta)
+        self.b.aviso_ajeno(meta)
+        antes = self.angulo
+        self.angulo = float(np.clip(self.angulo + meta * config.PASO_AJENO, 0, 1))
+        seq, t_ack, lat = self.b.mover(self.angulo)
+        alineacion, n1 = '', ''
+        if t_ack is None:
+            t_ack = local_clock()
+        else:
+            self.salidas.marcador(config.m_paso_ajeno(seq), t_ack)
+            t_ini, alineacion = self.b.inicio(seq, t_ack)
+            if alineacion != 'ack':
+                self.salidas.marcador(config.m_paso_inicio(seq), t_ini)
+            n1 = self.b.n1(seq, t_ini, True)
+            self.embodiment.observar(len(self.filas), n1, ajeno=True)
+        self.iic = self.embodiment.estimar()          # con intervalo: solo aqui (bootstrap)
+        sens_v, espec_v = self.confianza.vivo()
+        self.registrar_fila(
+            t_lsl=round(t_ack, 4), seq=seq, meta=meta, p_prima='', direccion=meta,
+            delta=round(self.angulo - antes, 3), P_hat='', artefacto=0, fiabilidad='',
+            sens_viva=round(sens_v, 3), espec_viva=round(espec_v, 3), cambio='', explorando=0,
+            error_verdadero=0, error_sombra='', latencia_ack_ms='' if not np.isfinite(lat) else round(lat, 2),
+            excluido='ajeno', alineacion=alineacion, ajeno=1, n1_uv=n1, iic=self._iic_csv())
+        self.salidas.estado(tipo='ajeno', paso=len(self.filas), estado=self.fsm.estado, meta=meta,
+                            angulo=self.angulo, iic=self.iic, salud=self.vigilante.colores)
+        self.b.fin_paso()
+        espera = self.a.ciclo - (time.perf_counter() - t0)
+        if espera > 0:
+            time.sleep(espera)
+        return True
+
+    def _es_ajeno(self, t):
+        """Tarea 2: el 2o paso de uno de cada (AJENOS_CADA / PASOS_ENSAYO) ensayos, al azar pero
+        sin estado (la misma eleccion en una sesion reanudada). Tras el centrado y un paso
+        propio la ortesis esta entre 0.2 y 0.8: el movimiento ajeno siempre cabe completo."""
+        cada = max(1, self.a.ajenos_cada // config.PASOS_ENSAYO)
+        ensayo = t // config.PASOS_ENSAYO
+        elegido = int(np.random.default_rng([self.a.semilla, 2026, ensayo // cada]).integers(cada))
+        return t % config.PASOS_ENSAYO == 1 and ensayo % cada == elegido
+
+    def bloque(self, nombre, n_pasos, aprender, perturbar_en=None, ajenos=False):
         """Un bloque de pasos. Su progreso vive en self.prog (y en la instantanea), asi una
-        sesion reanudada lo retoma en el mismo paso, con la misma meta y el mismo orden."""
+        sesion reanudada lo retoma en el mismo paso, con la misma meta y el mismo orden.
+        ajenos: incluye los movimientos ajenos de la Tarea 2 (solo el lazo adaptativo)."""
+        self.con_ajenos = ajenos and self.a.ajenos_cada > 0
         p = self.prog
         if p is None or p['bloque'] != nombre:       # bloque nuevo (no reanudado)
             p = self.prog = {'bloque': nombre, 't': 0, 'meta': None, 'orden': [],
@@ -884,10 +979,11 @@ class Orquestador:
                 self.t_perturbacion = len(self.filas)
                 self.beta_pre = self.agente.beta
                 self.fsm.ir_a(previo)
+            ajeno = self.con_ajenos and self._es_ajeno(t)
             while True:                              # las pausas no consumen pasos del bloque
                 motivo = self.revisar_salud()
                 if motivo is None:
-                    if self.paso(meta, aprender):
+                    if self.paso_ajeno(meta) if ajeno else self.paso(meta, aprender):
                         break
                     motivo = self.revisar_salud() or 'eeg'   # el EEG fallo justo al decidir
                 self.pausa_segura(motivo)
@@ -923,6 +1019,10 @@ class Orquestador:
         desglose = ', '.join(f'{m} {n}' for m, n in self.excluidos.items())
         aviso(f'  excluidos del analisis: {sum(self.excluidos.values())} de {len(self.filas)} filas'
               + (f' ({desglose})' if desglose else ''))
+        if self.excluidos.get('ajeno') or self.embodiment.obs:     # Tarea 2 (EXPLORATORIO)
+            self.iic = self.embodiment.estimar()
+            aviso('  ' + emb.texto(self.iic))
+            self.salidas.estado(tipo='iic', iic=self.iic)
         if not validas:
             aviso(f'  CSV: {self.ruta_csv}')
             return
@@ -985,6 +1085,25 @@ class Orquestador:
         self.b.cerrar()
 
 
+def cuestionario(ruta, leer=input, iic=None, salida=aviso):
+    """Tarea 2: tres afirmaciones (propiedad, agencia, control) de 1 = nada de acuerdo a
+    7 = totalmente de acuerdo. Se guardan junto a la sesion con el IIC, para correlacionarlas
+    despues con varias sesiones (con una sola no se puede)."""
+    salida('\nCuestionario (1 = nada de acuerdo, 7 = totalmente de acuerdo)')
+    items = []
+    for afirmacion in config.CUESTIONARIO:
+        while True:
+            r = leer(f'  {afirmacion} [1-7]: ').strip()
+            if r.isdigit() and 1 <= int(r) <= 7:
+                break
+            salida('    escribe un numero del 1 al 7')
+        items.append({'afirmacion': afirmacion, 'respuesta': int(r)})
+    datos = {'t': datetime.now().isoformat(timespec='seconds'), 'escala': '1-7', 'items': items, 'iic': iic}
+    Path(ruta).write_text(json.dumps(datos, indent=1, ensure_ascii=False), encoding='utf-8')
+    salida(f'  Cuestionario: {ruta}')
+    return datos
+
+
 # ======================================================================
 def argumentos(argv=None):
     ap = argparse.ArgumentParser(description='Orquestador ortesis-bci')
@@ -1007,7 +1126,13 @@ def argumentos(argv=None):
                     help='continua la sesion guardada en resultados/estado_sesion.json (mismo CSV)')
     ap.add_argument('--sin_sesgo', action='store_true',
                     help='apaga el detector de sesgo (si las metas no estan balanceadas)')
+    ap.add_argument('--ajenos-cada', dest='ajenos_cada', type=int, default=config.AJENOS_CADA,
+                    help='Tarea 2: un movimiento ajeno cada tantos pasos del lazo adaptativo (0 = ninguno)')
+    ap.add_argument('--sin-cuestionario', dest='sin_cuestionario', action='store_true',
+                    help='no hace el cuestionario de la Tarea 2 al terminar (real)')
     # sim
+    ap.add_argument('--embodiment', type=float, default=0.5,
+                    help='solo sim: atenuacion de la N1 simulada de los movimientos propios (Tarea 2)')
     ap.add_argument('--sens', type=float, default=config.SENS)
     ap.add_argument('--espec', type=float, default=config.ESPEC)
     ap.add_argument('--falla_detector', action='store_true')
@@ -1053,7 +1178,7 @@ def correr(orq, a):
                 orq.fsm.ir_a('LAZO_ADAPTATIVO')
             aviso(f'Bloque LAZO_ADAPTATIVO ({a.pasos_adaptativo} pasos)...')
             orq.bloque('adaptativo', a.pasos_adaptativo, aprender=True,
-                       perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3)
+                       perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3, ajenos=True)
             completa = True
         else:
             aviso('Detenido por NO GO. Plan B: sesion grabada (puente_lsl.py --placa playback).')
@@ -1067,6 +1192,11 @@ def correr(orq, a):
         if completa:
             orq.guardar(terminada=True)              # una sesion completa ya no se reanuda
         orq.cerrar()
+    if completa and a.backend == 'real' and not a.sin_cuestionario and sys.stdin.isatty():
+        try:
+            cuestionario(orq.ruta_csv.with_name(orq.ruta_csv.stem + '_cuestionario.json'), iic=orq.iic)
+        except (EOFError, KeyboardInterrupt):
+            aviso('  Cuestionario sin contestar.')
 
 
 def argumentos_reanudados(inst, a):

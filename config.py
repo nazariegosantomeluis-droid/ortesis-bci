@@ -84,6 +84,8 @@ CUE_CERRAR      = 'cue_cerrar'
 CUE_RELAJA      = 'cue_relaja'
 PERTURBACION_ON = 'perturbacion:on'
 CENTRADO        = 'centrado'       # la ortesis vuelve al punto medio antes del cue (no es un paso)
+AVISO_AJENO     = 'aviso_ajeno'    # la pantalla anuncia un movimiento ajeno (Tarea 2)
+def m_paso_ajeno(seq): return f'paso_ajeno:{seq}'             # ACK de un movimiento ajeno
 def m_paso_ack(seq): return f'paso_ack:{seq}'
 def m_bloque(nombre): return f'bloque:{nombre}'
 def m_paso_inicio(seq): return f'paso_inicio:{seq}'           # inicio real del movimiento (telemetria)
@@ -95,12 +97,15 @@ def m_detector(version): return f'detector:v{version}'      # cambio de modelo d
 COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'meta', 'angulo', 'p_prima',
                 'direccion', 'delta', 'P_hat', 'artefacto', 'fiabilidad', 'beta',
                 'varianza_beta', 'sens_viva', 'espec_viva', 'cambio', 'explorando',
-                'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido', 'alineacion']
+                'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido', 'alineacion',
+                'ajeno', 'n1_uv', 'iic']
 # alineacion: a que se alineo la epoca del ErrP: 'telemetria' (inicio real del movimiento),
 # 'ack+latencia' (ACK mas la latencia mecanica media medida) o 'ack'.
 # salud: una letra por subsistema (V/A/R, o C = detector calentando) en el orden de SUBSISTEMAS.
 # excluido: vacio = paso valido; si no, el motivo (el paso queda fuera del analisis).
-MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'epoca_invalida']
+# ajeno: 1 = movimiento ajeno (Tarea 2); n1_uv: amplitud de la N1 visual del paso (vacio si la
+# epoca no sirve); iic: indice de integracion corporal acumulado hasta ese paso (EXPLORATORIO).
+MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'epoca_invalida', 'ajeno']
 
 
 # ============================ Tiempos (s) ============================
@@ -130,6 +135,21 @@ GANANCIA_PASO = 0.30            # paso = ganancia * |2 p' - 1|, entre PASO_VISIB
 CENTRAR_ENSAYO = True           # cada ensayo empieza con la ortesis en el punto medio
 PUNTO_MEDIO = 0.5
 CENTRADO_DURACION_MS = 400      # termina antes de la ventana de MI del primer paso (cue + 1 s)
+
+# ============================ Embodiment (Tarea 2, EXPLORATORIO) ============================
+# En el lazo adaptativo, uno de cada AJENOS_CADA pasos es un movimiento ajeno: la pantalla lo
+# anuncia (AUTOMATICO), la ortesis se mueve sola hacia la meta y el agente no aprende de el.
+# Va en el 2o paso de uno de cada dos ensayos: tras el centrado y un paso propio siempre cabe.
+AJENOS_CADA = 10
+PASO_AJENO = 0.15
+AVISO_AJENO_S = 1.0             # el aviso en pantalla antes del movimiento ajeno
+# firma principal: atenuacion sensorial de la N1 visual (literatura: N1 occipital ~150-200 ms)
+CANALES_N1 = ['PO7', 'Oz', 'PO8']
+VENTANA_N1 = (0.14, 0.20)       # s desde el inicio del movimiento
+IIC_MIN_EPOCAS = (20, 5)        # (propias correctas, ajenas) para estimar el IIC
+CUESTIONARIO = ['Senti la ortesis como parte de mi mano.',                      # propiedad
+                'Senti que yo causaba los movimientos de la ortesis.',          # agencia
+                'Pude mover la ortesis hacia donde queria.']                    # control
 
 # ============================ Umbrales go / no go ============================
 # checkpoint 1: el Unicorn no mide impedancias; se revisa la calidad de senal por canal y la

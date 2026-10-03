@@ -54,7 +54,10 @@ def contrato():
     assert set(config.TRANSICIONES['PAUSA_SEGURA']) == {
         'LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'EVALUACION'}
     assert config.m_salud('eeg', config.ROJO) == 'salud:eeg:ROJO'
-    assert config.COLUMNAS_CSV[-3:] == ['salud', 'excluido', 'alineacion']
+    assert config.COLUMNAS_CSV[-6:] == ['salud', 'excluido', 'alineacion', 'ajeno', 'n1_uv', 'iic']
+    # Tarea 2: movimientos ajenos anunciados, fuera del analisis del agente
+    assert config.m_paso_ajeno(3) == 'paso_ajeno:3' and config.AVISO_AJENO == 'aviso_ajeno'
+    assert 'ajeno' in config.MOTIVOS_EXCLUSION and config.CANALES_N1 == config.PAPELES['visual']
     # montaje del Unicorn Hybrid Black y el papel de cada sensor
     assert config.CANALES_EEG == ['Fz', 'C3', 'Cz', 'C4', 'Pz', 'PO7', 'Oz', 'PO8']
     assert config.PAPELES == {'mi': ['C3', 'Cz', 'C4'], 'errp': ['Fz', 'Cz', 'Pz'],
@@ -287,8 +290,8 @@ def _backend_con_fallas(orquestador, a, fallas, cortar_en_tic=None):
 @prueba
 def pausa_segura():
     import orquestador
-    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '20',
-                                '--pasos_adaptativo', '60', '--sin_perturbacion'])
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '20', '--pasos_adaptativo', '60',
+                                '--sin_perturbacion', '--ajenos-cada', '0'])   # fallas por seq de pasos propios
     # corte de EEG de 4 s que empieza a media epoca (t=59 s); el movimiento a posicion segura
     # de esa pausa (seq 30) sale con pico de latencia; C3 plano 5 s en t=100 s; 3 ACK perdidos
     b = _backend_con_fallas(orquestador, a, {
@@ -520,9 +523,20 @@ def tablero_salud():
         viejo = {k: v for k, v in paso.items() if k not in ('salud', 'excluido')}   # sesion grabada antigua
         t._procesar({**viejo, 'paso': 2, 'latencia_ms': 8.0})
         t._dibujar()
+        # Tarea 2: aviso del movimiento ajeno, la meta de vuelta tras el y el IIC (exploratorio)
+        t._procesar({'tipo': 'cue', 'meta': 1})
+        t._procesar({'tipo': 'aviso_ajeno', 'meta': 1})
+        assert t.lbl_cue.text() == 'AUTOMATICO'
+        r = {'iic': 0.42, 'ic': [0.05, 0.8], 'n_propios': 80, 'n_ajenos': 12, 'tendencia': None, 'ic_tendencia': None}
+        t._procesar({'tipo': 'ajeno', 'paso': 3, 'estado': 'LAZO_ADAPTATIVO', 'meta': 1, 'angulo': 0.65,
+                     'iic': r, 'salud': paso['salud']})
+        assert t.lbl_cue.text() == 'CERRAR'
+        assert '+0.42' in t.lbl_iic.text() and 'exploratorio' in t.lbl_iic.text() and '12' in t.lbl_iic.text()
+        t._procesar({**paso, 'paso': 4, 'iic': {**r, 'iic': None, 'ic': None}})
+        assert 'sin estimar' in t.lbl_iic.text()
     finally:
         t.close()
-    return 'tres semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa'
+    return 'tres semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa; IIC y AUTOMATICO'
 
 
 # ------------------------------------------------------------ caos
@@ -597,7 +611,8 @@ def caos_sim():
     for seq in orq.b.epocas_en_perdida:
         assert por_seq[seq]['excluido'] == 'epoca_invalida', por_seq[seq]
     leve = _sesion_caos(0, caos=1, nivel='leve')              # el nivel leve excluye mucho menos
-    assert 0 < sum(leve.excluidos.values()) < sum(orq.excluidos.values()) / 3, (leve.excluidos, orq.excluidos)
+    por_fallas = lambda o: sum(n for m, n in o.excluidos.items() if m != 'ajeno')   # los ajenos no son fallas
+    assert 0 < por_fallas(leve) < por_fallas(orq) / 3, (leve.excluidos, orq.excluidos)
     return f'360 pasos y {n_pausas} pausas sin excepcion; excluidos {orq.excluidos}'
 
 
@@ -860,6 +875,117 @@ def cierre_completo():
     assert all(marcas[i + 1] in (config.CUE_CERRAR, config.CUE_RELAJA)
                for i, m in enumerate(marcas) if m == config.CENTRADO)
     return f'ensayos que terminan cerrados del todo: {cierra:.0%}; abiertos del todo: {abre:.0%}'
+
+
+@prueba
+def iic_estimador():
+    """IIC (Tarea 2, exploratorio): tamano de efecto de la N1 a movimientos ajenos contra
+    propios correctos, con intervalo bootstrap; sin estimacion con pocas epocas; tendencia
+    entre las dos mitades de la sesion; amplitud de la N1 en PO7/Oz/PO8."""
+    import embodiment as emb
+    rng = np.random.default_rng(0)
+    ind = emb.IndiceEmbodiment(semilla=1)
+    assert ind.estimar()['iic'] is None
+    # uno de cada 10 ajeno; N1 ajena 4 uV y propia atenuada a 2.8 uV, ruido 2 uV: d verdadero 0.6
+    for k in range(300):
+        ajeno = k % 10 == 1
+        ind.observar(k, (4.0 if ajeno else 2.8) + rng.normal(0, 2.0), ajeno=ajeno, correcto=True)
+    r = ind.estimar()
+    assert (r['n_ajenos'], r['n_propios']) == (30, 270), r
+    assert 0 < r['ic'][0] < 0.6 < r['ic'][1], r
+    # sin atenuacion el intervalo incluye 0; los propios erroneos y lo no finito no cuentan
+    ind0 = emb.IndiceEmbodiment(semilla=1)
+    for k in range(300):
+        ajeno = k % 10 == 1
+        ind0.observar(k, 4.0 + rng.normal(0, 2.0), ajeno=ajeno)
+    ind0.observar(300, 1.0, ajeno=False, correcto=False)
+    ind0.observar(301, float('nan'), ajeno=True)
+    r0 = ind0.estimar()
+    assert r0['ic'][0] < 0 < r0['ic'][1] and (r0['n_ajenos'], r0['n_propios']) == (30, 270), r0
+    # tendencia: sin atenuacion en la primera mitad y d = 1 en la segunda
+    ind2 = emb.IndiceEmbodiment(semilla=1)
+    for k in range(300):
+        ajeno = k % 10 == 1
+        propia = 4.0 if k < 150 else 2.0
+        ind2.observar(k, (4.0 if ajeno else propia) + rng.normal(0, 2.0), ajeno=ajeno)
+    r2 = ind2.estimar()
+    assert r2['tendencia'] > 0.5 and r2['ic_tendencia'][0] < r2['tendencia'] < r2['ic_tendencia'][1], r2
+    # amplitud: una N1 de -5 uV en la ventana, solo en PO7/Oz/PO8, da +5 (positiva = N1 mayor)
+    e = np.zeros((8, 250))
+    i0, i1 = (int(round((-config.EPOCA_ERRP[0] + v) * 250)) for v in config.VENTANA_N1)
+    e[config.indices(config.CANALES_N1), i0:i1] = -5.0
+    e[config.indices('errp'), :] = 30.0                  # lo fronto-central no entra
+    assert abs(emb.amplitud_n1(e, 250) - 5.0) < 1e-9
+    return f"d {r['iic']:.2f} [{r['ic'][0]:.2f}, {r['ic'][1]:.2f}] (verdadero 0.6); sin atenuacion {r0['iic']:+.2f}"
+
+
+@prueba
+def gemelo_embodiment():
+    """Gemelo con --embodiment: la N1 a movimientos propios se atenua segun el embodiment y la
+    de los ajenos no. Con la misma semilla el ruido es identico entre niveles: el IIC debe
+    crecer con el embodiment. La aceptacion estadistica, con sesiones independientes, esta en
+    estudios/embodiment_gemelo.py."""
+    import cerebro_sintetico as cs, embodiment as emb
+    cer = cs.Cerebro(cs._args(semilla=0, embodiment=1.0))
+    cer.meta, cer.dir_paso = 1, 1
+    n = len(cer.eventos)
+    cer._marcador(config.m_paso_ajeno(7), 10.0)          # el gemelo ve el movimiento ajeno
+    assert len(cer.eventos) > n
+    iic, n1 = {}, {}
+    for e in (0.0, 0.5, 1.0):
+        X, aj, ok = cs.sesion_embodiment(150, embodiment=e, semilla=4)
+        a = np.array([emb.amplitud_n1(x, cs.FS) for x in X])
+        n1[e] = (a[aj].mean(), a[~aj & ok].mean())
+        iic[e] = emb.desde_epocas(X, aj, ok, fs=cs.FS).estimar(con_ic=False)['iic']
+    assert iic[0.0] < iic[0.5] < iic[1.0], iic
+    assert np.isclose(n1[0.0][0], n1[1.0][0])           # la N1 ajena no cambia con el embodiment
+    caida = 1 - n1[1.0][1] / n1[0.0][1]                  # la propia baja ~ATENUACION_MAX (0.5)
+    assert 0.3 < caida < 0.7, caida
+    return f"IIC {iic[0.0]:+.2f} / {iic[0.5]:+.2f} / {iic[1.0]:+.2f} con embodiment 0 / 0.5 / 1; N1 propia -{caida:.0%}"
+
+
+@prueba
+def orquestador_ajenos():
+    """Tarea 2: uno de cada 10 pasos del lazo adaptativo es un movimiento ajeno anunciado y
+    hacia la meta; el agente no aprende de el, queda fuera del analisis y el IIC sale en el CSV."""
+    import orquestador
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '3', '--pasos_estatico', '40',
+                                '--pasos_adaptativo', '300', '--sin_perturbacion', '--embodiment', '0.8'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    marcas, publicar = [], orq.salidas.marcador
+    orq.salidas.marcador = lambda txt, *r: (marcas.append(txt), publicar(txt, *r))[1]
+    orquestador.correr(orq, a)
+    f = orq.filas
+    est = [x for x in f if x['estado'] == 'LAZO_ESTATICO']
+    aj = [x for x in f if x['ajeno'] == 1]
+    assert est and not any(x['ajeno'] for x in est)
+    assert len(aj) == 300 // 10, len(aj)
+    assert all(x['excluido'] == 'ajeno' and x['direccion'] == x['meta'] and abs(x['delta']) == config.PASO_AJENO
+               for x in aj), aj[:3]
+    for i, x in enumerate(f):                            # el agente no aprende de los ajenos
+        if x['ajeno'] == 1:
+            assert x['beta'] == f[i - 1]['beta'], (i, x['beta'], f[i - 1]['beta'])
+    assert sum(m.startswith('paso_ajeno:') for m in marcas) == marcas.count(config.AVISO_AJENO) == len(aj)
+    r = orq.iic
+    assert r['n_ajenos'] == len(aj) and r['iic'] > 0 and r['ic'][0] > 0, r
+    assert f[-1]['iic'] != '' and all(x['n1_uv'] != '' for x in aj)
+    return f"{len(aj)} ajenos; IIC {r['iic']:.2f} [{r['ic'][0]:.2f}, {r['ic'][1]:.2f}] con embodiment 0.8 (simulado)"
+
+
+@prueba
+def cuestionario():
+    """Cuestionario de la Tarea 2: tres afirmaciones de 1 a 7; si la respuesta no vale se
+    vuelve a preguntar; se guarda junto a la sesion con el IIC."""
+    import json, tempfile
+    from pathlib import Path
+    import orquestador
+    respuestas = iter(['5', '9', 'x', '7', '1'])
+    ruta = Path(tempfile.mkdtemp()) / 'sesion_cuestionario.json'
+    r = orquestador.cuestionario(ruta, leer=lambda _: next(respuestas), iic={'iic': 0.4}, salida=lambda *_: None)
+    assert [x['respuesta'] for x in r['items']] == [5, 7, 1]
+    guardado = json.loads(ruta.read_text(encoding='utf-8'))
+    assert [x['afirmacion'] for x in guardado['items']] == config.CUESTIONARIO and guardado['iic'] == {'iic': 0.4}
+    return '3 respuestas guardadas'
 
 
 @prueba
@@ -1678,7 +1804,8 @@ def lazo_real_caos():
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
-           'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo', 'iic_estimador', 'gemelo_embodiment',
+           'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']

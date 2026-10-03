@@ -57,6 +57,11 @@ class Tablero(QtWidgets.QWidget):
         self._semaforos({'eeg': config.VERDE, 'ortesis': config.VERDE, 'detector': config.CALENTANDO}, {})
         lay.addLayout(cab)
         lay.addWidget(self.lbl_cp)
+        # Tarea 2: una linea con el IIC (exploratorio) en lugar de un panel: con ~12 movimientos
+        # ajenos por sesion su curva seria casi toda ruido; el numero con su intervalo basta
+        self.lbl_iic = QtWidgets.QLabel('')
+        self.lbl_iic.setStyleSheet('font-size:12px; color:#555; padding:2px 4px;')
+        lay.addWidget(self.lbl_iic)
 
         self.g = pg.GraphicsLayoutWidget()
         lay.addWidget(self.g)
@@ -150,10 +155,14 @@ class Tablero(QtWidgets.QWidget):
                 self.lbl_estado.setStyleSheet(f'font-size:16px;font-weight:bold;padding:4px;'
                                               f'color:{COLORES_SALUD[config.ROJO]};')
         elif tipo == 'cue':
-            cerrar = e['meta'] > 0
-            self.lbl_cue.setText('CERRAR' if cerrar else 'RELAJA')
-            self.lbl_cue.setStyleSheet(f'font-size:28px;font-weight:bold;padding:4px;'
-                                       f'color:{"#d62728" if cerrar else "#1f77b4"};')
+            self._cue(e['meta'])
+        elif tipo == 'aviso_ajeno':                              # Tarea 2: la ortesis se movera sola
+            self.lbl_cue.setText('AUTOMATICO')
+            self.lbl_cue.setStyleSheet('font-size:28px;font-weight:bold;padding:4px;color:#7f3fbf;')
+        elif tipo in ('ajeno', 'iic'):
+            if tipo == 'ajeno':
+                self._cue(e['meta'])                             # vuelve la meta del ensayo
+            self._iic(e['iic'])
         elif tipo == 'checkpoint':
             color = '#2ca02c' if e['ok'] else '#d62728'
             self.lbl_cp.setText(e['texto'])
@@ -179,12 +188,29 @@ class Tablero(QtWidgets.QWidget):
                     pl.addItem(pg.InfiniteLine(e['paso'], angle=90,
                                                pen=pg.mkPen('r', width=1, style=QtCore.Qt.DotLine)))
                 self._pert_marcada = True
+            if 'iic' in e:                                       # las sesiones viejas no lo traen
+                self._iic(e['iic'])
             congel = ' · APRENDIZAJE CONGELADO' if e['congelado'] else ''
             ack = 'sin ACK' if e['latencia_ms'] is None else f"ACK {e['latencia_ms']:.1f} ms"
             self.lbl_estado.setText(f"{e['estado']} · paso {e['paso']} · beta {e['beta']:+.2f} · "
                                     f"{ack}{congel}")
             self.lbl_estado.setStyleSheet('font-size:16px;font-weight:bold;padding:4px;' +
                                           ('color:#d62728;' if e['congelado'] else ''))
+
+    def _cue(self, meta):
+        cerrar = meta > 0
+        self.lbl_cue.setText('CERRAR' if cerrar else 'RELAJA')
+        self.lbl_cue.setStyleSheet(f'font-size:28px;font-weight:bold;padding:4px;'
+                                   f'color:{"#d62728" if cerrar else "#1f77b4"};')
+
+    def _iic(self, r):
+        if not r or r.get('iic') is None:
+            n = (r or {}).get('n_ajenos', 0)
+            self.lbl_iic.setText(f'IIC (exploratorio): sin estimar todavia ({n} movimientos ajenos)')
+            return
+        ic = ' [{:+.2f}, {:+.2f}]'.format(*r['ic']) if r.get('ic') else ''
+        self.lbl_iic.setText(f"IIC (exploratorio, atenuacion de la N1 en PO7/Oz/PO8): {r['iic']:+.2f}{ic}"
+                             f" · {r['n_ajenos']} movimientos ajenos, {r['n_propios']} propios correctos")
 
     def _dibujar(self):
         d = {k: np.array(v, dtype=float) for k, v in self.d.items()}
