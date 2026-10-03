@@ -54,7 +54,7 @@ def contrato():
     assert set(config.TRANSICIONES['PAUSA_SEGURA']) == {
         'LAZO_ESTATICO', 'LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO', 'EVALUACION'}
     assert config.m_salud('eeg', config.ROJO) == 'salud:eeg:ROJO'
-    assert config.COLUMNAS_CSV[-2:] == ['salud', 'excluido']
+    assert config.COLUMNAS_CSV[-3:] == ['salud', 'excluido', 'alineacion']
     # montaje del Unicorn Hybrid Black y el papel de cada sensor
     assert config.CANALES_EEG == ['Fz', 'C3', 'Cz', 'C4', 'Pz', 'PO7', 'Oz', 'PO8']
     assert config.PAPELES == {'mi': ['C3', 'Cz', 'C4'], 'errp': ['Fz', 'Cz', 'Pz'],
