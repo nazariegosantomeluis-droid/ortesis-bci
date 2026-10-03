@@ -13,6 +13,7 @@ Mediciones offline con el gemelo (sin LSL ni casco), para decidir con evidencia.
 | `decisiones_mi.py [sujetos_espera] [sujetos_minimo]` | Espera extra tras la señal antes del primer paso (0, 1 y 2 s) y mínimo de ensayos de la calibración de MI (24 contra 36). |
 | `calibracion_errp_fija.py [sujetos]` | Calibración del detector con 120 épocas fijas y umbral anidado: lo reportado contra lo real en 180 épocas nuevas, y cuántos sujetos dan GO en el CP3. |
 | `alineacion_epoca.py [sujetos]` | Época del ErrP cortada en el ACK, en el inicio real del movimiento y en el inicio por telemetría. Solo verifica: el efecto lo programamos en el gemelo. |
+| `embodiment_gemelo.py [sujetos] [movimientos]` | Aceptación de la Tarea 2 (verificación, no evidencia): IIC de sesiones independientes del gemelo con embodiment 0, 0.2, 0.5 y 0.8 (uno de cada 10 movimientos ajeno); cobertura de 0 con embodiment 0 y Spearman por sujeto y con todas las sesiones juntas (intervalo remuestreando sujetos). |
 | `cierre_completo.py [sujetos]` | Por qué la órtesis casi nunca cerraba completa (solo `simulador_lazo.py`): fracción de ensayos que terminan cerrados o abiertos del todo, y error, con paso máximo mayor y con cada ensayo desde el punto medio. |
 
 Resultados del 2 de octubre de 2026 en `TAREAS.md` (sección de la brecha). Son cifras del gemelo, no de una persona.

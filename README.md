@@ -14,7 +14,7 @@ El casco de la demo es un **g.tec Unicorn Hybrid Black**: 8 canales de EEG a 250
 | Acelerómetro y giroscopio | Rechazo de artefactos por movimiento de cabeza |
 | Contador de muestras | Hora de cada muestra y pérdidas de Bluetooth |
 
-La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. **En curso:** la selección de canales en la calibración, el CP1 sin impedancias y el rechazo por movimiento de cabeza todavía no están implementados (ver `TAREAS.md`); las secciones de abajo que hablan del Cyton quedan como estaban hasta entonces.
+La calibración real decidirá, por validación cruzada, si cada modelo usa los canales de su papel o los 8. El gemelo ya se comporta como un Unicorn (montaje, respuesta visual occipital, IMU, contador y pérdidas de Bluetooth) y puede publicar en el formato del puente o en el de la app UnicornLSL. La selección de canales en la calibración, el CP1 sin impedancias (calidad de señal por canal y latencia del ACK) y el rechazo por movimiento de cabeza ya están implementados; **nada se ha probado todavía con el casco** (`verificar_unicorn.py` es lo primero el domingo).
 
 El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defecto: `puente_lsl.py` o el gemelo; flujos `EEG` e `IMU`) o `unicornlsl` (la app de g.tec: un flujo de tipo `Data` con 17 canales, que se resuelve por tipo o con `--eeg-nombre <nombre o número de serie>`). Solo una aplicación puede conectarse al casco a la vez.
 
@@ -24,7 +24,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 33/33 pruebas pasaron
+python pruebas.py                    # debe decir 39/39 pruebas pasaron
 ```
 
 ## Archivos
@@ -38,10 +38,12 @@ python pruebas.py                    # debe decir 33/33 pruebas pasaron
 | `hardware.py` | EEG por LSL, órtesis por USB (o simulada), decoder de MI con recentrado y detector de ErrP calibrado. |
 | `puente_lsl.py` | BrainFlow → LSL: Unicorn (`--placa unicorn --serie <num>`), placa sintética, playback o Cyton. Publica `EEG` e `IMU` con la hora de cada muestra reconstruida por contador, y registra los huecos de Bluetooth. |
 | `verificar_unicorn.py` | Con el casco puesto: comprueba orden de canales, unidades, contador, IMU, batería y validez, y dice qué fuente usar. |
-| `cerebro_sintetico.py` | **Gemelo digital del piloto**: publica EEG por LSL que *reacciona* al lazo (ERD al imaginar, ErrP cuando la órtesis se equivoca). Reemplaza al casco para ensayar. |
-| `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector) y el retroceso de las reconexiones. |
+| `cerebro_sintetico.py` | **Gemelo digital del piloto**: publica EEG por LSL que *reacciona* al lazo (ERD al imaginar, ErrP cuando la órtesis se equivoca, N1 visual atenuada según `--embodiment`). Reemplaza al casco para ensayar. |
+| `embodiment.py` | Tarea 2 (exploratorio): N1 visual de cada movimiento e índice de integración corporal (IIC) con intervalo y tendencia. |
+| `estudios/` | Mediciones offline con el gemelo y el simulador que respaldan cada decisión (ver su README). |
+| `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector y piloto, que solo avisa) y el retroceso de las reconexiones. |
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
-| `tablero.py` | Tablero en vivo de 5 paneles, con tres semáforos de salud en la cabecera. |
+| `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
 
@@ -77,7 +79,7 @@ Con el detector de ErrP degradado a propósito, el aprendizaje baja a menos del 
 
 `cerebro_sintetico.py` sustituye al casco (un Unicorn Hybrid Black). Escucha las señales y los pasos del orquestador y responde como una persona: desincroniza mu/beta sobre C3 al imaginar cerrar, genera una respuesta visual occipital (N1 ≈ 170 ms en PO7/Oz/PO8) ante cada movimiento de la órtesis y un ErrP fronto-central (Ne ≈ 250 ms, Pe ≈ 350 ms en Fz/Cz/Pz) cuando va al lado contrario, parpadea, mueve la cabeza de vez en cuando (el giroscopio lo registra y el EEG se ensucia), pierde muestras por Bluetooth si se le pide y, opcionalmente, se cansa. Con él se valida el camino **real** completo con verdad conocida.
 
-Corrida completa (`orquestador.py real --ortesis-sim` contra el cerebro sintético): CP1, CP2 (MI BA 0.83), CP3 (ErrP BA 0.90) y CP4 en **GO**. Tras la perturbación, el agente tuvo un error de **0.14**; el decoder sin aprender, de 0.47.
+Corrida completa con el montaje del Unicorn (`orquestador.py real --ortesis-sim` contra el cerebro sintético, una corrida): CP1 a CP4 en **GO** (MI BA 0.86 con 36 ensayos, ErrP BA 0.79 con 120 épocas). En los 2 min tras la perturbación el agente y la sombra empataron (0.47 contra 0.47; con el montaje anterior, 0.26 contra 0.46): en el gemelo el agente recupera más lento que en el simulador y la causa sigue abierta (sección Resiliencia).
 
 ```bash
 python cerebro_sintetico.py --banco          # decoder y detector offline, en segundos
@@ -109,7 +111,7 @@ La parada secuencial revisaba cada 10 épocas y daba GO en cuanto el estimado sa
 
 Si se desconecta el dongle, se reinicia el ESP32, se congela LSL o llega una época corrupta, el sistema lo detecta, se protege, se recupera solo y no pierde la sesión.
 
-**Semáforos (`salud.py`).** Antes de cada paso, el `Vigilante` revisa cuatro subsistemas. Cada cambio de color sale en consola, en el flujo `Estado` y como marcador `salud:<subsistema>:<color>`. Los umbrales están en `config.SALUD`.
+**Semáforos (`salud.py`).** Antes de cada paso, el `Vigilante` revisa cinco subsistemas. Cada cambio de color sale en consola, en el flujo `Estado` y como marcador `salud:<subsistema>:<color>`. Los umbrales están en `config.SALUD`.
 
 | Subsistema | Qué mide | AMARILLO | ROJO |
 |---|---|---|---|
@@ -117,8 +119,9 @@ Si se desconecta el dongle, se reinicia el ESP32, se congela LSL o llega una ép
 | Órtesis | ACK perdidos, latencia, puerto | 1 ACK perdido; latencia ≥ 80 ms | 3 ACK perdidos seguidos; puerto caído |
 | Reloj | deriva del retraso del EEG contra su línea base | 20 ms | 50 ms |
 | Detector | fiabilidad viva del `ConfianzaDetector` | fiabilidad < 0.7 | aprendizaje congelado |
+| Piloto (solo avisa) | alfa occipital (8–13 Hz en PO7/Oz/PO8, últimos 20 s) contra su línea base del primer minuto del lazo | ×1.5 | ×2.5 |
 
-El detector empieza en `CALENTANDO` (gris en el tablero) hasta tener 15 épocas válidas: antes de eso su fiabilidad es ruido y no emite cambios.
+El detector empieza en `CALENTANDO` (gris en el tablero) hasta tener 15 épocas válidas: antes de eso su fiabilidad es ruido y no emite cambios. El piloto también, mientras mide su línea base. **El semáforo PILOTO solo avisa**: el alfa occipital sube con la somnolencia, los ojos cerrados o la desconexión de la tarea, pero no pausa, no excluye pasos y no cuenta en la escalera de degradación. Sus umbrales no están validados en personas. En el gemelo, con `--fatiga 1`, el alfa llega a ×2.8 a los 15 minutos (ROJO); sin fatiga se queda alrededor de ×1.
 
 **Escalera de degradación**, de mejor a peor:
 
@@ -188,6 +191,23 @@ En el simulador el agente sigue claramente por debajo de la sombra con caos leve
 - Tras un silencio sin perder el flujo, el suavizado de marcas de tiempo de LSL (dejitter) deja las marcas atrasadas: 2.7 s tras un hueco de 3 s, y tarda más de 10 s en converger. Eso desalineaba las épocas de ErrP y congelaba el aprendizaje. Primero se resolvió renovando la entrada tras cada silencio; ahora la hora de cada muestra se reconstruye con el contador del casco y el suavizado no se usa, así que el problema desaparece de raíz (prueba `silencio_sin_recrear`: 5 ms de diferencia tras 2.5 s de silencio, sin vaciar el buffer).
 - La deriva del reloj se mide contra una mediana móvil de ~30 s: detecta un cambio de desfase y lo absorbe, así el semáforo del reloj nunca queda en ROJO para siempre.
 - Una sesión sobrevivió a 37 minutos de suspensión del equipo (tapa cerrada) y se reanudó sola al despertar. Aun así: **no cierres la tapa durante la demo**.
+
+## Embodiment: índice de integración corporal (Tarea 2 mínima, exploratorio)
+
+**La idea.** Si el cerebro predice las consecuencias de sus propios movimientos, responde menos a lo que él mismo causó (atenuación sensorial). Con la órtesis: la respuesta visual temprana (N1 occipital) a un movimiento propio debería ser menor que a uno ajeno. **Es una métrica exploratoria, no validada clínicamente.** De las tres firmas que pedía la Tarea 2 solo está esta; la selectividad del error y la resonancia motora quedaron fuera de la versión mínima.
+
+**Protocolo.** En el lazo adaptativo, 1 de cada 10 pasos es un movimiento ajeno: el tablero muestra **AUTOMATICO** durante 1 s (marcador `aviso_ajeno`) y la órtesis se mueve sola 0.15 hacia la meta (marcador `paso_ajeno:<seq>`). Va siempre hacia la meta para que el contraste no se mezcle con la respuesta al error. El agente, la confianza del detector y el detector co-adaptativo no aprenden de esos pasos; en el CSV llevan `ajeno = 1` y `excluido = ajeno`. `--ajenos-cada 0` los apaga.
+
+**El índice.** IIC = d de Cohen entre la N1 de los movimientos ajenos y la de los propios correctos (media de PO7/Oz/PO8 entre 140 y 200 ms tras el inicio del movimiento), con intervalo bootstrap del 90 % y la tendencia entre las dos mitades de la sesión. Positivo = los movimientos propios se atenúan. Sale en las columnas `n1_uv` e `iic` del CSV, en el flujo `Estado`, en una línea del tablero y en EVALUACION. Al terminar una sesión `real`, un cuestionario de tres afirmaciones (propiedad, agencia y control; de 1 a 7) se guarda en `resultados/sesion_..._cuestionario.json` junto con el IIC (`--sin-cuestionario` lo salta).
+
+**Lo que dice el gemelo** (`estudios/embodiment_gemelo.py`, 16 sujetos, sesiones independientes). El gemelo atenúa la N1 propia a (1 − 0.5 × embodiment): el efecto lo programamos nosotros, así que esto solo verifica el estimador.
+
+| Ajenos por sesión | IIC con embodiment 0 / 0.2 / 0.5 / 0.8 | Intervalo incluye 0 con embodiment 0 | Spearman, todas las sesiones juntas | Orden perfecto por sujeto |
+|---|---|---|---|---|
+| 12 (la demo: 120 pasos adaptativos) | +0.12 / +0.19 / +0.16 / +0.13 | 88 % | −0.12 [−0.31, +0.07] | 2 de 16 |
+| 30 (300 pasos adaptativos) | +0.12 / +0.09 / +0.19 / +0.21 | 100 % | +0.24 [−0.03, +0.50] | 4 de 16 |
+
+**El criterio de aceptación no se cumple.** El IIC ordena los niveles apenas con 30 ajenos y nada con 12. El estimador no tiene sesgo: con embodiment 0, 64 sesiones de 30 ajenos dan +0.01 (el +0.12 de la tabla es azar de esas 16; otras 48 dieron −0.02). Lo que falta es potencia. En el gemelo la N1 mide ~3.5 µV contra ~4.5 µV de ruido por época; con embodiment 0.8 el efecto verdadero es d ≈ 0.3, y con 12 ajenos el intervalo de una sola sesión mide ±0.5. **En la demo el IIC solo podrá mostrar una atenuación grande (d ≳ 0.6); con una sesión no distingue niveles cercanos de embodiment.** El error del IIC baja con la raíz del número de ajenos: con 60 sería ~0.16.
 
 ## Probar sin hardware
 

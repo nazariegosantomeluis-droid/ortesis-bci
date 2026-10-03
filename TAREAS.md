@@ -63,6 +63,8 @@ Scripts en `estudios/`. **Reportado a Luis y corregido** (tabla de abajo).
 | Época al inicio real (telemetría) | gemelo: BA 0.61 (ACK) → 0.72 (telemetría) | sin telemetría: ACK + latencia media |
 | Curva de robustez | BA ≥ 0.75: recupera en ~60 s; 0.65: 162 s | figura en `docs/figuras/` |
 | `P_hat` | no frena el aprendizaje (±0.006, 30 sujetos) | `estudios/efecto_p_hat.py` |
+| Tarea 2 mínima (IIC, exploratorio) | gemelo, 16 sujetos: sin sesgo; con 12 ajenos no ordena el embodiment (−0.12), con 30 apenas (+0.24) | criterio de aceptación no cumplido por potencia: decide Luis (ver Tarea 2) |
+| Semáforo PILOTO | gemelo con fatiga 1: alfa ×2.8 a los 15 min | solo avisa; umbrales ×1.5 y ×2.5 sin validar |
 | Órtesis cierra completa | simulador, 30 sujetos: cierra 0.27 → 0.68, abre 0.41 → 0.75; error igual (0.214) | cada ensayo desde 0.5 (400 ms antes del cue, marcador `centrado`, también tras pausa); paso máx. y ganancia 0.20 → 0.30; en `agente_errp.py` solo la ganancia por defecto pasa a leerse de `config` |
 
 **Abierto:** en el gemelo con el montaje del Unicorn el agente no supera a la sombra en los 2 min tras perturbar (0.47 vs 0.47 en dos corridas); en el simulador sí (0.21 vs 0.31). Causa sin investigar.
@@ -75,9 +77,9 @@ Scripts en `estudios/`. **Reportado a Luis y corregido** (tabla de abajo).
 4. Rechazo por movimiento de cabeza.
 5. Selección de canales por validación cruzada.
 6. Pérdidas de Bluetooth como tipo de caos.
-7. Tarea 2 mínima.
-8. Corrección para que la órtesis cierre completa.
-9. Semáforo PILOTO, solo si alcanza.
+7. Tarea 2 mínima. **Hecha** (ver la sección de la Tarea 2).
+8. Corrección para que la órtesis cierre completa. **Hecha.**
+9. Semáforo PILOTO, solo si alcanza. **Hecho:** alfa occipital (8–13 Hz, PO7/Oz/PO8, últimos 20 s) contra su línea base del primer minuto del lazo; ×1.5 AMARILLO, ×2.5 ROJO; solo avisa (no pausa, no excluye, no cuenta en la escalera); umbrales sin validar en personas. Gemelo con `--fatiga 1`: ×2.8 a los 15 min.
 
 ### P0, en orden de commits (rama `p0-unicorn`)
 
@@ -92,7 +94,7 @@ Scripts en `estudios/`. **Reportado a Luis y corregido** (tabla de abajo).
 - [x] 7. Rechazo por movimiento de cabeza.
 - [x] 8. Brecha calibración → lazo (reportar causa) y bug de `P_hat`.
 - [x] Corrección de la Tarea 3: la órtesis cierra completa.
-- [ ] 9. Semáforo PILOTO (alfa occipital), si alcanza.
+- [x] 9. Semáforo PILOTO (alfa occipital), si alcanza.
 
 Después: Tarea 2 mínima, con la atenuación sensorial en PO7/Oz/PO8 como firma principal del contraste movimiento propio contra ajeno.
 
@@ -144,6 +146,17 @@ Después: Tarea 2 mínima, con la atenuación sensorial en PO7/Oz/PO8 como firma
 ---
 
 ## Tarea 2 — Embodiment neural en vivo
+
+> **Versión mínima hecha el 2 de octubre de 2026 (noche)**, rama `p0-unicorn`: movimientos ajenos, atenuación sensorial en PO7/Oz/PO8 como única firma, IIC con intervalo y tendencia en CSV, `Estado`, tablero y EVALUACION, `--embodiment` en el gemelo y cuestionario. Decisiones tomadas sin preguntar (se pueden revertir):
+> - El movimiento ajeno se **anuncia** (el tablero muestra AUTOMATICO 1 s antes, marcador `aviso_ajeno`) y va **siempre hacia la meta**, 0.15 del rango. Así el piloto sabe que no es suyo y el contraste no se mezcla con la respuesta al error; el IIC compara contra los propios **correctos**.
+> - Va en el 2.º paso de uno de cada dos ensayos (1 de cada 10 pasos): tras el centrado y un paso propio la órtesis está entre 0.2 y 0.8 y el movimiento siempre cabe completo. La elección es reproducible por semilla y sin estado (`--reanudar` repite la misma).
+> - IIC = d de Cohen de la N1 (media de PO7/Oz/PO8 entre 140 y 200 ms tras el inicio del movimiento, ventana de la literatura) de ajenos contra propios correctos; intervalo bootstrap del 90 %; tendencia = segunda mitad menos primera. Solo en el lazo adaptativo.
+> - Selectividad del error y resonancia motora: fuera de la versión mínima.
+> - Tablero: una línea con el IIC en lugar de un panel (con ~12 ajenos por sesión la curva sería casi toda ruido).
+> - Cuestionario: al final de una sesión `real` con terminal interactiva (`--sin-cuestionario` lo salta); se guarda en `resultados/sesion_..._cuestionario.json` con el IIC.
+> - Movimientos ajenos por defecto también en `sim` (`--ajenos-cada 0` los apaga); las pruebas de pausas usan `--ajenos-cada 0`.
+>
+> **Aceptación en el gemelo (`estudios/embodiment_gemelo.py`, 16 sujetos): NO se cumple.** Con 12 ajenos por sesión (la demo) el IIC no ordena embodiment 0.2 / 0.5 / 0.8 (Spearman de todas las sesiones −0.12 [−0.31, +0.07]); con 30, apenas (+0.24 [−0.03, +0.50]; orden perfecto en 4 de 16 sujetos). Con embodiment 0 el intervalo incluye 0 en 88 % y 100 %, y no hay sesgo (64 sesiones nulas: +0.01). Falta potencia: en el gemelo d ≈ 0.3 con embodiment 0.8, y con 12 ajenos el intervalo mide ±0.5. **Decisión pendiente de Luis** (cambia el diseño): (a) dejarlo así y mostrar el IIC como exploratorio con intervalo ancho; (b) subir la fracción de ajenos (25 % da ~30 ajenos en 120 pasos, a costa de aprendizaje); (c) agregar un bloque corto de embodiment al final (60 movimientos, 30 ajenos, ~2.5 min).
 
 **Objetivo:** medir en vivo qué tanto el cerebro del piloto trata a la órtesis como parte de su propio cuerpo. Es el componente científico más novedoso del proyecto y venía en la idea original. Debe presentarse como **métrica exploratoria**, no validada clínicamente.
 

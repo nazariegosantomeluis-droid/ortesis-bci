@@ -21,7 +21,7 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | Archivo | Rol |
 |---|---|
 | `config.py` | Contrato: flujos LSL (`EEG`, `IMU`...), montaje del Unicorn y papel de cada sensor (`PAPELES`), fuentes de EEG (`FUENTES_EEG`: puente propio o app UnicornLSL), marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
-| `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector; el detector empieza en CALENTANDO), `Retroceso` (esperas de reconexión), `RelojContador` (hora de cada muestra por el contador del casco) y `RegistroHuecos` (pérdidas de Bluetooth). Clases puras, sin hardware. |
+| `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector y piloto; el detector y el piloto empiezan en CALENTANDO; el piloto, alfa occipital contra su línea base, solo avisa), `Retroceso` (esperas de reconexión), `RelojContador` (hora de cada muestra por el contador del casco) y `RegistroHuecos` (pérdidas de Bluetooth). Clases puras, sin hardware. |
 | `caos.py` | `PlanCaos(semilla)`: fallas reproducibles (cortes de EEG, ACK perdidos, picos de latencia, parpadeos, canal despegado). Tasas en `config.CAOS_ESTANDAR`. |
 | `agente_errp.py` | `AgenteErrP` (filtro de Kalman sobre la corrección `beta` del logit; P_hat bayesiano; detectores de cambio por sesgo y chequeo predictivo) y `ConfianzaDetector` (sens/espec vivas del detector de ErrP con posteriores Beta; congela el aprendizaje si el detector deja de informar). |
 | `simulador_lazo.py` | Piloto sintético rápido a nivel de rasgos, para comparar agentes con muchos sujetos. |
@@ -30,6 +30,7 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | `orquestador.py` | Máquina de estados, checkpoints go/no go (CP1-CP4), calibraciones, lazo, CSV, flujos `Marcadores`/`Paso`/`Estado`. Backends `sim` y `real`. Revisa la salud antes de cada paso, entra y sale de `PAUSA_SEGURA`, marca pasos excluidos, guarda una instantánea por paso y reanuda con `--reanudar`. |
 | `puente_lsl.py` | BrainFlow → LSL (`--placa unicorn --serie <num>`, sintética, playback, Cyton): flujos `EEG` e `IMU` con hora por contador y registro de huecos de Bluetooth. |
 | `verificar_unicorn.py` | Verificación del casco real en menos de 5 minutos (orden de canales, unidades, contador, IMU, batería, validez) con veredicto de qué fuente usar. |
+| `embodiment.py` | Tarea 2 mínima (EXPLORATORIO): `amplitud_n1` (N1 visual en PO7/Oz/PO8) e `IndiceEmbodiment` (IIC = d de Cohen de la N1 de movimientos ajenos contra propios correctos, intervalo bootstrap y tendencia). Los movimientos ajenos (1 de cada 10 pasos del lazo adaptativo, anunciados y hacia la meta) los hace `Orquestador.paso_ajeno`; el gemelo atenúa la N1 propia con `--embodiment`. |
 | `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). |
 | `ver_flujos.py`, `pruebas.py` | Diagnóstico LSL y pruebas automáticas. |
 
@@ -55,7 +56,8 @@ python orquestador.py real --ortesis-sim --reanudar   # continuar una sesión in
 - **Un solo flujo `EEG` en la red.** Un `cerebro_sintetico.py` olvidado en otra terminal contamina cualquier medición contra el gemelo. Antes de medir: `python ver_flujos.py`.
 - `pruebas.py --completa`: `lazo_real_sintetico` excedió sus 400 s una vez de tres (2 de octubre) y no se reprodujo; si vuelve a pasar, la prueba ya muestra las últimas líneas de la sesión.
 - **No correr `pruebas.py` mientras hay una sesión `real` en marcha:** las pruebas publican flujos `Marcadores` y `Paso` con los mismos nombres.
-- Un paso con `excluido` no vacío queda fuera de `EVALUACION`; el agente no aprendió de él.
+- Un paso con `excluido` no vacío queda fuera de `EVALUACION`; el agente no aprendió de él. Los movimientos ajenos de la Tarea 2 también se excluyen (`excluido = ajeno`): una prueba que cuente excluidos o programe fallas por `seq` debe usar `--ajenos-cada 0` o descontarlos.
+- **No correr estudios pesados en paralelo con `pruebas.py`:** numpy y scikit-learn usan todos los núcleos y se estorban; `seleccion_canales_vistas` pasó de segundos a 30 min así.
 
 ## Resultados de referencia (para no retroceder)
 
@@ -70,5 +72,7 @@ Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11,
 - Caos, gemelo, montaje Unicorn (una corrida por condición, mismos modelos): leve 0.47/0.47 (1 pausa); estándar 0.42/0.49 (11 pausas, todas reanudadas; CP4 NO GO por 156 s). No concluyente; en el gemelo el agente recupera más lento que en el simulador.
 - Calibración de ErrP corregida (16 sujetos del gemelo, `estudios/calibracion_errp_fija.py`): BA reportada 0.70 contra 0.73 real; CP3 en GO en 1 de 16.
 - Curva de robustez (simulador, `docs/figuras/curva_robustez.png`): con BA del detector ≥ 0.75 la recuperación ya es casi plana (~60 s); con 0.65, 162 s.
+- Cierre completo (simulador, 30 sujetos, `estudios/cierre_completo.py`): con cada ensayo desde 0.5 y paso máximo 0.30, la órtesis termina cerrada del todo en 68 % de los ensayos de cerrar (antes 27 %) y abierta en 75 % (antes 41 %), mismo error.
+- IIC de la Tarea 2 (gemelo, 16 sujetos, `estudios/embodiment_gemelo.py`; EXPLORATORIO y solo verificación): sin sesgo (64 sesiones nulas: +0.01); con 12 ajenos no ordena el embodiment (Spearman −0.12), con 30 apenas (+0.24 [−0.03, +0.50]). El criterio de aceptación de `TAREAS.md` no se cumple por potencia.
 
 Las tareas pendientes, en orden, están en `TAREAS.md`.
