@@ -66,7 +66,7 @@ class ConfigAgente:
     p_error_calibracion: float = 0.3        # tasa de errores en CAL_ERRP (para 'calibrada')
     umbral_detector: float = 0.5            # p_errp > umbral = "detecto error" (para 'binaria')
     # politica: paso informativo
-    ganancia: float = 0.20
+    ganancia: float = config.GANANCIA_PASO
     paso_max: float = config.PASO_MAX
     paso_visible: float = config.PASO_VISIBLE
     # modo 'fijo'

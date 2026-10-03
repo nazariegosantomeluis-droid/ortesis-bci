@@ -275,6 +275,9 @@ class BackendSim:
     def inicio(self, seq, t_ack):
         return t_ack, 'ack'
 
+    def centrar(self, angulo):
+        pass
+
     def errp(self, seq, t_ack, erroneo, delta):
         p, art = self.piloto.errp(erroneo, delta)  # siempre: consumo fijo de aleatorios
         momentos = [self.t_virtual + d for d in (0.0, self.EPOCA_S / 2, self.EPOCA_S)]
@@ -599,6 +602,10 @@ class BackendReal:
     def mover(self, fraccion):
         return self.ortesis.mover(fraccion)
 
+    def centrar(self, angulo):
+        """Lleva la ortesis al punto medio antes del cue. No es un paso: sin epoca de ErrP."""
+        self.ortesis.mover(angulo, config.CENTRADO_DURACION_MS)
+
     def inicio(self, seq, t_ack):
         """Inicio real del movimiento (telemetria) o, si no hay, ACK + latencia mecanica media."""
         return self.ortesis.inicio_movimiento(seq, t_ack)
@@ -865,9 +872,9 @@ class Orquestador:
                     p['orden'] = [int(v) for v in rng.permutation([1, -1])]
                     p['rng'] = rng.bit_generator.state
                 p['meta'] = p['orden'].pop()
-                self.presentar(p['meta'])
+                self.iniciar_ensayo(p['meta'])
             elif retomado:
-                self.presentar(p['meta'])
+                self.iniciar_ensayo(p['meta'])
             retomado, meta = False, p['meta']
             if perturbar_en is not None and t == perturbar_en:
                 previo = self.fsm.estado
@@ -885,9 +892,18 @@ class Orquestador:
                     motivo = self.revisar_salud() or 'eeg'   # el EEG fallo justo al decidir
                 self.pausa_segura(motivo)
                 self.guardar()
-                self.presentar(meta)                 # el ensayo se retoma con su cue
+                self.iniciar_ensayo(meta)            # el ensayo se retoma con su cue
             p['t'] = t + 1
             self.guardar()                           # instantanea atomica despues de cada paso
+
+    def iniciar_ensayo(self, meta):
+        """Cue del ensayo. Antes, la ortesis vuelve al punto medio: asi puede cerrar o abrir
+        completa en los pasos del ensayo (tambien al retomarlo tras una pausa o una reanudacion)."""
+        if config.CENTRAR_ENSAYO:
+            self.angulo = config.PUNTO_MEDIO
+            self.salidas.marcador(config.CENTRADO)
+            self.b.centrar(self.angulo)
+        self.presentar(meta)
 
     def presentar(self, meta):
         self.salidas.marcador(config.CUE_CERRAR if meta > 0 else config.CUE_RELAJA)

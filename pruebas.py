@@ -839,6 +839,30 @@ def rechazo_por_cabeza():
 
 
 @prueba
+def cierre_completo():
+    """La ortesis cierra (y abre) completa: cada ensayo empieza en el punto medio y el paso maximo
+    es 0.30. Antes cerraba completa solo en el 27 % de los ensayos de "cerrar" (simulador)."""
+    import orquestador
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '2', '--pasos_estatico', '60',
+                                '--pasos_adaptativo', '200', '--sin_perturbacion'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    marcas, publicar = [], orq.salidas.marcador
+    orq.salidas.marcador = lambda txt, *r: (marcas.append(txt), publicar(txt, *r))[1]
+    orquestador.correr(orq, a)
+    lazo = [f for f in orq.filas if f['estado'] != 'PAUSA_SEGURA']
+    fin = [(lazo[i]['meta'], lazo[i]['angulo']) for i in range(config.PASOS_ENSAYO - 1, len(lazo), config.PASOS_ENSAYO)]
+    cierra = np.mean([ang >= 0.95 for m, ang in fin if m == 1])
+    abre = np.mean([ang <= 0.05 for m, ang in fin if m == -1])
+    assert config.PASO_MAX == 0.30 and config.CENTRAR_ENSAYO
+    assert cierra > 0.5 and abre > 0.5, (cierra, abre)
+    # un centrado (con su marcador) antes de cada cue, y ninguno a medio ensayo
+    assert marcas.count(config.CENTRADO) == len(fin), (marcas.count(config.CENTRADO), len(fin))
+    assert all(marcas[i + 1] in (config.CUE_CERRAR, config.CUE_RELAJA)
+               for i, m in enumerate(marcas) if m == config.CENTRADO)
+    return f'ensayos que terminan cerrados del todo: {cierra:.0%}; abiertos del todo: {abre:.0%}'
+
+
+@prueba
 def calibracion_errp_fija():
     """La calibracion de ErrP usa siempre todas las epocas pedidas (120 por defecto): sin GO ni
     NO GO tempranos, que con pocos datos elegian estimados inflados por suerte."""
@@ -1654,7 +1678,7 @@ def lazo_real_caos():
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
-           'inicio_movimiento', 'rechazo_por_cabeza', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']

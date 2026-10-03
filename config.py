@@ -83,6 +83,7 @@ def crear_info(nombre):
 CUE_CERRAR      = 'cue_cerrar'
 CUE_RELAJA      = 'cue_relaja'
 PERTURBACION_ON = 'perturbacion:on'
+CENTRADO        = 'centrado'       # la ortesis vuelve al punto medio antes del cue (no es un paso)
 def m_paso_ack(seq): return f'paso_ack:{seq}'
 def m_bloque(nombre): return f'bloque:{nombre}'
 def m_paso_inicio(seq): return f'paso_inicio:{seq}'           # inicio real del movimiento (telemetria)
@@ -122,7 +123,13 @@ ETA_BETA  = 0.3              # solo para el modo 'fijo' (linea base)
 SENS      = 0.70             # por defecto, hasta que se calibre el detector
 ESPEC     = 0.90
 PASO_VISIBLE = 0.08          # fraccion del rango que el piloto percibe (medirlo con el piloto)
-PASO_MAX  = 0.20
+# la ortesis casi nunca cerraba completa (simulador: 27 % de los ensayos de cerrar). Con cada
+# ensayo desde el punto medio y paso maximo 0.30: 68 % cierra y 75 % abre, mismo error
+PASO_MAX  = 0.30
+GANANCIA_PASO = 0.30            # paso = ganancia * |2 p' - 1|, entre PASO_VISIBLE y PASO_MAX
+CENTRAR_ENSAYO = True           # cada ensayo empieza con la ortesis en el punto medio
+PUNTO_MEDIO = 0.5
+CENTRADO_DURACION_MS = 400      # termina antes de la ventana de MI del primer paso (cue + 1 s)
 
 # ============================ Umbrales go / no go ============================
 # checkpoint 1: el Unicorn no mide impedancias; se revisa la calidad de senal por canal y la

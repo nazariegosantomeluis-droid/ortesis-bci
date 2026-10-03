@@ -40,7 +40,7 @@ Orden de los 17 canales del flujo combinado, unidades del EEG, contador de 1 en 
 
 ### Brecha calibración → lazo: causa medida (2 de octubre, tarde; cifras del gemelo)
 
-Scripts en `estudios/`. **Reportado a Luis; pendiente de su decisión antes de corregir.**
+Scripts en `estudios/`. **Reportado a Luis y corregido** (tabla de abajo).
 
 - **Descartado:** el recentrado en línea y las respuestas cerebrales a cada movimiento dentro de la ventana de MI (ablaciones: ±0.01 de error); el traslape de épocas de ErrP con un paso cada 0.87 s contra 2.5 s (especificidad 0.95 contra 0.96); una carrera en el gemelo entre el flujo `Paso` y el ACK (0 de 220 movimientos juzgados con la dirección equivocada).
 - **MI:** (1) la BA que reporta la calibración secuencial es optimista: 0.84 reportada contra 0.80 real (+0.04 de error; +0.06 si para a los 24 ensayos); (2) el primer paso de cada ensayo falla más (0.25 contra 0.18), porque su ventana empieza con la señal e incluye la transición; esperar 2 s más lo baja a 0.12; (3) un bloque estático de 30 pasos tiene desviación de 0.08: el peor de 10 bloques da 0.33. Sesión real de 150 pasos con el montaje nuevo: BA 0.83 en calibración, error 0.20 en el lazo. El 0.37 de la sesión de las 11:43 queda en la cola de ese ruido; la subida de `p'` paso a paso no se reprodujo ni en 300 pasos sin LSL ni en 150 en vivo.
@@ -63,6 +63,7 @@ Scripts en `estudios/`. **Reportado a Luis; pendiente de su decisión antes de c
 | Época al inicio real (telemetría) | gemelo: BA 0.61 (ACK) → 0.72 (telemetría) | sin telemetría: ACK + latencia media |
 | Curva de robustez | BA ≥ 0.75: recupera en ~60 s; 0.65: 162 s | figura en `docs/figuras/` |
 | `P_hat` | no frena el aprendizaje (±0.006, 30 sujetos) | `estudios/efecto_p_hat.py` |
+| Órtesis cierra completa | simulador, 30 sujetos: cierra 0.27 → 0.68, abre 0.41 → 0.75; error igual (0.214) | cada ensayo desde 0.5 (400 ms antes del cue, marcador `centrado`, también tras pausa); paso máx. y ganancia 0.20 → 0.30; en `agente_errp.py` solo la ganancia por defecto pasa a leerse de `config` |
 
 **Abierto:** en el gemelo con el montaje del Unicorn el agente no supera a la sombra en los 2 min tras perturbar (0.47 vs 0.47 en dos corridas); en el simulador sí (0.21 vs 0.31). Causa sin investigar.
 
@@ -84,12 +85,13 @@ Scripts en `estudios/`. **Reportado a Luis; pendiente de su decisión antes de c
 - [x] 2. Reloj por contador: hora de cada muestra y huecos de Bluetooth (reemplaza la lógica de paquetes del Cyton).
 - [x] 3. Gemelo: N1 visual en PO7/Oz/PO8, IMU con movimientos de cabeza, pérdidas de Bluetooth por contador, formato UnicornLSL.
 - [x] 4a. `EntradaEEG` configurable (fuente `puente` o `unicornlsl`, nombre o tipo, canales por índice, hora por contador, IMU); sin suavizado de marcas de LSL; la ventana de MI tolera pérdidas chicas. El puente ya estampa por contador.
-- [ ] 4b. Selección de canales por validación cruzada en la calibración (papel contra los 8), registrada.
-- [ ] 4c. Pérdidas de Bluetooth como tipo de caos; repetir las mediciones de caos con el montaje nuevo.
+- [x] 4b. Selección de canales por validación cruzada en la calibración (papel contra los 8), registrada.
+- [x] 4c. Pérdidas de Bluetooth como tipo de caos; repetir las mediciones de caos con el montaje nuevo.
 - [x] 5. `puente_lsl.py --placa unicorn --serie <num>` con flujo `IMU`; `verificar_unicorn.py` (probados con la placa sintética y con el gemelo; **nunca con el casco**).
-- [ ] 6. CP1 robusto y sin impedancias.
-- [ ] 7. Rechazo por movimiento de cabeza.
-- [ ] 8. Brecha calibración → lazo (reportar causa) y bug de `P_hat`.
+- [x] 6. CP1 robusto y sin impedancias.
+- [x] 7. Rechazo por movimiento de cabeza.
+- [x] 8. Brecha calibración → lazo (reportar causa) y bug de `P_hat`.
+- [x] Corrección de la Tarea 3: la órtesis cierra completa.
 - [ ] 9. Semáforo PILOTO (alfa occipital), si alcanza.
 
 Después: Tarea 2 mínima, con la atenuación sensorial en PO7/Oz/PO8 como firma principal del contraste movimiento propio contra ajeno.
