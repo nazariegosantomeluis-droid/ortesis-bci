@@ -1657,7 +1657,14 @@ def dos_flujos_eeg():
 def entrada_unicorn():
     """EntradaEEG contra las fuentes de un Unicorn (gemelo): el flujo del puente, con IMU aparte,
     y el flujo unico de la app UnicornLSL (17 canales, resuelto por tipo o por nombre, hora por
-    contador). Con perdidas de Bluetooth la ventana de MI sigue saliendo."""
+    contador). Con perdidas de Bluetooth la ventana de MI sigue saliendo.
+
+    Dos cosas del gemelo son al azar y la prueba las espera en vez de suponerlas (por suponerlas
+    fallaba a veces: 1 de 2 corridas de --completa el 3 de octubre). Con 40 perdidas por minuto se
+    pierde ~7 % de las muestras, pero a rachas: la ventana de MI (tolera 10 %) deja de salir hasta
+    7 s seguidos. Y la cabeza puede pasar 7 s quieta. Durante una perdida la ultima muestra tiene
+    hasta 0.26 s: el retraso es el menor de varias lecturas (un desfase de la hora por contador se
+    veria en todas)."""
     import hardware as hw
     from pylsl import local_clock
 
@@ -1671,14 +1678,24 @@ def entrada_unicorn():
                 time.sleep(7.0)
                 x, t = eeg._crudo(6.0)
                 l = eeg.lecturas()
-                for _ in range(10):                # con ~7 % de perdidas casi todas las ventanas valen
+                for _ in range(30):                # hasta 15 s: las perdidas vienen a rachas
                     ventana_mi = eeg.ventana(3.0, config.SALUD['mi_perdida_max'], config.SALUD['mi_hueco_max_s'])[0]
                     if ventana_mi is not None:
                         break
                     time.sleep(0.5)
                 x, t = eeg._crudo(18.0)            # todo lo grabado: asi siempre hay algun hueco
                 giro = eeg.movimiento(t[-1] - 10.0, t[-1])
-                retraso = local_clock() - t[-1]
+                for _ in range(20):                # hasta 10 s mas: la cabeza se mueve al azar
+                    if giro is not None and giro > 20:
+                        break
+                    time.sleep(0.5)
+                    x, t = eeg._crudo(18.0)
+                    giro = eeg.movimiento(t[-1] - 10.0, t[-1])
+                retrasos = [local_clock() - t[-1]]
+                for _ in range(4):                 # fuera de una perdida de Bluetooth en curso
+                    time.sleep(0.1)
+                    retrasos.append(local_clock() - eeg.ultimo_t())
+                retraso = min(retrasos)
                 return x, t, l, ventana_mi, giro, retraso
             finally:
                 eeg.cerrar()
