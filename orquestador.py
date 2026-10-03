@@ -739,6 +739,7 @@ class Orquestador:
         self.vigilante = Vigilante()
         self.avisos_salud = []                       # lo que se dijo en consola sobre la salud
         self.excluidos, self.error_post = {}, None   # los llena evaluar()
+        self.sin_movimiento = 0                      # pasos que no movieron la ortesis (lo llena evaluar())
         # Tarea 2 (EXPLORATORIO): N1 de los movimientos propios y ajenos -> IIC
         self.embodiment = emb.IndiceEmbodiment(semilla=a.semilla)
         self.iic, self.con_ajenos = self.embodiment.estimar(), False
@@ -1096,6 +1097,10 @@ class Orquestador:
             self.iic = self.embodiment.estimar()
             aviso('  ' + emb.texto(self.iic))
             self.salidas.estado(tipo='iic', iic=self.iic)
+        self.sin_movimiento = sum(f['alineacion'] == config.SIN_MOVIMIENTO for f in validas)
+        if self.sin_movimiento:
+            aviso(f'  pasos sin movimiento (la ortesis ya estaba en el tope): {self.sin_movimiento} de {len(validas)}; '
+                  f'cuentan como decision, pero el agente no aprende de ellos')
         if not validas:
             aviso(f'  CSV: {self.ruta_csv}')
             return

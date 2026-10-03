@@ -1132,6 +1132,7 @@ def paso_sin_movimiento():
     for i in quietos:
         assert config.m_paso_quieto(f[i]['seq']) in marc and config.m_paso_ack(f[i]['seq']) not in marc, f[i]
     assert sum(m.startswith('paso_quieto:') for m in marc) == len(quietos)
+    assert orq.sin_movimiento == len(quietos)        # EVALUACION dice cuantos fueron
     # el gemelo solo reacciona a paso_ack: un paso que no movio la ortesis no le provoca nada
     cer = cs.Cerebro(cs._args(semilla=0))
     cer.meta, cer.dir_paso = 1, -1

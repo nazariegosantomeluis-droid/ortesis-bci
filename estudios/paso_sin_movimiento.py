@@ -14,7 +14,8 @@ Mismo lazo sin LSL que estudios/agente_lento.py, con los topes del recorrido (al
 
 En los dos modos se corre el agente de hoy y su CONTROL NEGATIVO (sin la evidencia del ErrP), con
 los tres detectores del estudio del agente lento. La columna 'sin topes' es ese estudio: todo paso
-era un movimiento visible. Con el modo 'ignorar' se rehace la figura del control negativo.
+era un movimiento visible. Con el modo 'ignorar' se rehace la figura del control negativo y se
+corre ademas el detector co-adaptativo (el lazo real lo lleva encendido).
 
 SOLO es el gemelo: dice que hace el lazo con un piloto que no reacciona a lo que no ve, no como
 sera con una persona.
@@ -41,18 +42,21 @@ CACHE = config.RESULTADOS / 'paso_sin_movimiento'
 REGIMENES = ('actual', 'ayer', 'debil')
 MODOS = ('ciego', 'ignorar')
 VARIANTES = (al.BASE, al.SIN_ERRP_HOY)
+COADAPTA = 'calibrada (hoy) + detector co-adaptativo'
+ARGUMENTOS = dict(al.VARIANTES, **{COADAPTA: {'coadaptar': True}})
 
 
 def una(tarea):
     """Un regimen del gemelo con un modo de topes: el agente de hoy y su control, mismas sesiones."""
     reg, modo, sujetos, reps = tarea
     al.REGIMEN, al.TOPES = reg, modo
-    filas = {v: [] for v in VARIANTES}
+    variantes = VARIANTES + ((COADAPTA,) if modo == 'ignorar' else ())
+    filas = {v: [] for v in variantes}
     for s in range(sujetos):
         mod = al.preparar(s, salida=lambda *a: None)
         for r in range(reps):
-            for v in VARIANTES:
-                f = al.lazo(mod, 1000 + 100 * s + r, **al.VARIANTES[v])
+            for v in variantes:
+                f = al.lazo(mod, 1000 + 100 * s + r, **ARGUMENTOS[v])
                 filas[v] += [dict(x, sujeto=s, rep=r) for x in f]
     CACHE.mkdir(parents=True, exist_ok=True)
     (CACHE / f'corrida_{modo}_{reg}.pkl').write_bytes(pickle.dumps(filas))
@@ -101,6 +105,16 @@ def informe(salida=print):
                    f"{a['p_hat_err']:.2f}")
             if modo == 'ignorar':
                 datos[reg] = filas
+                if COADAPTA in filas:
+                    fijo, co = al.sesiones(filas, al.BASE), al.sesiones(filas, COADAPTA)
+                    d = np.array([b['err'] - a_['err'] for a_, b in zip(fijo, co)])
+                    k = medidas(filas, COADAPTA)
+                    cambios = np.mean([max(f['version'] for f in filas[COADAPTA] if (f['sujeto'], f['rep']) == c) - 1
+                                       for c in sorted({(f['sujeto'], f['rep']) for f in filas[COADAPTA]})])
+                    salida(f"  {'  con el detector co-adaptativo':38s} agente {k['err']:.3f} ({d.mean():+.3f} +- "
+                           f"{d.std(ddof=1) / np.sqrt(len(d)):.3f} contra el fijo; por sesion de {d.min():+.2f} a {d.max():+.2f}) "
+                           f"| recuperan {k['rec']:2d}/{k['n']} (mediana {k['pasos']:.0f} pasos) | BA viva "
+                           f"{al.ba_viva(filas, COADAPTA):.2f} contra {al.ba_viva(filas):.2f} | {cambios:.1f} cambios de modelo por sesion")
     if len(datos) == len(REGIMENES):
         nota = ('Los pasos que no mueven la órtesis (ya estaba en el tope) no producen ErrP en el gemelo y el agente '
                 'no aprende de ellos.')
