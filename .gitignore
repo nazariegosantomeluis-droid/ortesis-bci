@@ -5,3 +5,4 @@ resultados/*
 modelos/*.pkl
 *.xdf
 .superpowers/
+modelos/*.npz
