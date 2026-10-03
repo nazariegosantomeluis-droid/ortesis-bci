@@ -64,9 +64,11 @@ Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11,
 - Simulador (`python simulador_lazo.py --semillas 30`), perturbación de 2.4 logits — error en los primeros 2 min tras perturbar: estático 0.325, eta fijo 0.246, **bayes 0.214**. Antes de perturbar: 0.165 / 0.170 / 0.169; después de los 2 min: 0.316 / 0.178 / 0.175.
 - Con el detector degradado a propósito (prueba `confianza_detector`, 12 sujetos): aprendizaje al 8 %, congelado 88 % de la falla, 1 % de congelamientos en falso.
 - Banco offline del gemelo con el montaje del Unicorn (`python cerebro_sintetico.py --banco`, semilla 0): decoder MI BA 0.72; detector ErrP sensibilidad 0.61, especificidad 0.90, BA 0.75. Con semillas 1 a 3: MI 0.74 / 0.92 / 0.82; ErrP BA 0.76 / 0.81 / 0.76 (el banco de 120 épocas varía ±0.05 entre semillas: comparar siempre con varias). (Con el montaje anterior, semilla 0: MI 0.71; ErrP 0.66 / 0.91 / 0.79.)
-- **Las cifras de lazo y de caos de abajo son del montaje anterior** (FC1, FC2, C3, C4, CP1, CP2, Cz, Fz); hay que repetirlas con el montaje del Unicorn.
-- Corrida real completa contra el gemelo (una corrida, 2 de octubre): CP1–CP4 en GO (MI BA 0.92, ErrP BA 0.92); error tras perturbar agente 0.26 vs sombra 0.46; ninguna pausa en falso. La calibración no usa semilla fija, así que varía entre corridas (una medida anterior dio 0.14 vs 0.47).
+- Las cifras de lazo y de caos de abajo ya son del montaje del Unicorn (2 de octubre, noche), salvo donde se indica.
+- Corrida real completa contra el gemelo, montaje Unicorn (una corrida): CP1–CP4 en GO (MI 0.86 con 36 ensayos, ErrP 0.79 con 120 épocas); error tras perturbar agente 0.47 vs sombra 0.47 (recupera en 82 s); bloque adaptativo 0.44 vs 0.46. (Montaje anterior: 0.26 vs 0.46.)
 - Caos, simulador (30 sujetos, `orquestador.py sim --caos`): tras perturbar agente/sombra 0.222/0.333 con el estándar (1109 de 11 425 filas excluidas) y 0.232/0.326 con el leve (105 de 10 867); sin caos 0.235/0.323.
-- Caos, gemelo (una corrida por condición, mismos modelos que la limpia, renovación a 1 s): leve 0.37/0.47 con 1 pausa; estándar 0.37/0.47 con 10 pausas, todas reanudadas; CP4 en GO. No concluyente. Con renovación a 0.3 s, tres corridas estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47.
+- Caos, gemelo, montaje Unicorn (una corrida por condición, mismos modelos): leve 0.47/0.47 (1 pausa); estándar 0.42/0.49 (11 pausas, todas reanudadas; CP4 NO GO por 156 s). No concluyente; en el gemelo el agente recupera más lento que en el simulador.
+- Calibración de ErrP corregida (16 sujetos del gemelo, `estudios/calibracion_errp_fija.py`): BA reportada 0.70 contra 0.73 real; CP3 en GO en 1 de 16.
+- Curva de robustez (simulador, `docs/figuras/curva_robustez.png`): con BA del detector ≥ 0.75 la recuperación ya es casi plana (~60 s); con 0.65, 162 s.
 
 Las tareas pendientes, en orden, están en `TAREAS.md`.

@@ -48,6 +48,24 @@ Scripts en `estudios/`. **Reportado a Luis; pendiente de su decisión antes de c
 - **No se pudo probar con el gemelo:** paso fijo de 0.15 en `CAL_ERRP` contra pasos variables en el lazo (el gemelo no hace depender el ErrP del tamaño del paso). Requiere una persona.
 - **Bug de `P_hat`:** corregido. `actualizar()` separa la fiabilidad (con la que se calcula `P_hat`) del peso de aprendizaje.
 
+### Hecho el 2 de octubre (noche) y decisiones tomadas
+
+| Pieza | Cifra clave | Decisión |
+|---|---|---|
+| ErrP: 120 épocas fijas + umbral anidado | reportado 0.70 vs real 0.73 (16 sujetos) | `--min_errp` quitado |
+| MI: mínimo 36 ensayos | optimismo +0.02 → +0.00 | |
+| Espera de 1 s tras la señal | primer paso 0.22 → 0.15 (~80 % de lo que da 2 s) | `config.ESPERA_PRIMER_PASO_S` |
+| Intervalos del 90 % en EVALUACION | remuestreando ensayos de 5 pasos | bootstrap por ensayo, no por paso |
+| CP1 sin impedancias | MAD ≤ 15, p95 ≤ 60 ms, ≤ 10 % sin ACK | estado sigue llamándose `IMPEDANCIAS` |
+| Selección por validación cruzada | canales (papel / 8) y vistas (dos / tres) | elección anidada; en empate gana la más simple |
+| Vista theta | gemelo: el detector la elige cuando hay theta | |
+| Detector co-adaptativo | gemelo: BA en vivo 0.65 → 0.73 | prueba en sombra de 30 épocas (20 era muy ruidoso) |
+| Época al inicio real (telemetría) | gemelo: BA 0.61 (ACK) → 0.72 (telemetría) | sin telemetría: ACK + latencia media |
+| Curva de robustez | BA ≥ 0.75: recupera en ~60 s; 0.65: 162 s | figura en `docs/figuras/` |
+| `P_hat` | no frena el aprendizaje (±0.006, 30 sujetos) | `estudios/efecto_p_hat.py` |
+
+**Abierto:** en el gemelo con el montaje del Unicorn el agente no supera a la sombra en los 2 min tras perturbar (0.47 vs 0.47 en dos corridas); en el simulador sí (0.21 vs 0.31). Causa sin investigar.
+
 ### Orden acordado tras el commit 5 (2 de octubre, tarde)
 
 1. Brecha calibración → lazo: ablaciones en el gemelo, reportar la causa con números antes de corregir; el bug de `P_hat` se corrige en el mismo bloque.

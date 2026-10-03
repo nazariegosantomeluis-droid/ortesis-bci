@@ -175,13 +175,13 @@ python orquestador.py real --puerto COM4 --reanudar             # continuar tras
 | Simulador, 30 sujetos, sin caos | 0.235 | 0.323 | ninguno; agente por debajo en 26 de 30 sujetos |
 | Simulador, 30 sujetos, caos leve | 0.232 | 0.326 | 105 de 10 867 filas: `pausa:eeg` 39, `pausa:canal` 28, `epoca_invalida` 20, `sin_ack` 18; agente por debajo en 27 de 30 |
 | Simulador, 30 sujetos, caos estándar | 0.222 | 0.333 | 1109 de 11 425 filas: `pausa:eeg` 443, `sin_ack` 332, `pausa:canal` 181, `epoca_invalida` 152, `pausa:ortesis` 1; agente por debajo en 29 de 30 |
-| Gemelo, sin caos | 0.26 | 0.46 | 0 de 150 filas; ninguna pausa; CP1 a CP4 en GO |
-| Gemelo, caos leve (semilla 2) | 0.37 | 0.47 | 2 de 151 filas: `pausa:eeg` 1, `epoca_invalida` 1; 1 pausa, reanudada sola; CP4 en GO (22 s) |
-| Gemelo, caos estándar (semilla 1) | 0.37 | 0.47 | 20 de 160 filas: `pausa:eeg` 7, `sin_ack` 6, `epoca_invalida` 4, `pausa:canal` 3; 10 pausas, todas reanudadas solas; CP4 en GO (24 s) |
+| Gemelo (montaje Unicorn), sin caos | 0.47 | 0.47 | 0 de 150 filas; ninguna pausa; CP1 a CP4 en GO (MI 0.86 con 36 ensayos, ErrP 0.79 con 120 épocas); recuperación en 82 s |
+| Gemelo (montaje Unicorn), caos leve (semilla 2) | 0.47 | 0.47 | 2 de 151 filas: `pausa:eeg` 1, `epoca_invalida` 1; 1 pausa, reanudada sola; recuperación en 114 s |
+| Gemelo (montaje Unicorn), caos estándar (semilla 1) | 0.42 | 0.49 | 23 de 161 filas: `pausa:eeg` 8, `sin_ack` 6, `epoca_invalida` 6, `pausa:canal` 3; 11 pausas, todas reanudadas solas; recuperación en 156 s (CP4 NO GO) |
 
-Las tres filas del gemelo usan los mismos modelos (una sola calibración) ; son del montaje anterior y de antes de la hora por contador; es **una corrida por condición**, así que no es concluyente. La semilla del caos leve se eligió para que cayera al menos un corte de EEG dentro de los ~5 minutos de sesión. Antes, con el umbral en 0.3 s, tres corridas con caos estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47 (agente/sombra), con modelos distintos entre ellas.
+Las tres filas del gemelo usan los mismos modelos (una sola calibración) y son **una corrida por condición**; los intervalos del 90 % de esos 2 minutos son muy anchos (por ejemplo [0.25, 0.74]). En el bloque adaptativo completo el agente quedó por debajo de la sombra en las tres: 0.44 contra 0.46, 0.29 contra 0.34 y 0.30 contra 0.40. Antes, con el montaje anterior, tres corridas con caos estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47 (agente/sombra).
 
-En el simulador el agente sigue claramente por debajo de la sombra con caos leve y estándar. En el gemelo quedó por debajo en todas las corridas, por márgenes entre 0.01 y 0.23. El agente no se modificó para estas mediciones. Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
+En el simulador el agente sigue claramente por debajo de la sombra con caos leve y estándar. **En el gemelo con el montaje del Unicorn, en los primeros 2 minutos tras perturbar el agente no supera a la sombra** (recupera en 82 a 156 s, más lento que en el simulador). El agente no se modificó para estas mediciones; la causa está abierta (ver `TAREAS.md`). Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
 
 **Lo que enseñó el caos (medido, no supuesto):**
 
