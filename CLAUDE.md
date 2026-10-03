@@ -31,6 +31,7 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | `puente_lsl.py` | BrainFlow → LSL (`--placa unicorn --serie <num>`, sintética, playback, Cyton): flujos `EEG` e `IMU` con hora por contador y registro de huecos de Bluetooth. |
 | `verificar_unicorn.py` | Verificación del casco real en menos de 5 minutos (orden de canales, unidades, contador, IMU, batería, validez) con veredicto de qué fuente usar. |
 | `embodiment.py` | Tarea 2 mínima (EXPLORATORIO): `amplitud_n1` (N1 visual en PO7/Oz/PO8) e `IndiceEmbodiment` (IIC = d de Cohen de la N1 de movimientos ajenos contra propios correctos, intervalo bootstrap y tendencia). Los movimientos ajenos (1 de cada 10 pasos del lazo adaptativo, anunciados y hacia la meta) los hace `Orquestador.paso_ajeno`; el gemelo atenúa la N1 propia con `--embodiment`. |
+| `bloque_sham.py` | Bloque sham (B1), script aparte: órtesis al azar con el piloto en reposo; `hardware.evaluar_sham` dice si `p(t)` la sigue. El gemelo tiene `sesion_sham` para probarlo sin casco. |
 | `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). |
 | `ver_flujos.py`, `pruebas.py` | Diagnóstico LSL y pruebas automáticas. |
 

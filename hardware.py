@@ -825,9 +825,11 @@ class DetectorErrP:
         fusion = VotingClassifier([(v, piezas[v]) for v in VISTAS_ERRP[vistas or self.vistas]], voting='soft')
         return CalibratedClassifierCV(fusion, method='sigmoid', cv=3)
 
-    def ajustar(self, X, y, candidatos=None, evaluar=True):
+    def ajustar(self, X, y, candidatos=None, evaluar=True, direccion=None):
         """evaluar=False: sin la validacion anidada que estima sens / espec / BA (para re-entrenar
-        en el lazo, donde el modelo nuevo se evalua en sombra con epocas que no vio)."""
+        en el lazo, donde el modelo nuevo se evalua en sombra con epocas que no vio).
+        direccion: 1 = el movimiento fue de cerrar, 0 = de abrir (una por epoca); si se da, las
+        predicciones de la validacion anidada se desglosan en self.por_direccion."""
         from pyriemann.estimation import Covariances
         from pyriemann.utils.distance import distance_riemann
         from pyriemann.utils.mean import mean_riemann
@@ -866,6 +868,8 @@ class DetectorErrP:
             self.sens = float((self.pred_cv[y == 1] == 1).mean())
             self.espec = float((self.pred_cv[y == 0] == 0).mean())
             self.ba = 0.5 * (self.sens + self.espec)
+            if direccion is not None:
+                self.por_direccion = metricas_por_direccion(y, self.pred_cv, direccion)
         self.pipe = self._pipe().fit(X, y)
         self._cov = Covariances('oas')
         C = self._cov.fit_transform(X)
@@ -1042,6 +1046,56 @@ def intervalo_ba(y, pred, nivel=0.90, n_boot=1000, semilla=0):
         bas.append(0.5 * ((pred[a] == 1).mean() + (pred[b] == 0).mean()))
     q = (1 - nivel) / 2
     return float(np.quantile(bas, q)), float(np.quantile(bas, 1 - q))
+
+
+def metricas_por_direccion(y, pred, direccion):
+    """B2: sensibilidad, especificidad y BA del detector de ErrP por direccion del movimiento
+    (direccion: 1 = cerrar, 0 = abrir). 'dif_espec' es |espec cerrar - espec abrir| y 'avisa' es True
+    si pasa de config.ESPEC_DIF_MAX. Con 120 epocas quedan ~40 aciertos por direccion, asi que esa
+    diferencia ya tiene ~0.06 de ruido solo por azar: es un aviso (un detector sesgado a una
+    direccion hace que el agente aprenda mal), no un NO GO."""
+    y, pred, d = np.asarray(y), np.asarray(pred), np.asarray(direccion)
+    r = {}
+    for nombre, v in (('cerrar', 1), ('abrir', 0)):
+        m = d == v
+        pos, neg = m & (y == 1), m & (y == 0)
+        sens = float((pred[pos] == 1).mean()) if pos.any() else float('nan')
+        espec = float((pred[neg] == 0).mean()) if neg.any() else float('nan')
+        r[nombre] = {'n': int(m.sum()), 'sens': sens, 'espec': espec, 'ba': 0.5 * (sens + espec)}
+    dif = abs(r['cerrar']['espec'] - r['abrir']['espec'])
+    r['dif_espec'] = float(dif)
+    r['avisa'] = bool(dif > config.ESPEC_DIF_MAX)         # con nan es False
+    return r
+
+
+def evaluar_sham(p, direccion, nivel=config.SHAM_NIVEL_IC, n_boot=2000, semilla=0):
+    """B1, bloque sham: con el piloto en reposo y la ortesis moviendose al azar, p(t) del decoder de MI
+    no debe seguir al movimiento. Mide la AUC de p contra la direccion del movimiento (1 = cerrar) con
+    un intervalo bootstrap; PASA si el intervalo incluye 0.5 (no hay evidencia de que p siga a la
+    ortesis). Con 40 pasos el intervalo mide ~+-0.2: detecta un decoder que sigue la ortesis con claridad
+    (artefacto de los servos, respuesta visual), no uno que la sigue un poco.
+    Devuelve {'n', 'auc', 'ic', 'pasa', 'texto'}; 'pasa' es None si faltan datos."""
+    from sklearn.metrics import roc_auc_score
+    p, d = np.asarray(p, dtype=float), np.asarray(direccion, dtype=int)
+    bien = np.isfinite(p)
+    p, d = p[bien], d[bien]
+    if len(d) < 8 or d.sum() < 4 or (1 - d).sum() < 4:
+        return {'n': int(len(d)), 'auc': float('nan'), 'ic': (float('nan'), float('nan')), 'pasa': None,
+                'texto': f'sham: datos insuficientes ({len(d)} pasos validos)'}
+    auc = float(roc_auc_score(d, p))
+    rng = np.random.default_rng(semilla)
+    i1, i0 = np.flatnonzero(d == 1), np.flatnonzero(d == 0)
+    aucs = []
+    for _ in range(n_boot):
+        idx = np.r_[rng.choice(i1, len(i1)), rng.choice(i0, len(i0))]
+        aucs.append(roc_auc_score(d[idx], p[idx]))
+    q = (1 - nivel) / 2
+    lo, hi = float(np.quantile(aucs, q)), float(np.quantile(aucs, 1 - q))
+    pasa = bool(lo <= 0.5 <= hi)
+    return {'n': int(len(d)), 'auc': auc, 'ic': (lo, hi), 'pasa': pasa,
+            'texto': (f'sham: AUC {auc:.2f} IC{100 * nivel:.0f} [{lo:.2f}, {hi:.2f}] con {len(d)} pasos -> '
+                      + ('OK, p(t) no sigue a la ortesis' if pasa
+                         else 'FALLA: p(t) sigue a la ortesis (revisar servos, cables y referencia)'))}
 
 
 def guardar(obj, nombre):
