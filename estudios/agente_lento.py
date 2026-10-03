@@ -39,6 +39,7 @@ from brecha_mi import Mundo
 FS = cs.FS
 CACHE = config.RESULTADOS / 'agente_lento'
 FIGURA = config.RAIZ / 'docs' / 'figuras' / 'agente_lento.png'
+FIGURA_CONTROL = config.RAIZ / 'docs' / 'figuras' / 'control_negativo.png'     # la de la presentacion
 PASOS_EST, PASOS_ADA, PERTURBA_EN = 30, 120, 40          # los del modo real
 VENTANA = int(config.RECUPERACION_MAX_S / config.CICLO_S)  # los "2 min" de evaluar(): 57 pasos
 META_BETA = 0.7 * config.PERTURBACION_LOGITS               # recuperacion del CP4
@@ -56,6 +57,11 @@ REGIMENES = {
     'nulo':   {'errp': 0.0, 'theta': 0.0, 'candidatos': None},
 }
 REGIMEN = 'actual'
+# Donde se corta la epoca del ErrP (lo usa estudios/respaldo_ack.py): 'inicio' = el inicio real del
+# movimiento (telemetria), 'ack+latencia' = el ACK mas la latencia mecanica media, 'ack' = el ACK.
+ALINEACION = 'inicio'
+MARGEN_S = 0.05                 # lo que se espera tras el fin de la epoca antes de cortarla
+LATENCIA_MEDIA_S = float(np.mean(config.LATENCIA_MECANICA_SIM_MS)) / 1000
 
 
 # ------------------------------------------------------------ el gemelo, sin LSL
@@ -75,10 +81,11 @@ class Mundo2(Mundo):
 def mover(m, erroneo, rng):
     """La ortesis se mueve. El gemelo lo ve tras la latencia mecanica y la epoca se corta en el
     inicio real del movimiento (como con la telemetria del ESP32)."""
-    t0 = m.t + rng.uniform(*config.LATENCIA_MECANICA_SIM_MS) / 1000
+    t_ack = m.t
+    t0 = t_ack + rng.uniform(*config.LATENCIA_MECANICA_SIM_MS) / 1000
     m.cer.movimiento(t0, bool(erroneo))
-    m.avanzar(t0 - m.t + config.EPOCA_ERRP[1] + 0.05)
-    return m.epoca(t0)
+    m.avanzar(t0 - m.t + config.EPOCA_ERRP[1] + MARGEN_S)
+    return m.epoca({'inicio': t0, 'ack+latencia': t_ack + LATENCIA_MEDIA_S, 'ack': t_ack}[ALINEACION])
 
 
 def epocas_mi(m, rng, n=40, espera=1.5, duracion=4.0):
@@ -111,7 +118,8 @@ def epocas_errp(m, rng, n=120, p_error=0.3, espera=1.5):
 def preparar(semilla, salida=print):
     """Decoder y detector de un sujeto del gemelo, calibrados como en el camino real, y las
     probabilidades del detector en 400 epocas NUEVAS con la tasa de error de la calibracion."""
-    ruta = CACHE / (f'sujeto_{semilla}.pkl' if REGIMEN == 'actual' else f'sujeto_{semilla}_{REGIMEN}.pkl')
+    nombre = f'sujeto_{semilla}' + ('' if REGIMEN == 'actual' else f'_{REGIMEN}')
+    ruta = CACHE / (nombre + ('' if ALINEACION == 'inicio' else f'_corte_{ALINEACION}') + '.pkl')
     if ruta.exists():
         return pickle.loads(ruta.read_bytes())
     m = Mundo2(semilla)
@@ -373,6 +381,8 @@ def informe(regimenes=('actual', 'ayer', 'debil'), salida=print):
                f"{np.mean(p05 > 0.5):.0%} (media {p05.mean():.2f})")
     if datos:
         salida(f'Figura: {graficar(datos)}')
+        if all(SIN_ERRP_HOY in f for f in datos.values()):
+            salida(f'Figura: {graficar_control(datos)}')
     return datos
 
 
@@ -526,6 +536,92 @@ def graficar(datos, ruta=FIGURA):
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     ruta.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(ruta, dpi=150, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return ruta
+
+
+def graficar_control(datos, ruta=FIGURA_CONTROL):
+    """La figura del control negativo para la presentacion: el agente de hoy con la evidencia
+    del ErrP y sin ella (mismas sesiones), con tres calidades de detector."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    azul, naranja = '#2a78d6', '#eb6834'
+    tinta, tinta2, rejilla = '#0b0b0b', '#52514e', '#e4e3df'
+    regs = [r for r in ('actual', 'ayer', 'debil') if r in datos]
+    nombres = {'actual': 'detector fuerte\n(BA 0.82)', 'ayer': 'detector medio\n(BA 0.74)',
+               'debil': 'detector d\u00e9bil\n(BA 0.68)'}
+    con = {r: sesiones(datos[r], BASE) for r in regs}
+    sin = {r: sesiones(datos[r], SIN_ERRP_HOY) for r in regs}
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5.0), gridspec_kw={'width_ratios': [1.3, 1, 1]})
+    fig.patch.set_facecolor('#fcfcfb')
+
+    # Panel 1: beta tras la perturbacion, todas las sesiones juntas
+    for d, color, estilo, nombre in ((con, azul, '-', 'con el ErrP'), (sin, naranja, '--', 'sin la evidencia del ErrP')):
+        db = np.array([x['db'][:VENTANA + 20] for r in regs for x in d[r]])
+        x = np.arange(1, db.shape[1] + 1)
+        m, ee = db.mean(0), db.std(0, ddof=1) / np.sqrt(len(db))
+        ax[0].fill_between(x, m - ee, m + ee, color=color, alpha=0.18, lw=0)
+        ax[0].plot(x, m, color=color, lw=2.5, ls=estilo, label=f'{nombre} ({len(db)} sesiones)')
+    ax[0].axhline(META_BETA, color=tinta2, ls='--', lw=1)
+    ax[0].text(VENTANA + 20, META_BETA + 0.05, 'recuperaci\u00f3n (CP4)', ha='right', fontsize=9, color=tinta2)
+    ax[0].axhline(config.PERTURBACION_LOGITS, color=tinta2, ls=':', lw=1)
+    ax[0].text(1, config.PERTURBACION_LOGITS + 0.05, 'correcci\u00f3n ideal', ha='left', fontsize=9, color=tinta2)
+    ax[0].axvline(VENTANA, color=rejilla, lw=6, zorder=0)
+    ax[0].set_ylim(-0.1, 2.8)
+    ax[0].set_title('Lo que aprende el agente tras la perturbaci\u00f3n', color=tinta)
+    ax[0].set_xlabel('pasos tras la perturbaci\u00f3n', color=tinta2)
+    ax[0].set_ylabel('correcci\u00f3n \u03b2 aprendida (logits)', color=tinta2)
+    ax[0].legend(loc='lower right', frameon=False, fontsize=10)
+
+    # Paneles 2 y 3: sesiones recuperadas y error, por detector
+    x = np.arange(len(regs))
+    ancho = 0.36
+    for k, (d, color, nombre) in enumerate(((con, azul, 'con el ErrP'), (sin, naranja, 'sin la evidencia del ErrP'))):
+        rec = [sum(a['rec'] is not None for a in d[r]) for r in regs]
+        n = [len(d[r]) for r in regs]
+        pos = x + (k - 0.5) * ancho
+        ax[1].bar(pos, rec, ancho * 0.92, color=color, label=nombre)
+        for px, v, nn in zip(pos, rec, n):
+            ax[1].text(px, v + 0.3, f'{v}/{nn}', ha='center', fontsize=11, color=tinta, fontweight='bold')
+        err = np.array([[a['err'] for a in d[r]] for r in regs])
+        ax[2].bar(pos, err.mean(1), ancho * 0.92, color=color, label=nombre,
+                  yerr=err.std(1, ddof=1) / np.sqrt(err.shape[1]), capsize=4, error_kw={'ecolor': tinta2, 'lw': 1.2})
+        for px, v in zip(pos, err.mean(1)):
+            ax[2].text(px, 0.02, f'{v:.2f}', ha='center', fontsize=10, color='white', fontweight='bold')
+    sombra = np.mean([a['sombra'] for r in regs for a in con[r]])
+    ax[2].axhline(sombra, color=tinta2, ls='--', lw=1.2)
+    ax[2].text(x[-1] + 0.5, sombra + 0.008, f'decoder sin aprender ({sombra:.2f})', ha='right', fontsize=9, color=tinta2)
+    ax[1].set_ylim(0, 18.5)
+    ax[1].set_yticks([0, 4, 8, 12, 16])
+    ax[1].set_title('Sesiones que se recuperan en 2 min (de 16)', color=tinta)
+    ax[1].legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=2, frameon=False, fontsize=10)
+    ax[2].set_ylim(0, 0.56)
+    ax[2].set_title('Error en los 2 min tras la perturbaci\u00f3n', color=tinta)
+    ax[2].set_ylabel('fracci\u00f3n de pasos err\u00f3neos', color=tinta2)
+    for a in ax[1:]:
+        a.set_xticks(x)
+        a.set_xticklabels([nombres[r] for r in regs])
+    for a in ax:
+        a.set_facecolor('#fcfcfb')
+        a.grid(axis='y', color=rejilla, lw=0.8)
+        a.set_axisbelow(True)
+        for lado in ('top', 'right'):
+            a.spines[lado].set_visible(False)
+        for lado in ('left', 'bottom'):
+            a.spines[lado].set_color(tinta2)
+        a.tick_params(colors=tinta2)
+    fig.suptitle('Control negativo: sin la evidencia del ErrP el agente no se recupera', color=tinta,
+                 fontsize=15, fontweight='bold', x=0.01, ha='left')
+    fig.text(0.01, 0.01, 'Gemelo digital sin LSL: 3 detectores x 4 sujetos x 4 lazos (no son datos de una persona). Control: las '
+             'mismas sesiones, pero el agente recibe siempre la tasa base como salida del detector (LLR = 0);\nla compuerta '
+             'de confianza sigue abierta. Perturbaci\u00f3n de 2.4 logits; franja gris: los 57 pasos (2 min) del CP4; '
+             'recuperaci\u00f3n = \u03b2 al 70 % de la perturbaci\u00f3n. Barras de error: 1 error est\u00e1ndar.',
+             fontsize=8.5, color=tinta2, linespacing=1.5)
+    fig.tight_layout(rect=(0, 0.09, 1, 0.93))
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(ruta, dpi=160, facecolor=fig.get_facecolor())
     plt.close(fig)
     return ruta
 
