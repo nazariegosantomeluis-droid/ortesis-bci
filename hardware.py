@@ -914,7 +914,11 @@ class DetectorCoadaptativo:
     - El cambio es atomico y ocurre en el hilo del lazo (dentro de observar), asi que no hay
       carreras con quien usa self.actual. al_cambiar(nuevo) avisa para actualizar el umbral, el
       agente y el ConfianzaDetector de forma coherente.
+    - NUNCA detiene el lazo: observar() no lanza. Si falla el re-entrenamiento, el candidato al
+      puntuar o el aviso de cambio, el fallo queda en self.errores (y en consola), el candidato se
+      descarta y el lazo sigue con el modelo vigente. Con FALLOS_MAX fallos seguidos se apaga.
     """
+    FALLOS_MAX = 3
 
     def __init__(self, detector, X_cal, y_cal, cada=20, prueba=20, al_cambiar=None):
         self.actual, self.cada, self.prueba, self.al_cambiar = detector, cada, prueba, al_cambiar
@@ -922,7 +926,8 @@ class DetectorCoadaptativo:
         self.historial = []                      # (detecto el vigente, era error), en orden
         self.version, self.descartes, self.nuevas = 1, 0, 0
         self.candidato, self._sombra = None, []  # (detecta candidato, detecta vigente, error)
-        self._hilo, self._listo = None, None
+        self._hilo, self._listo, self._error_hilo = None, None, None
+        self.errores, self.activo, self._fallos_seguidos = [], True, 0
 
     def _entrenar(self, X, y):
         return DetectorErrP(canales=self.actual.canales, vistas=self.actual.vistas).ajustar(
@@ -931,18 +936,42 @@ class DetectorCoadaptativo:
     def _en_hilo(self, X, y):
         try:
             self._listo = self._entrenar(X, y)
-        except Exception as e:                   # un re-entrenamiento fallido no tumba el lazo
-            print(f'  [detector] no se pudo re-entrenar: {e}', flush=True)
-            self._listo = None
+        except Exception as e:                   # se registra en el hilo del lazo (ver _coadaptar)
+            self._listo, self._error_hilo = None, e
+
+    def _fallo(self, donde, e):
+        """Registra un fallo de la co-adaptacion. El lazo sigue con el modelo vigente."""
+        txt = f'{donde}: {type(e).__name__}: {e}'
+        self.errores.append(txt)
+        self._fallos_seguidos += 1
+        self.candidato, self._sombra = None, []
+        print(f'  [detector] fallo la co-adaptacion ({txt}); el lazo sigue con el modelo v{self.version}', flush=True)
+        if self._fallos_seguidos >= self.FALLOS_MAX and self.activo:
+            self.activo = False
+            print(f'  [detector] {self.FALLOS_MAX} fallos seguidos: la co-adaptacion se apaga; el detector '
+                  f'vigente sigue funcionando', flush=True)
 
     def observar(self, e, erroneo, p, artefacto=False):
-        """e: epoca del paso; p: puntaje que le dio el modelo vigente (ya calculado)."""
+        """e: epoca del paso; p: puntaje que le dio el modelo vigente (ya calculado). No lanza."""
         erroneo = int(bool(erroneo))
         if artefacto or e is None:
             return
-        self.historial.append((int(p > self.actual.umbral), erroneo))
+        self.historial.append((int(p > self.actual.umbral), erroneo))   # la BA en vivo siempre se mide
+        if not self.activo:
+            return
+        try:
+            self._coadaptar(e, erroneo)
+        except Exception as ex:
+            self._fallo('en el lazo', ex)
+
+    def _coadaptar(self, e, erroneo):
         if self._hilo is not None and not self._hilo.is_alive():   # termino de entrenar: a la sombra
-            self._hilo, self.candidato, self._listo, self._sombra = None, self._listo, None, []
+            listo, error = self._listo, self._error_hilo
+            self._hilo, self._listo, self._error_hilo = None, None, None
+            if error is not None:
+                self._fallo('al re-entrenar', error)
+            else:
+                self.candidato, self._sombra = listo, []
         if self.candidato is not None:
             c = int(self.candidato.p_error(e) > self.candidato.umbral)
             self._sombra.append((c, self.historial[-1][0], erroneo))
@@ -950,7 +979,7 @@ class DetectorCoadaptativo:
                 self._decidir()
         self._X.append(np.asarray(e)); self._y.append(erroneo)
         self.nuevas += 1
-        if self.nuevas >= self.cada and self._hilo is None and self.candidato is None:
+        if self.activo and self.nuevas >= self.cada and self._hilo is None and self.candidato is None:
             self.nuevas = 0
             self._hilo = threading.Thread(target=self._en_hilo, args=(list(self._X), list(self._y)), daemon=True)
             self._hilo.start()
@@ -965,22 +994,33 @@ class DetectorCoadaptativo:
             self.candidato.sens = float(errores.mean()) if len(errores) else self.actual.sens
             self.candidato.espec = float(1 - aciertos.mean()) if len(aciertos) else self.actual.espec
             self.candidato.ba = 0.5 * (self.candidato.sens + self.candidato.espec)
+            anterior = self.actual
             self.actual, self.version = self.candidato, self.version + 1
-            if self.al_cambiar:
-                self.al_cambiar(self.actual)
+            try:
+                if self.al_cambiar:
+                    self.al_cambiar(self.actual)
+            except Exception:                    # el cambio no se completo: se deshace entero
+                self.actual, self.version = anterior, self.version - 1
+                try:
+                    self.al_cambiar(anterior)    # umbral y agente, de vuelta al modelo vigente
+                except Exception:
+                    pass
+                raise
         else:
             self.descartes += 1
         self.candidato, self._sombra = None, []
+        self._fallos_seguidos = 0                # un ciclo completo sin fallos
 
     def ba_secuencial(self, desde=0, hasta=None):
         """BA en vivo (cada epoca puntuada antes de entrenar con ella), o None sin las dos clases."""
         h = np.array(self.historial[desde:hasta]).reshape(-1, 2)
         return _ba_o_none(h[:, 1], h[:, 0])
 
-    def esperar(self):
-        """Espera a que termine el re-entrenamiento en curso (para pruebas y al cerrar)."""
+    def esperar(self, timeout=None):
+        """Espera a que termine el re-entrenamiento en curso (para pruebas y al cerrar). Con
+        timeout no espera mas que eso: el hilo es demonio y no impide que el programa termine."""
         if self._hilo is not None:
-            self._hilo.join()
+            self._hilo.join(timeout)
 
 
 def _ba_o_none(y, pred):

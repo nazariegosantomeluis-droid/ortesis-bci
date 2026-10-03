@@ -803,6 +803,78 @@ def detector_coadaptativo():
 
 
 @prueba
+def coadaptativo_no_detiene_el_lazo():
+    """Nada de lo que falle en el detector co-adaptativo detiene el lazo: un re-entrenamiento que
+    lanza una excepcion, un candidato que falla al puntuar o un aviso de cambio que falla quedan
+    registrados (co.errores) y el lazo sigue con el detector vigente; con 3 fallos seguidos la
+    co-adaptacion se apaga sola. Cerrar no espera para siempre a un re-entrenamiento colgado.
+    --sin-coadaptativo la apaga desde el principio."""
+    import types
+    import hardware as hw
+    import orquestador
+
+    class Falso:                                              # detector de mentira, perfecto
+        umbral, canales, vistas, sens, espec, p_error_cal = 0.5, [0], 'dos', 0.7, 0.9, 0.3
+
+        def p_error(self, e):
+            return float(e[0])
+
+    class Roto(Falso):
+        def p_error(self, e):
+            raise ValueError('modelo corrupto')
+    epoca = lambda err: np.array([0.8 if err else 0.2])
+    det = Falso()
+
+    def lazo(co, n):
+        for k in range(n):                                    # como el lazo: observar nunca lanza
+            err = k % 3 == 0
+            co.observar(epoca(err), err, co.actual.p_error(epoca(err)))
+            co.esperar()
+        return co
+    nuevo = lambda **k: hw.DetectorCoadaptativo(det, [epoca(0), epoca(1)], [0, 1], cada=10, prueba=6, **k)
+    # 1) el re-entrenamiento lanza una excepcion; a la tercera seguida se apaga
+    co = nuevo()
+
+    def revienta(X, y):
+        raise RuntimeError('sin memoria')
+    co._entrenar = revienta
+    lazo(co, 25)
+    assert co.actual is det and co.activo and len(co.errores) == 2 and 'sin memoria' in co.errores[0], co.errores
+    lazo(co, 35)
+    assert len(co.errores) == 3 and not co.activo and co.actual is det, (co.errores, co.activo)
+    assert len(co.historial) == 60                            # la BA en vivo se sigue midiendo
+    # 2) el candidato falla al puntuar una epoca en la prueba en sombra
+    co = nuevo()
+    co._entrenar = lambda X, y: Roto()
+    lazo(co, 15)
+    assert co.actual is det and co.candidato is None and 'modelo corrupto' in co.errores[0], co.errores
+    # 3) el aviso de cambio (umbral, agente, confianza) falla: el cambio de modelo se deshace
+    def aviso_roto(d):
+        if d is not det:
+            raise KeyError('umbral')
+    co = nuevo(al_cambiar=aviso_roto)
+    co._entrenar = lambda X, y: Falso()
+    lazo(co, 20)
+    assert co.actual is det and co.version == 1 and 'umbral' in co.errores[0], (co.version, co.errores)
+    # 4) un re-entrenamiento colgado no bloquea el cierre
+    co = nuevo()
+    co._entrenar = lambda X, y: time.sleep(1.5) or Falso()
+    for k in range(10):
+        co.observar(epoca(k % 3 == 0), k % 3 == 0, 0.2)
+    t0 = time.perf_counter()
+    co.esperar(timeout=0.05)
+    assert time.perf_counter() - t0 < 0.5
+    # 5) el interruptor
+    a = orquestador.argumentos(['real', '--sin-coadaptativo'])
+    assert a.sin_coadaptativo and not orquestador.argumentos(['real']).sin_coadaptativo
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.a, b.hw, b.detector = a, hw, det
+    b.preparar_coadaptacion(types.SimpleNamespace(detector_cambiado=None))
+    assert b.coadapta is None
+    return 'excepcion al entrenar, candidato roto y aviso roto: registrados y el lazo sigue; 3 fallos seguidos lo apagan'
+
+
+@prueba
 def inicio_movimiento():
     """La epoca del ErrP se alinea al inicio REAL del movimiento: la telemetria T del ESP32 dice
     cuando el angulo empieza a cambiar (interpolando entre muestras), y su reloj se convierte al de
@@ -1838,7 +1910,8 @@ def lazo_real_caos():
 RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
-           'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo', 'iic_estimador', 'gemelo_embodiment',
+           'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
+           'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',

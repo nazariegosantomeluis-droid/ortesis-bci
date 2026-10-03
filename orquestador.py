@@ -566,6 +566,9 @@ class BackendReal:
         """Con los datos de calibracion, el detector sigue aprendiendo en el lazo."""
         ruta = config.MODELOS / 'detector_errp_datos.npz'
         self.coadapta = None
+        if getattr(self.a, 'sin_coadaptativo', False):
+            aviso('  (detector co-adaptativo apagado con --sin-coadaptativo: el detector no cambia en el lazo)')
+            return
         if not ruta.exists():
             aviso('  (sin datos de calibracion del detector guardados: no se co-adapta)')
             return
@@ -658,7 +661,7 @@ class BackendReal:
         self.ortesis.cerrar()
         self.eeg.cerrar()
         if getattr(self, 'coadapta', None) is not None:
-            self.coadapta.esperar()
+            self.coadapta.esperar(timeout=10.0)      # un re-entrenamiento colgado no impide cerrar
 
 
 # ======================================================================
@@ -1071,7 +1074,11 @@ class Orquestador:
             ba = co.ba_secuencial()
             aviso(f'  detector en vivo (cada epoca puntuada antes de entrenar con ella): BA '
                   + (f'{ba:.2f}' if ba is not None else 's/d') + f' en {len(co.historial)} epocas; '
-                  f'{co.version - 1} cambios de modelo, {co.descartes} descartados')
+                  f'{co.version - 1} cambios de modelo, {co.descartes} descartados'
+                  + (f'; {len(co.errores)} fallos de la co-adaptacion' if co.errores else '')
+                  + ('' if co.activo else ' (se apago sola)'))
+            for txt in co.errores:
+                aviso(f'    fallo: {txt}')
         aviso(f'  beta final = {self.filas[-1]["beta"]}  |  cambios detectados = {self.agente.n_cambios}'
               f'  |  detector vivo: sens {self.confianza.sens:.2f}, espec {self.confianza.espec:.2f}')
         aviso(f'  CSV: {self.ruta_csv}')
@@ -1147,6 +1154,8 @@ def argumentos(argv=None):
     ap.add_argument('--eeg-tipo', dest='eeg_tipo', default=None,
                     help='tipo del flujo LSL de EEG, si se prefiere resolver por tipo')
     ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true')
+    ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
+                    help='el detector de ErrP no se re-entrena en el lazo (por defecto si lo hace)')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
     # minimo 36 (antes 24): en el gemelo, la BA reportada era optimista en +0.02; con 36, +0.00
     ap.add_argument('--min_mi', type=int, default=36)
