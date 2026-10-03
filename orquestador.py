@@ -315,6 +315,9 @@ class BackendSim:
     def inicio(self, seq, t_ack):
         return t_ack, 'ack'
 
+    def sin_movimiento(self):
+        pass
+
     def centrar(self, angulo):
         pass
 
@@ -529,13 +532,21 @@ class BackendReal:
             n += 1
 
             def tomar():
+                d = obj if not err else 1 - obj
+                paso = 0.15 if d else -0.15
+                if not 0.1 - 1e-9 <= theta[0] + paso <= 0.9 + 1e-9:
+                    # el movimiento no cabe en el recorrido: la ortesis vuelve al centro antes de
+                    # la senal. Sin movimiento no hay nada que ver y la epoca no tendria ErrP
+                    theta[0] = config.PUNTO_MEDIO
+                    orq.salidas.marcador(config.CENTRADO)
+                    self.ortesis.mover(theta[0], config.CENTRADO_DURACION_MS)
+                    time.sleep(min(self.a.espera, config.CENTRADO_DURACION_MS / 1000))
                 aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
                 orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
                 orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
                 time.sleep(self.a.espera)
-                d = obj if not err else 1 - obj
-                theta[0] = float(np.clip(theta[0] + (0.15 if d else -0.15), 0.1, 0.9))
-                orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
+                theta[0] = float(np.clip(theta[0] + paso, 0.1, 0.9))
+                orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, paso])
                 seq, t_ack, _ = self.ortesis.mover(theta[0])
                 if t_ack is None:
                     self.falla = 'la ortesis no confirmo el movimiento'
@@ -688,6 +699,11 @@ class BackendReal:
     def inicio(self, seq, t_ack):
         """Inicio real del movimiento (telemetria) o, si no hay, ACK + latencia mecanica media."""
         return self.ortesis.inicio_movimiento(seq, t_ack)
+
+    def sin_movimiento(self):
+        """La ortesis no se movio: no hay epoca que esperar, pero el paso dura lo mismo (asi la
+        ventana de MI del paso siguiente no es la misma que la de este)."""
+        time.sleep(config.EPOCA_ERRP[1])
 
     def errp(self, seq, t_ack, erroneo, delta):
         e = self.eeg.epoca(t_ack)
@@ -887,13 +903,20 @@ class Orquestador:
             return False
         dec = self.agente.decidir(phi, self.desplazamiento)
         self.salidas.publicar_paso(dec)
-        self.angulo = float(np.clip(self.angulo + dec.delta, 0, 1))
+        antes = self.angulo
+        self.angulo = float(np.clip(antes + dec.delta, 0, 1))
+        # en el tope la ortesis no se mueve (o menos de lo que se percibe): nadie ve nada
+        quieto = config.IGNORAR_SIN_MOVIMIENTO and abs(self.angulo - antes) < config.PASO_VISIBLE - 1e-9
         seq, t_ack, lat = self.b.mover(self.angulo)
         erroneo = dec.direccion != meta
 
         alineacion, n1 = '', ''
         if t_ack is None:                            # sin ACK no hay instante del movimiento: sin epoca
             p_errp, art, excluido, t_ack = float('nan'), True, 'sin_ack', local_clock()
+        elif quieto:                                 # sin movimiento visible no hay ErrP que leer:
+            self.salidas.marcador(config.m_paso_quieto(seq), t_ack)   # ni epoca, ni N1, ni aprendizaje
+            p_errp, art, excluido, alineacion = float('nan'), True, '', config.SIN_MOVIMIENTO
+            self.b.sin_movimiento()
         else:
             self.salidas.marcador(config.m_paso_ack(seq), t_ack)   # estampado a la hora del ACK
             t_ini, alineacion = self.b.inicio(seq, t_ack)           # la epoca, al inicio real del movimiento

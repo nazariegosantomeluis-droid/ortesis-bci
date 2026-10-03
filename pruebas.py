@@ -57,6 +57,8 @@ def contrato():
     assert config.COLUMNAS_CSV[-6:] == ['salud', 'excluido', 'alineacion', 'ajeno', 'n1_uv', 'iic']
     # Tarea 2: movimientos ajenos anunciados, fuera del analisis del agente
     assert config.m_paso_ajeno(3) == 'paso_ajeno:3' and config.AVISO_AJENO == 'aviso_ajeno'
+    assert config.m_paso_quieto(3) == 'paso_quieto:3' and config.SIN_MOVIMIENTO == 'sin_movimiento'
+    assert config.IGNORAR_SIN_MOVIMIENTO is True
     assert 'ajeno' in config.MOTIVOS_EXCLUSION and config.CANALES_N1 == config.PAPELES['visual']
     # montaje del Unicorn Hybrid Black y el papel de cada sensor
     assert config.CANALES_EEG == ['Fz', 'C3', 'Cz', 'C4', 'Pz', 'PO7', 'Oz', 'PO8']
@@ -224,8 +226,8 @@ def p_hat_refleja_errp():
     class Calibrada(orquestador.BackendSim):
         def preparar(self, orq):
             return dict(super().preparar(orq), salida='calibrada')
-    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '60', '--pasos_adaptativo', '10',
-                                '--sin_perturbacion'])
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '90', '--pasos_adaptativo', '10',
+                                '--sin_perturbacion'])       # ~1 de cada 3 pasos no mueve la ortesis: sin P_hat
     orq = orquestador.Orquestador(Calibrada(a), a)
     orquestador.correr(orq, a)
     est = [f for f in orq.filas if f['estado'] == 'LAZO_ESTATICO' and f['P_hat'] != '']
@@ -345,8 +347,12 @@ def pausa_segura():
         if f['excluido'] and i:
             assert f['beta'] == filas[i - 1]['beta'], (i, f)
         assert len(f['salud']) == len(config.SUBSISTEMAS) and set(f['salud']) <= set('VARC'), f
-    # el detector calienta sus primeras 15 epocas validas sin emitir marcadores de salud
-    assert [f['salud'][3] for f in filas[:15]] == ['C'] * 15 and filas[20]['salud'][3] != 'C'
+    # el detector calienta sus primeras 15 epocas validas sin emitir marcadores de salud; un paso
+    # que no movio la ortesis no tiene epoca y no cuenta
+    con_epoca = [not f['excluido'] and f['artefacto'] == 0 for f in filas]
+    assert not all(con_epoca[:30]) and filas[0]['salud'][3] == 'C'
+    for i, f in enumerate(filas[:40]):
+        assert (f['salud'][3] == 'C') == (sum(con_epoca[:i]) < 15), (i, f['salud'], sum(con_epoca[:i]))
     i_det = next(i for i, m in enumerate(orq.salidas.marcadores) if m.startswith('salud:detector:'))
     assert sum(m.startswith('paso_ack:') for m in orq.salidas.marcadores[:i_det]) >= 15
     assert orq.fsm.estado == 'EVALUACION'
@@ -750,7 +756,8 @@ def caos_sim():
     assert orq.b.epocas_en_perdida, 'el caos estandar debe producir epocas cruzadas por una perdida de Bluetooth'
     for seq in orq.b.epocas_en_perdida:
         assert por_seq[seq]['excluido'] == 'epoca_invalida', por_seq[seq]
-    leve = _sesion_caos(0, caos=1, nivel='leve')              # el nivel leve excluye mucho menos
+    # el nivel leve excluye mucho menos (semilla 3: con la 1 sus pocas fallas caen en pasos sin epoca)
+    leve = _sesion_caos(0, caos=3, nivel='leve')
     por_fallas = lambda o: sum(n for m, n in o.excluidos.items() if m != 'ajeno')   # los ajenos no son fallas
     assert 0 < por_fallas(leve) < por_fallas(orq) / 3, (leve.excluidos, orq.excluidos)
     return f'360 pasos y {n_pausas} pausas sin excepcion; excluidos {orq.excluidos}'
@@ -1090,6 +1097,54 @@ def cierre_completo():
 
 
 @prueba
+def paso_sin_movimiento():
+    """Un paso que no mueve la ortesis (ya estaba en el tope) no informa: nadie ve nada, asi que
+    no hay ErrP que leer. El agente no aprende de el, no cuenta como deteccion fallida para la
+    confianza del detector ni entra al IIC, y el gemelo no reacciona. Sigue contando como
+    decision (acierto o error) en el analisis."""
+    import orquestador
+    import cerebro_sintetico as cs
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '2', '--pasos_estatico', '40',
+                                '--pasos_adaptativo', '200'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    previa = config.PERTURBACION_LOGITS
+    config.PERTURBACION_LOGITS = 6.0     # perturbacion enorme: la ortesis se va al tope EQUIVOCADO y ahi se queda
+    try:
+        orquestador.correr(orq, a)
+    finally:
+        config.PERTURBACION_LOGITS = previa
+    f = orq.filas
+    quietos = [i for i, x in enumerate(f) if x['alineacion'] == config.SIN_MOVIMIENTO]
+    assert len(quietos) > 10, len(quietos)
+    for i in quietos:
+        x, ant = f[i], f[i - 1]
+        assert x['angulo'] in (0.0, 1.0), x                       # solo pasa en un tope
+        assert x['excluido'] == '' and x['artefacto'] == 1 and x['P_hat'] == '' and x['n1_uv'] == '', x
+        assert x['beta'] == ant['beta'], (i, x['beta'], ant['beta'])                 # no aprendio
+        assert (x['sens_viva'], x['espec_viva']) == (ant['sens_viva'], ant['espec_viva']), (i, x, ant)
+    movidos = [x for x in f if x['alineacion'] != config.SIN_MOVIMIENTO and not x['excluido']]
+    assert all(x['P_hat'] != '' or x['artefacto'] == 1 for x in movidos)
+    errores_quietos = sum(f[i]['error_verdadero'] for i in quietos)
+    assert errores_quietos >= 3, errores_quietos    # el caso que importa: errores que nadie vio
+    assert orq.agente.beta > 3.0, orq.agente.beta   # y aun asi aprende, con los pasos que si se ven
+    # su marcador es paso_quieto, no paso_ack: quien corte epocas con los marcadores no lo toma
+    marc = orq.salidas.marcadores
+    for i in quietos:
+        assert config.m_paso_quieto(f[i]['seq']) in marc and config.m_paso_ack(f[i]['seq']) not in marc, f[i]
+    assert sum(m.startswith('paso_quieto:') for m in marc) == len(quietos)
+    # el gemelo solo reacciona a paso_ack: un paso que no movio la ortesis no le provoca nada
+    cer = cs.Cerebro(cs._args(semilla=0))
+    cer.meta, cer.dir_paso = 1, -1
+    n = len(cer.eventos)
+    cer._marcador(config.m_paso_quieto(3), 5.0)
+    assert len(cer.eventos) == n
+    cer._marcador(config.m_paso_ack(4), 6.0)
+    assert len(cer.eventos) > n
+    return (f'{len(quietos)} de {len(f)} pasos sin movimiento ({errores_quietos} eran errores): sin aprendizaje ni '
+            f'cuenta para la confianza del detector; el gemelo no reacciona')
+
+
+@prueba
 def iic_estimador():
     """IIC (Tarea 2, exploratorio): tamano de efecto de la N1 a movimientos ajenos contra
     propios correctos, con intervalo bootstrap; sin estimacion con pocas epocas; tendencia
@@ -1234,9 +1289,19 @@ def calibracion_errp_fija():
     b.hw, b.eeg, b.ortesis, b.detector = hw, EEG(), hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0), None
     b.a = types.SimpleNamespace(ensayos_errp=60, p_error=0.3, espera=0.0, forzar=True)
     orq = types.SimpleNamespace(salidas=Salidas())
+    posiciones, mover = [], b.ortesis.mover
+    b.ortesis.mover = lambda fraccion, *r: (posiciones.append(fraccion), mover(fraccion, *r))[1]
     assert b.calibrar_errp(orq)
     assert len(b.detector.y_cal) == 60 and b.detector.ba > 0.9, (len(b.detector.y_cal), b.detector.ba)
-    return f'usa las 60 epocas pedidas aunque el detector es casi perfecto (BA {b.detector.ba:.2f})'
+    # cada ensayo mueve la ortesis de verdad: si el movimiento no cabe en el recorrido, antes
+    # vuelve al centro (sin movimiento no hay nada que ver, y la epoca no tendria ErrP)
+    saltos = np.abs(np.diff(posiciones))
+    ensayos = np.isclose(saltos, 0.15)
+    assert ensayos.sum() == 60, (ensayos.sum(), np.round(saltos, 2))
+    assert all(np.isclose(posiciones[i + 1], 0.5) for i in np.flatnonzero(~ensayos)), np.round(posiciones, 2)
+    assert min(posiciones) >= 0.1 - 1e-9 and max(posiciones) <= 0.9 + 1e-9
+    return (f'usa las 60 epocas pedidas aunque el detector es casi perfecto (BA {b.detector.ba:.2f}); '
+            f'los 60 ensayos mueven la ortesis ({int((~ensayos).sum())} vueltas al centro)')
 
 
 @prueba
@@ -2017,6 +2082,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
+           'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',

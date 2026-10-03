@@ -61,6 +61,12 @@ REGIMEN = 'actual'
 # movimiento (telemetria), 'ack+latencia' = el ACK mas la latencia mecanica media, 'ack' = el ACK.
 ALINEACION = 'inicio'
 MARGEN_S = 0.05                 # lo que se espera tras el fin de la epoca antes de cortarla
+# Los topes del recorrido de la ortesis (lo usa estudios/paso_sin_movimiento.py): cada ensayo empieza
+# en el punto medio y un paso que no cabe en el recorrido no se ve. None: no se modelan (todo paso
+# es un movimiento visible; asi se midio este estudio). 'ciego': el gemelo no reacciona a un paso
+# que no se ve, pero el lazo lee su epoca y aprende de ella (el orquestador de antes, con una
+# persona). 'ignorar': el lazo no lee esa epoca ni aprende de ella (config.IGNORAR_SIN_MOVIMIENTO).
+TOPES = None
 LATENCIA_MEDIA_S = float(np.mean(config.LATENCIA_MECANICA_SIM_MS)) / 1000
 
 
@@ -78,12 +84,14 @@ class Mundo2(Mundo):
         return hw.cortar_epoca(x, t, t0, FS)
 
 
-def mover(m, erroneo, rng):
+def mover(m, erroneo, rng, visible=True):
     """La ortesis se mueve. El gemelo lo ve tras la latencia mecanica y la epoca se corta en el
-    inicio real del movimiento (como con la telemetria del ESP32)."""
+    inicio real del movimiento (como con la telemetria del ESP32). visible=False: la ortesis ya
+    estaba en el tope y no se movio; el gemelo no ve nada, pero la epoca se corta igual."""
     t_ack = m.t
     t0 = t_ack + rng.uniform(*config.LATENCIA_MECANICA_SIM_MS) / 1000
-    m.cer.movimiento(t0, bool(erroneo))
+    if visible:
+        m.cer.movimiento(t0, bool(erroneo))
     m.avanzar(t0 - m.t + config.EPOCA_ERRP[1] + MARGEN_S)
     return m.epoca({'inicio': t0, 'ack+latencia': t_ack + LATENCIA_MEDIA_S, 'ack': t_ack}[ALINEACION])
 
@@ -207,7 +215,7 @@ def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabili
             conf.rebase(s_, e_)
         co = hw.DetectorCoadaptativo(det, mod['X_cal'], mod['y_cal'], config.COADAPTAR_CADA,
                                      config.COADAPTAR_PRUEBA, al_cambiar=al_cambiar)
-    filas, despl = [], 0.0
+    filas, despl, angulo = [], 0.0, config.PUNTO_MEDIO
     for bloque, n, aprender in (('estatico', PASOS_EST, False), ('adaptativo', PASOS_ADA, True)):
         orden = []
         for t in range(n):
@@ -216,19 +224,27 @@ def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabili
                     orden = [int(v) for v in rng.permutation([1, -1])]
                 meta = orden.pop()
                 m.cer.meta = meta
+                angulo = config.PUNTO_MEDIO               # Orquestador.iniciar_ensayo: centrado
                 m.avanzar(config.VENTANA_MI + config.ESPERA_PRIMER_PASO_S)
             if bloque == 'adaptativo' and t == PERTURBA_EN:
                 despl = -config.PERTURBACION_LOGITS
             beta_antes = ag.beta
             d = ag.decidir(dec.phi(m.ventana_mi()), despl)
             erroneo = d.direccion != meta
-            e = mover(m, erroneo, rng)
-            p, art = det.p_error(e), det.artefacto(e)
-            if co is not None:                           # como BackendReal.errp
-                co.observar(e, erroneo, p, art)
-                co.esperar()
-                det = co.actual
-            detectado = p > umbral[0]
+            antes, angulo = angulo, float(np.clip(angulo + d.delta, 0, 1))
+            quieto = TOPES is not None and abs(angulo - antes) < config.PASO_VISIBLE - 1e-9
+            if quieto and TOPES == 'ignorar':            # como Orquestador.paso: ni epoca ni aprendizaje
+                rng.uniform(*config.LATENCIA_MECANICA_SIM_MS)
+                m.avanzar(config.EPOCA_ERRP[1])
+                p, art = float('nan'), True
+            else:
+                e = mover(m, erroneo, rng, visible=not quieto)
+                p, art = det.p_error(e), det.artefacto(e)
+                if co is not None:                       # como BackendReal.errp
+                    co.observar(e, erroneo, p, art)
+                    co.esperar()
+                    det = co.actual
+            detectado = bool(p > umbral[0])
             fiab = conf(erroneo, detectado, not art)     # igual que Orquestador.paso
             sv, ev = conf.vivo()
             fb = conf.fiabilidad_bruta
@@ -238,6 +254,7 @@ def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabili
             filas.append({'bloque': bloque, 't': t, 'post': despl != 0, 'meta': meta, 'z': d.z,
                           'p_prima': d.p_prima, 'erroneo': bool(erroneo), 'sombra': d.direccion_sombra != meta,
                           'p_errp': p, 'detectado': bool(detectado), 'art': bool(art), 'P_hat': info['P_hat'],
+                          'quieto': bool(quieto), 'angulo': angulo, 'congelado': bool(conf.congelado),
                           'beta_antes': beta_antes, 'beta': ag.beta, 'var': ag.var, 'peso': fiab, 'fb': fb,
                           'sens': sv, 'espec': ev, 'prior': prior, 'cambio': info['cambio'],
                           'version': co.version if co is not None else 1,
@@ -253,11 +270,12 @@ def resumen(filas):
     db = np.array([f['beta'] - b0 for f in post])
     rec = np.flatnonzero(db >= META_BETA)
     v = post[:VENTANA]
+    vistos = [f for f in v if np.isfinite(f['p_errp'])]        # sin los pasos que no se leyeron (TOPES)
     return {'db20': db[19], 'db57': db[VENTANA - 1], 'pasos70': int(rec[0]) + 1 if rec.size else None,
             'err': np.mean([f['erroneo'] for f in v]), 'sombra': np.mean([f['sombra'] for f in v]),
             'cambios': sum(f['cambio'] != '' for f in post), 'db': db,
-            'ba': 0.5 * (np.mean([f['detectado'] for f in v if f['erroneo']] or [np.nan])
-                         + 1 - np.mean([f['detectado'] for f in v if not f['erroneo']] or [np.nan]))}
+            'ba': 0.5 * (np.mean([f['detectado'] for f in vistos if f['erroneo']] or [np.nan])
+                         + 1 - np.mean([f['detectado'] for f in vistos if not f['erroneo']] or [np.nan]))}
 
 
 # ------------------------------------------------------------ recalibraciones candidatas
@@ -540,7 +558,15 @@ def graficar(datos, ruta=FIGURA):
     return ruta
 
 
-def graficar_control(datos, ruta=FIGURA_CONTROL):
+def ba_viva(filas, variante=BASE):
+    """BA del detector en los pasos con movimiento de los 2 min tras perturbar (todas las sesiones)."""
+    v = [f for f in filas[variante] if f['post'] and f['t'] < PERTURBA_EN + VENTANA
+         and not f.get('quieto') and np.isfinite(f['p_errp'])]
+    return 0.5 * (np.mean([f['detectado'] for f in v if f['erroneo']])
+                  + 1 - np.mean([f['detectado'] for f in v if not f['erroneo']]))
+
+
+def graficar_control(datos, ruta=FIGURA_CONTROL, nota=''):
     """La figura del control negativo para la presentacion: el agente de hoy con la evidencia
     del ErrP y sin ella (mismas sesiones), con tres calidades de detector."""
     import matplotlib
@@ -550,8 +576,8 @@ def graficar_control(datos, ruta=FIGURA_CONTROL):
     azul, naranja = '#2a78d6', '#eb6834'
     tinta, tinta2, rejilla = '#0b0b0b', '#52514e', '#e4e3df'
     regs = [r for r in ('actual', 'ayer', 'debil') if r in datos]
-    nombres = {'actual': 'detector fuerte\n(BA 0.82)', 'ayer': 'detector medio\n(BA 0.74)',
-               'debil': 'detector d\u00e9bil\n(BA 0.68)'}
+    nombres = {r: f'detector {n}\n(BA {ba_viva(datos[r]):.2f})'
+               for r, n in (('actual', 'fuerte'), ('ayer', 'medio'), ('debil', 'd\u00e9bil')) if r in datos}
     con = {r: sesiones(datos[r], BASE) for r in regs}
     sin = {r: sesiones(datos[r], SIN_ERRP_HOY) for r in regs}
     fig, ax = plt.subplots(1, 3, figsize=(15, 5.0), gridspec_kw={'width_ratios': [1.3, 1, 1]})
@@ -617,7 +643,8 @@ def graficar_control(datos, ruta=FIGURA_CONTROL):
     fig.text(0.01, 0.01, 'Gemelo digital sin LSL: 3 detectores x 4 sujetos x 4 lazos (no son datos de una persona). Control: las '
              'mismas sesiones, pero el agente recibe siempre la tasa base como salida del detector (LLR = 0);\nla compuerta '
              'de confianza sigue abierta. Perturbaci\u00f3n de 2.4 logits; franja gris: los 57 pasos (2 min) del CP4; '
-             'recuperaci\u00f3n = \u03b2 al 70 % de la perturbaci\u00f3n. Barras de error: 1 error est\u00e1ndar.',
+             'recuperaci\u00f3n = \u03b2 al 70 % de la perturbaci\u00f3n. Barras de error: 1 error est\u00e1ndar.'
+             + (' ' + nota if nota else ''),
              fontsize=8.5, color=tinta2, linespacing=1.5)
     fig.tight_layout(rect=(0, 0.09, 1, 0.93))
     ruta.parent.mkdir(parents=True, exist_ok=True)

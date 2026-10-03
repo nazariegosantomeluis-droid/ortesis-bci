@@ -87,6 +87,7 @@ CENTRADO        = 'centrado'       # la ortesis vuelve al punto medio antes del 
 AVISO_AJENO     = 'aviso_ajeno'    # la pantalla anuncia un movimiento ajeno (Tarea 2)
 def m_paso_ajeno(seq): return f'paso_ajeno:{seq}'             # ACK de un movimiento ajeno
 def m_paso_ack(seq): return f'paso_ack:{seq}'
+def m_paso_quieto(seq): return f'paso_quieto:{seq}'           # ACK de un paso que no movio la ortesis (tope)
 def m_bloque(nombre): return f'bloque:{nombre}'
 def m_paso_inicio(seq): return f'paso_inicio:{seq}'           # inicio real del movimiento (telemetria)
 def m_salud(subsistema, color): return f'salud:{subsistema}:{color}'
@@ -100,7 +101,9 @@ COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'meta', 'angulo', 'p_prima',
                 'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido', 'alineacion',
                 'ajeno', 'n1_uv', 'iic']
 # alineacion: a que se alineo la epoca del ErrP: 'telemetria' (inicio real del movimiento),
-# 'ack+latencia' (ACK mas la latencia mecanica media medida) o 'ack'.
+# 'ack+latencia' (ACK mas la latencia mecanica media medida) o 'ack'. SIN_MOVIMIENTO: la ortesis
+# ya estaba en el tope y no se movio; no hay epoca (ver IGNORAR_SIN_MOVIMIENTO).
+SIN_MOVIMIENTO = 'sin_movimiento'
 # salud: una letra por subsistema (V/A/R, o C = detector calentando) en el orden de SUBSISTEMAS.
 # excluido: vacio = paso valido; si no, el motivo (el paso queda fuera del analisis).
 # ajeno: 1 = movimiento ajeno (Tarea 2); n1_uv: amplitud de la N1 visual del paso (vacio si la
@@ -135,6 +138,11 @@ GANANCIA_PASO = 0.30            # paso = ganancia * |2 p' - 1|, entre PASO_VISIB
 CENTRAR_ENSAYO = True           # cada ensayo empieza con la ortesis en el punto medio
 PUNTO_MEDIO = 0.5
 CENTRADO_DURACION_MS = 400      # termina antes de la ventana de MI del primer paso (cue + 1 s)
+# Un paso que no mueve la ortesis de forma visible (ya estaba en el tope, o le faltaba menos de
+# PASO_VISIBLE) no tiene nada que ver: no hay ErrP que leer. Con True, ese paso cuenta como
+# decision en el analisis, pero el agente no aprende de el y no cuenta como deteccion fallida
+# para la confianza del detector. False: lo de antes (toda decision se lee como un movimiento).
+IGNORAR_SIN_MOVIMIENTO = True
 
 # ============================ Embodiment (Tarea 2, EXPLORATORIO) ============================
 # En el lazo adaptativo, uno de cada AJENOS_CADA pasos es un movimiento ajeno: la pantalla lo
