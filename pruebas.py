@@ -88,10 +88,10 @@ def vigilante():
     for n in (0, 5, minimo - 1):
         assert v.actualizar(0.0, eeg=bien_eeg, ortesis=bien_ort, reloj_ms=0.0,
                             detector={'fiabilidad': 0.3, 'congelado': True, 'epocas': n}) == []
-    assert v.codigo() == 'VVVC' and v.escalon() == 1 and v.motivo_pausa() is None
+    assert v.codigo() == 'VVVCC' and v.escalon() == 1 and v.motivo_pausa() is None   # piloto: gris, sin alfa
     # al terminar de calentar publica su primer color real
     assert v.actualizar(0.0, detector={'fiabilidad': 1.0, 'congelado': False, 'epocas': minimo})         == [('detector', config.VERDE)]
-    assert v.codigo() == 'VVVV' and v.escalon() == 1 and v.motivo_pausa() is None
+    assert v.codigo() == 'VVVVC' and v.escalon() == 1 and v.motivo_pausa() is None
     # corte de EEG: rojo inmediato, con marcador de cambio
     assert v.actualizar(1.0, eeg={**bien_eeg, 'edad_s': 1.4}) == [('eeg', R)]
     assert v.motivo_pausa() == 'eeg' and v.escalon() == 3
@@ -124,6 +124,39 @@ def vigilante():
     assert v.colores['detector'] == R and v.escalon() == 2
     assert v.listo_para_reanudar(17.0)                # el detector no la bloquea
     return 'semaforos, detalle del electrodo, verde continuo y escalones'
+
+
+@prueba
+def semaforo_piloto():
+    """Semaforo PILOTO (solo avisa): alfa occipital (PO7/Oz/PO8) contra su linea base de los
+    primeros piloto_base_s. Gris mientras mide la linea base; nunca pausa ni cambia el escalon.
+    En el gemelo la fatiga sube el alfa y el semaforo la ve."""
+    import hardware as hw, cerebro_sintetico as cs
+    from salud import Vigilante
+    v = Vigilante()
+    assert v.colores['piloto'] == config.CALENTANDO
+    base = config.SALUD['piloto_base_s']
+    for t in np.arange(0.0, base, 1.0):
+        assert v.actualizar(t, alfa=10.0) == [] and v.colores['piloto'] == config.CALENTANDO
+    cambios = []
+    for t, alfa in ((base, 12.0), (base + 1, 20.0), (base + 2, 30.0)):
+        cambios += v.actualizar(t, alfa=alfa)
+    assert cambios == [('piloto', config.VERDE), ('piloto', config.AMARILLO), ('piloto', config.ROJO)], cambios
+    assert 'alfa' in v.detalle['piloto'] and v.motivo_pausa() is None and v.escalon() == 1
+    assert len(v.codigo()) == len(config.SUBSISTEMAS) and v.codigo()[-1] == 'R'
+    v.actualizar(base + 3, alfa=None)                    # sin lectura no cambia
+    assert v.colores['piloto'] == config.ROJO
+    # gemelo: con fatiga sube el alfa de PO7/Oz/PO8 (amplitud x2 a los 15 min con fatiga 1)
+    r = {}
+    for fatiga in (0.0, 1.0):
+        cer = cs.Cerebro(cs._args(semilla=2, fatiga=fatiga))
+        cer.t0_sesion = 0.0                              # el reloj del banco empieza en 0
+        x0, _ = cs._bloque(cer, 0.0, 20.0)
+        x1, _ = cs._bloque(cer, 900.0, 20.0)
+        r[fatiga] = hw.potencia_alfa(x1, cs.FS) / hw.potencia_alfa(x0, cs.FS)
+    assert r[0.0] < config.SALUD['piloto_amarillo'] and r[1.0] > config.SALUD['piloto_rojo'], r
+    return (f"gris -> verde -> amarillo -> rojo sin pausar; gemelo a los 15 min: alfa x{r[0.0]:.1f} "
+            f"sin fatiga y x{r[1.0]:.1f} con fatiga 1")
 
 
 @prueba
@@ -311,7 +344,7 @@ def pausa_segura():
     for i, f in enumerate(filas):
         if f['excluido'] and i:
             assert f['beta'] == filas[i - 1]['beta'], (i, f)
-        assert len(f['salud']) == 4 and set(f['salud']) <= set('VARC'), f
+        assert len(f['salud']) == len(config.SUBSISTEMAS) and set(f['salud']) <= set('VARC'), f
     # el detector calienta sus primeras 15 epocas validas sin emitir marcadores de salud
     assert [f['salud'][3] for f in filas[:15]] == ['C'] * 15 and filas[20]['salud'][3] != 'C'
     i_det = next(i for i, m in enumerate(orq.salidas.marcadores) if m.startswith('salud:detector:'))
@@ -488,7 +521,7 @@ def reanudar():
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
-    """El tablero (sin pantalla) pinta los tres semaforos y PAUSA_SEGURA en rojo con el electrodo."""
+    """El tablero (sin pantalla) pinta los cuatro semaforos y PAUSA_SEGURA en rojo con el electrodo."""
     import os
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from pyqtgraph.Qt import QtWidgets
@@ -498,8 +531,9 @@ def tablero_salud():
     t = tablero.Tablero()
     try:
         t.timer.stop()
-        assert set(t.semaforos) == {'eeg', 'ortesis', 'detector'}
+        assert set(t.semaforos) == {'eeg', 'ortesis', 'detector', 'piloto'}
         assert C[config.CALENTANDO] in t.semaforos['detector'].styleSheet()      # gris al arrancar
+        assert C[config.CALENTANDO] in t.semaforos['piloto'].styleSheet()
         t._procesar({'tipo': 'salud', 'estado': 'PAUSA_SEGURA', 'motivo': 'canal', 'escalon': 3,
                      'colores': {'eeg': 'ROJO', 'ortesis': 'VERDE', 'reloj': 'VERDE', 'detector': 'AMARILLO'},
                      'detalle': {'eeg': 'C3 plano', 'ortesis': '', 'reloj': '', 'detector': 'fiabilidad 0.60'}})
@@ -536,7 +570,7 @@ def tablero_salud():
         assert 'sin estimar' in t.lbl_iic.text()
     finally:
         t.close()
-    return 'tres semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa; IIC y AUTOMATICO'
+    return 'cuatro semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa; IIC y AUTOMATICO'
 
 
 # ------------------------------------------------------------ caos
@@ -1801,7 +1835,7 @@ def lazo_real_caos():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
            'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo', 'iic_estimador', 'gemelo_embodiment',

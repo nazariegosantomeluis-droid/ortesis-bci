@@ -29,7 +29,7 @@ import config
 N = 300          # pasos visibles
 COLORES_SALUD = {config.VERDE: '#2ca02c', config.AMARILLO: '#e6b800', config.ROJO: '#d62728',
                  config.CALENTANDO: '#9e9e9e'}
-SEMAFOROS = {'eeg': 'EEG', 'ortesis': 'ORTESIS', 'detector': 'DETECTOR'}
+SEMAFOROS = {'eeg': 'EEG', 'ortesis': 'ORTESIS', 'detector': 'DETECTOR', 'piloto': 'PILOTO'}
 VENTANA = 20     # para el error movil
 
 
@@ -54,7 +54,8 @@ class Tablero(QtWidgets.QWidget):
             self.semaforos[sub] = QtWidgets.QLabel(texto)
             self.semaforos[sub].setAlignment(QtCore.Qt.AlignCenter)
             cab.addWidget(self.semaforos[sub], 1)
-        self._semaforos({'eeg': config.VERDE, 'ortesis': config.VERDE, 'detector': config.CALENTANDO}, {})
+        self._semaforos({'eeg': config.VERDE, 'ortesis': config.VERDE, 'detector': config.CALENTANDO,
+                         'piloto': config.CALENTANDO}, {})
         lay.addLayout(cab)
         lay.addWidget(self.lbl_cp)
         # Tarea 2: una linea con el IIC (exploratorio) en lugar de un panel: con ~12 movimientos

@@ -182,21 +182,26 @@ class Vigilante:
       ortesis  = {'puerto_ok', 'acks_perdidos', 'latencia_ms'}
       reloj_ms = deriva del retraso del EEG contra su linea base
       detector = {'fiabilidad', 'congelado', 'epocas'}
+      alfa     = potencia alfa occipital (semaforo PILOTO)
 
     El detector empieza en CALENTANDO: con menos de `detector_epocas_min` epocas
     validas su fiabilidad viva todavia es ruido, asi que no opina ni emite cambios.
     Esto solo afecta al semaforo; el congelamiento del aprendizaje no cambia.
+    El piloto tambien: mide su linea base de alfa durante `piloto_base_s` y despues compara.
+    Solo avisa (somnolencia, ojos cerrados o desconexion de la tarea): no pausa ni cuenta
+    en la escalera de degradacion.
     """
 
     def __init__(self, umbrales=None):
         self.u = umbrales or config.SALUD
         self.colores = {s: V for s in config.SUBSISTEMAS}
-        self.colores['detector'] = config.CALENTANDO
+        self.colores['detector'] = self.colores['piloto'] = config.CALENTANDO
         self.detalle = {s: '' for s in config.SUBSISTEMAS}
         self._canal_malo = False
         self._t_verde = None
+        self._alfa_t0, self._alfa_base, self._alfa_linea = None, [], None
 
-    def actualizar(self, t, eeg=None, ortesis=None, reloj_ms=None, detector=None):
+    def actualizar(self, t, eeg=None, ortesis=None, reloj_ms=None, detector=None, alfa=None):
         """Devuelve los cambios de color [(subsistema, color)], para publicarlos como marcador."""
         previos = dict(self.colores)
         if eeg is not None:
@@ -210,6 +215,8 @@ class Vigilante:
             color = R if detector['congelado'] else (
                 A if detector['fiabilidad'] < self.u['detector_amarillo'] else V)
             self._poner('detector', color, f"fiabilidad {detector['fiabilidad']:.2f}")
+        if alfa is not None and alfa > 0:
+            self._piloto(t, alfa)
         # el detector no cuenta para reanudar: en pausa no hay pasos con que recuperarlo
         bien = self.colores['eeg'] == V and self.colores['ortesis'] == V and self.colores['reloj'] != R
         if not bien:
@@ -236,6 +243,18 @@ class Vigilante:
         nominal = config.FLUJOS['EEG'][2]
         c_tasa = self._nivel(max(0.0, nominal - e['tasa_hz']) / nominal, 'eeg_tasa_amarillo', 'eeg_tasa_rojo')
         self._poner('eeg', c_tasa, f"tasa {e['tasa_hz']:.0f} Hz")
+
+    def _piloto(self, t, alfa):
+        if self._alfa_t0 is None:
+            self._alfa_t0 = t
+        if t - self._alfa_t0 < self.u['piloto_base_s']:
+            self._alfa_base.append(alfa)                 # sigue en CALENTANDO
+            return
+        if self._alfa_linea is None:
+            self._alfa_linea = float(np.median(self._alfa_base)) if self._alfa_base else alfa
+        r = alfa / self._alfa_linea
+        self._poner('piloto', self._nivel(r, 'piloto_amarillo', 'piloto_rojo'),
+                    f'alfa occipital x{r:.1f} de su linea base (somnolencia u ojos cerrados?)')
 
     def _ortesis(self, o):
         if not o['puerto_ok']:

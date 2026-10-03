@@ -11,7 +11,7 @@ import time
 from collections import deque
 
 import numpy as np
-from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos
+from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos, welch
 
 import config
 from salud import RelojContador, Retroceso
@@ -23,6 +23,16 @@ def filtrar(x, banda, fs, red=config.RED_HZ):
     sos = butter(4, banda, btype='bandpass', fs=fs, output='sos')
     b, a = iirnotch(red, 30.0, fs)
     return sosfiltfilt(sos, sosfiltfilt(tf2sos(b, a), x, axis=-1), axis=-1)
+
+
+def potencia_alfa(x, fs, canales=config.PAPELES['alfa'], banda=config.BANDA_ALFA):
+    """Potencia alfa media (uV^2/Hz) de los canales occipitales (semaforo PILOTO), con Welch
+    de 2 s. x: canales x muestras, crudo. None con menos de 4 s."""
+    x = np.asarray(x, float)
+    if x.ndim != 2 or x.shape[1] < 4 * fs:
+        return None
+    f, P = welch(x[config.indices(canales)], fs=fs, nperseg=int(2 * fs))
+    return float(P[:, (f >= banda[0]) & (f <= banda[1])].mean())
 
 
 def revisar_canales(x, fs, u=None):
@@ -333,21 +343,24 @@ class EntradaEEG:
         return float(np.abs(giro).max())
 
     def lecturas(self):
-        """Lo que el Vigilante necesita: edad, tasa real, canales malos y deriva del reloj (ms)."""
+        """Lo que el Vigilante necesita: edad, tasa real, canales malos, deriva del reloj (ms) y
+        alfa occipital (semaforo PILOTO)."""
         u = config.SALUD
         edad = self.edad()
-        x, t = self._crudo(u['ventana_canales_s'])
+        xa, t = self._crudo(max(u['ventana_canales_s'], u['piloto_ventana_s']))
+        x = xa[:, -int(u['ventana_canales_s'] * self.fs):] if xa.size else xa
         with self._lock:
             lag = np.array(self._lag)
             desde = time.monotonic() - u['ventana_canales_s']
             llegadas = sum(n for cuando, n in self._llegadas if cuando > desde)
         if t.size == 0:
-            return {'edad_s': edad, 'tasa_hz': 0.0, 'canales': {}, 'reloj_ms': 0.0}
+            return {'edad_s': edad, 'tasa_hz': 0.0, 'canales': {}, 'reloj_ms': 0.0, 'alfa': None}
         fresco = edad <= u['eeg_edad_rojo_s']
         return {'edad_s': edad,
                 'tasa_hz': llegadas / u['ventana_canales_s'],     # muestras que de verdad llegaron
                 'canales': revisar_canales(x, self.fs) if fresco else {},
-                'reloj_ms': deriva_reloj(lag)}
+                'reloj_ms': deriva_reloj(lag),
+                'alfa': potencia_alfa(xa, self.fs) if fresco else None}
 
     def esperar_hasta(self, t_lsl, timeout=2.0):
         t_fin = time.time() + timeout

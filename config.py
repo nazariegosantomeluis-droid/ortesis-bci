@@ -181,9 +181,12 @@ LATENCIA_MECANICA_SIM_MS = (30.0, 150.0)   # la de la ortesis simulada (y la que
 #               "T,<t_us>,<angulo>,<fsr>\n"   telemetria a 50 Hz
 
 # ============================ Salud ============================
-SUBSISTEMAS = ['eeg', 'ortesis', 'reloj', 'detector']
+# piloto: alfa occipital contra su linea base (somnolencia, ojos cerrados o desconexion de la
+# tarea). Solo avisa: no pausa, no excluye pasos y no cuenta en la escalera de degradacion.
+SUBSISTEMAS = ['eeg', 'ortesis', 'reloj', 'detector', 'piloto']
 VERDE, AMARILLO, ROJO = 'VERDE', 'AMARILLO', 'ROJO'
-CALENTANDO = 'CALENTANDO'       # solo el detector: aun no hay epocas para juzgarlo (gris en el tablero)
+CALENTANDO = 'CALENTANDO'       # detector y piloto: aun no hay con que juzgarlos (gris en el tablero)
+BANDA_ALFA = (8.0, 13.0)
 SALUD = {
     'eeg_edad_amarillo_s': 0.3, 'eeg_edad_rojo_s': 1.0,     # edad de la ultima muestra
     'eeg_tasa_amarillo': 0.10, 'eeg_tasa_rojo': 0.25,       # desviacion relativa de la tasa real
@@ -199,6 +202,9 @@ SALUD = {
     'reloj_lecturas_base': 40,                              # lecturas para (re)medir la linea base
     'detector_amarillo': 0.7,                               # fiabilidad bajo este valor
     'detector_epocas_min': 15,                              # epocas validas antes de opinar del detector
+    # piloto: potencia alfa de PO7/Oz/PO8 en los ultimos piloto_ventana_s, dividida entre la
+    # mediana de sus primeros piloto_base_s. Umbrales sin validar en personas: solo avisan
+    'piloto_base_s': 60.0, 'piloto_ventana_s': 20.0, 'piloto_amarillo': 1.5, 'piloto_rojo': 2.5,
     'verde_para_reanudar_s': 3.0,                           # VERDE continuo para salir de la pausa
 }
 POSICION_SEGURA   = 0.0          # abierta
