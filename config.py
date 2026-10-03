@@ -144,6 +144,9 @@ BAUDIOS        = 115200
 DURACION_PASO_MS = 250
 # inicio real del movimiento (telemetria T del ESP32): el angulo se aleja del previo mas que esto
 UMBRAL_INICIO_ANGULO = 5          # en unidades del firmware (0-1000)
+# movimiento de cabeza (giroscopio del Unicorn): por encima de esto, la epoca o la ventana es
+# artefacto (el agente no aprende de ese paso, el decoder no se recentra); sin pausa
+GIRO_ARTEFACTO_DPS = 20.0
 TELEMETRIA_HZ = 50
 LATENCIA_MECANICA_SIM_MS = (30.0, 150.0)   # la de la ortesis simulada (y la que usa el gemelo)
 # PC -> ESP32:  "M,<seq>,<angulo 0-1000>,<duracion_ms>\n"
@@ -186,12 +189,14 @@ CAOS_ESTANDAR = {
     'canal':            {'cada_s': 120.0, 'duracion_s': (4.0, 10.0)},   # un canal se despega
     'ack_perdido':      {'p': 0.03},                                    # por paso
     'pico_latencia':    {'p': 0.05, 'ms': (80.0, 300.0)},               # por paso
+    'perdida_bt':       {'cada_s': 20.0,  'duracion_s': (0.02, 0.2)},   # muestras que no llegan por Bluetooth
 }
 # "Caos leve": mismas fallas, del orden de una cada 2 a 3 minutos sumando todos los tipos.
 CAOS_LEVE = {
-    'corte_eeg':        {'cada_s': 600.0, 'duracion_s': (1.0, 5.0), 'recrear_desde_s': 3.0},
-    'rafaga_parpadeos': {'cada_s': 600.0, 'duracion_s': (2.0, 4.0), 'por_segundo': 3.0},
-    'canal':            {'cada_s': 900.0, 'duracion_s': (4.0, 10.0)},
+    'corte_eeg':        {'cada_s': 900.0, 'duracion_s': (1.0, 5.0), 'recrear_desde_s': 3.0},
+    'rafaga_parpadeos': {'cada_s': 900.0, 'duracion_s': (2.0, 4.0), 'por_segundo': 3.0},
+    'canal':            {'cada_s': 1200.0, 'duracion_s': (4.0, 10.0)},
+    'perdida_bt':       {'cada_s': 450.0, 'duracion_s': (0.02, 0.2)},
     'ack_perdido':      {'p': 0.002},
     'pico_latencia':    {'p': 0.003, 'ms': (80.0, 300.0)},
 }

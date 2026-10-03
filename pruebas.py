@@ -531,7 +531,7 @@ def plan_caos():
     from caos import PlanCaos
     a, b, c = PlanCaos(7), PlanCaos(7), PlanCaos(8)
     ts = np.arange(0, 600, 0.1)
-    for tipo in ('corte_eeg', 'rafaga_parpadeos', 'canal'):
+    for tipo in ('corte_eeg', 'rafaga_parpadeos', 'canal', 'perdida_bt'):
         ea = [a.activo(tipo, t) for t in ts]
         assert ea == [b.activo(tipo, t) for t in ts[::-1]][::-1], tipo      # no depende del orden de consulta
         ev = {e for e in ea if e}
@@ -550,7 +550,7 @@ def plan_caos():
     fallas, horas = 0, 0
     for semilla in range(20):
         leve = PlanCaos(semilla, config.CAOS['leve'])
-        for tipo in ('corte_eeg', 'rafaga_parpadeos', 'canal'):
+        for tipo in ('corte_eeg', 'rafaga_parpadeos', 'canal', 'perdida_bt'):
             leve.activo(tipo, 3600.0)
             fallas += sum(1 for e in leve._lineas[tipo]['ev'] if e[0] < 3600.0)
         pasos = int(3600 / config.CICLO_S)
@@ -592,6 +592,10 @@ def caos_sim():
     assert n_pausas >= 3, n_pausas
     assert sum(1 for f in orq.filas if f['estado'] != 'PAUSA_SEGURA') == 360
     assert set(orq.excluidos) <= set(config.MOTIVOS_EXCLUSION), orq.excluidos
+    # perdidas de Bluetooth: las epocas que las cruzan quedan invalidas; la ventana de MI las tolera
+    assert orq.b.epocas_en_perdida, 'el caos estandar debe producir epocas cruzadas por una perdida de Bluetooth'
+    for seq in orq.b.epocas_en_perdida:
+        assert por_seq[seq]['excluido'] == 'epoca_invalida', por_seq[seq]
     leve = _sesion_caos(0, caos=1, nivel='leve')              # el nivel leve excluye mucho menos
     assert 0 < sum(leve.excluidos.values()) < sum(orq.excluidos.values()) / 3, (leve.excluidos, orq.excluidos)
     return f'360 pasos y {n_pausas} pausas sin excepcion; excluidos {orq.excluidos}'
@@ -782,6 +786,56 @@ def inicio_movimiento():
     assert r['detectados'] == 6 and 30 <= r['mediana_ms'] <= 150 and r['veredicto'].startswith('OK'), r
     return (f'inicio por telemetria con error maximo {1000 * np.abs(errores).max():.1f} ms; latencia mecanica '
             f'mediana {1000 * np.median(o.latencias_mecanicas):.0f} ms; sin telemetria: ACK + latencia media')
+
+
+@prueba
+def rechazo_por_cabeza():
+    """Movimiento de cabeza (giroscopio): la epoca del ErrP y la ventana de MI con movimiento se
+    marcan como artefacto (el agente no aprende de ese paso y el decoder no se recentra), sin
+    pausa; en calibracion, el ensayo se repite."""
+    import types
+    import orquestador
+    import hardware as hw
+    rng = np.random.default_rng(0)
+    y = np.repeat([0, 1], 30)
+    X = rng.normal(size=(60, 8, 500)); X[y == 1, 1] *= 2.0
+    dec = hw.DecoderIM().ajustar(X, y)
+    det = hw.DetectorErrP().ajustar(rng.normal(0, 3, (60, 8, 250)), np.r_[np.ones(20, int), np.zeros(40, int)])
+
+    class EEG:
+        giro = 0.0
+        fs = 250.0
+
+        def movimiento(self, t0, t1):
+            return self.giro
+
+        def epoca(self, t0):
+            return rng.normal(0, 3, (8, 250))
+
+        def ventana(self, segundos, *a):
+            return rng.normal(size=(8, int(segundos * 250))), None
+
+        def ultimo_t(self):
+            return 100.0
+
+        def lecturas(self):
+            return {'canales': {}}
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.hw, b.eeg, b.decoder, b.detector, b.coadapta = hw, EEG(), dec, det, None
+    p, art, exc = b.errp(1, 100.0, False, 0.1)
+    assert not art and exc == ''
+    b.eeg.giro = 80.0                                        # asiente con la cabeza
+    p, art, exc = b.errp(2, 100.0, False, 0.1)
+    assert art and exc == '', (art, exc)
+    M0 = dec.M.copy()
+    phi = b.phi(1)
+    assert phi is not None and np.array_equal(dec.M, M0) and b.mov_mi   # decide, pero no se recentra
+    b.eeg.giro = 0.0
+    b.phi(1)
+    assert not np.array_equal(dec.M, M0) and not b.mov_mi
+    b.eeg.giro = 80.0
+    assert b._cabeza_movida(99.0, 100.0) and 'cabeza' in b.falla
+    return f'con giro de 80 grados/s: epoca marcada como artefacto y sin recentrado (umbral {config.GIRO_ARTEFACTO_DPS:.0f} grados/s)'
 
 
 @prueba
@@ -1600,7 +1654,7 @@ def lazo_real_caos():
 RAPIDAS = ['contrato', 'vigilante', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
-           'inicio_movimiento', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'inicio_movimiento', 'rechazo_por_cabeza', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
@@ -1619,7 +1673,7 @@ def main():
     for nombre in nombres:
         globals()[nombre]()
     ok = sum(RESULTADOS)
-    print(f'\n{ok}/{len(RESULTADOS)} pruebas pasaron')
+    print(f'\n{ok}/{len(RESULTADOS)} pruebas pasaron la prueba: {100 * ok / len(RESULTADOS):.1f}%')
     sys.exit(0 if ok == len(RESULTADOS) else 1)
 
 

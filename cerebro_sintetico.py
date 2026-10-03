@@ -281,11 +281,16 @@ class Cerebro:
 
     def entregadas(self, ts):
         """Mascara de las muestras que SI llegan por Bluetooth (False = perdida; el contador
-        del casco sigue contando). --perdidas-bt da las perdidas por minuto."""
+        del casco sigue contando). --perdidas-bt da las perdidas por minuto; el caos agrega las
+        suyas (perdida_bt)."""
         r, por_min = self.rng_cuerpo, getattr(self.a, 'perdidas_bt', 0.0)
         if por_min > 0 and ts[-1] > self._fin_perdida and r.random() < por_min / 60 * len(ts) / FS:
             self._fin_perdida = ts[0] + r.uniform(0.02, 0.2)
-        return ts > self._fin_perdida
+        llega = ts > self._fin_perdida
+        t_caos = self.t_caos(ts[0])
+        if self.caos is not None and t_caos is not None:
+            llega &= np.array([not self.caos.activo('perdida_bt', t_caos + (t - ts[0])) for t in ts])
+        return llega
 
 
 # ======================================================================

@@ -4,7 +4,7 @@ PlanCaos no rompe nada por si mismo: solo responde "que falla toca ahora". Lo
 consultan el gemelo (cerebro_sintetico.py --caos), OrtesisSimulada y BackendSim
 (orquestador.py ... --caos), cada uno con su propio reloj.
 
-  - Fallas por tiempo (corte_eeg, rafaga_parpadeos, canal): una linea de tiempo
+  - Fallas por tiempo (corte_eeg, rafaga_parpadeos, canal, perdida_bt): una linea de tiempo
     por tipo, generada con su propio generador. La respuesta no depende de
     cuando ni en que orden se pregunte.
   - Fallas por paso (ack_perdido, pico_latencia): dependen solo de
@@ -16,7 +16,7 @@ import numpy as np
 
 import config
 
-_TIPOS = ['corte_eeg', 'rafaga_parpadeos', 'canal', 'ack_perdido', 'pico_latencia']
+_TIPOS = ['corte_eeg', 'rafaga_parpadeos', 'canal', 'ack_perdido', 'pico_latencia', 'perdida_bt']
 INICIO_S = 10.0          # sin fallas por tiempo antes de este instante
 SEPARACION_S = 5.0       # minimo entre dos fallas del mismo tipo
 

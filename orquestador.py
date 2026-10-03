@@ -205,6 +205,7 @@ class BackendSim:
                      if getattr(a, 'caos', None) is not None else None)
         self.acks_perdidos, self.ultima_latencia = 0, 0.0
         self.epocas_en_corte = []                  # seq de las epocas que tocaron un corte de EEG
+        self.epocas_en_perdida = []                # seq de las epocas cruzadas por una perdida de Bluetooth
 
     def preparar(self, orq):
         orq.fsm.ir_a('CAL_MI')
@@ -280,6 +281,11 @@ class BackendSim:
         if any(self._activa('corte_eeg', t) for t in momentos):
             self.epocas_en_corte.append(seq)
             return float('nan'), True, 'epoca_invalida'
+        # una perdida de Bluetooth (20 a 200 ms) dentro de la epoca: hueco de mas de 20 ms
+        densos = self.t_virtual + np.arange(0.0, self.EPOCA_S + 1e-9, 0.01)
+        if any(self._activa('perdida_bt', t) for t in densos):
+            self.epocas_en_perdida.append(seq)
+            return float('nan'), True, 'epoca_invalida'
         if any(self._activa('canal', t) or self._activa('rafaga_parpadeos', t) for t in momentos):
             return p, True, ''                     # la epoca existe, pero es un artefacto
         return p, art, ''
@@ -287,7 +293,7 @@ class BackendSim:
     def instantanea(self):
         return {'seq': self.seq, 't': self.t, 't_virtual': self.t_virtual,
                 'acks_perdidos': self.acks_perdidos, 'ultima_latencia': self.ultima_latencia,
-                'epocas_en_corte': list(self.epocas_en_corte),
+                'epocas_en_corte': list(self.epocas_en_corte), 'epocas_en_perdida': list(self.epocas_en_perdida),
                 'rng_piloto': self.piloto.rng.bit_generator.state,
                 'detector_piloto': [self.piloto.sens, self.piloto.espec]}
 
@@ -295,6 +301,7 @@ class BackendSim:
         self.seq, self.t, self.t_virtual = d['seq'], d['t'], d['t_virtual']
         self.acks_perdidos, self.ultima_latencia = d['acks_perdidos'], d['ultima_latencia']
         self.epocas_en_corte = list(d['epocas_en_corte'])
+        self.epocas_en_perdida = list(d.get('epocas_en_perdida', []))
         self.piloto.rng.bit_generator.state = d['rng_piloto']
         self.piloto.sens, self.piloto.espec = d['detector_piloto']
 
@@ -385,6 +392,14 @@ class BackendReal:
             return 'nogo'
         return 'go' if n >= n_max and lo >= umbral else ('fin' if n >= n_max else 'seguir')
 
+    def _cabeza_movida(self, t0, t1):
+        """True (y deja el motivo en self.falla) si el giroscopio vio mover la cabeza entre t0 y t1."""
+        giro = self.eeg.movimiento(t0, t1) if hasattr(self.eeg, 'movimiento') else None
+        if giro is not None and giro > config.GIRO_ARTEFACTO_DPS:
+            self.falla = f'movimiento de cabeza ({giro:.0f} grados/s)'
+            return True
+        return False
+
     def _canales_malos(self):
         """True (y deja el motivo en self.falla) si algun electrodo esta despegado ahora."""
         malos = self.eeg.lecturas()['canales']
@@ -411,7 +426,8 @@ class BackendReal:
                 aviso('    >>> CERRAR: imagina que cierras la mano' if clase
                       else '    >>> RELAJA: imagina que abres y relajas la mano')
                 time.sleep(self.a.duracion_mi)
-                if self._canales_malos():
+                fin = self.eeg.ultimo_t()
+                if self._canales_malos() or self._cabeza_movida(fin - config.VENTANA_MI, fin):
                     return None
                 self.falla = 'EEG sin ventana fresca y continua'
                 return self._ventana_mi()
@@ -470,7 +486,7 @@ class BackendReal:
                 t0, _ = self.ortesis.inicio_movimiento(seq, t_ack)    # la epoca, al inicio real
                 orq.salidas.marcador(config.m_paso_inicio(seq), t0)
                 e = self.eeg.epoca(t0)
-                if self._canales_malos():
+                if self._canales_malos() or self._cabeza_movida(t0 + config.EPOCA_ERRP[0], t0 + config.EPOCA_ERRP[1]):
                     return None
                 self.falla = 'epoca incompleta o con un corte de EEG'
                 return e
@@ -572,7 +588,13 @@ class BackendReal:
 
     def phi(self, meta):
         v = self._ventana_mi()
-        return None if v is None else self.decoder.phi(v)
+        if v is None:
+            return None
+        fin = self.eeg.ultimo_t()
+        # con la cabeza en movimiento se decide igual (sin pausa), pero no se recentra el decoder
+        # y el paso queda como artefacto (ver errp)
+        self.mov_mi = self._cabeza_movida(fin - config.VENTANA_MI, fin)
+        return self.decoder.phi(v, actualizar_centro=not self.mov_mi)
 
     def mover(self, fraccion):
         return self.ortesis.mover(fraccion)
@@ -586,6 +608,8 @@ class BackendReal:
         if e is None:
             return float('nan'), True, 'epoca_invalida'
         p, art = self.detector.p_error(e), self.detector.artefacto(e)
+        art = art or getattr(self, 'mov_mi', False) or \
+            self._cabeza_movida(t_ack + config.EPOCA_ERRP[0], t_ack + config.EPOCA_ERRP[1])
         if getattr(self, 'coadapta', None) is not None:
             self.coadapta.observar(e, erroneo, p, art)   # puntuada antes de entrenar con ella
             self.detector = self.coadapta.actual
