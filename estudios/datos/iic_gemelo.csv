@@ -1,0 +1,177 @@
+lote,sujeto,semilla,movimientos,ajenos,embodiment,iic
+embodiment_gemelo.py,0,0,120,12,0.0,0.19
+embodiment_gemelo.py,0,1,120,12,0.2,0.26
+embodiment_gemelo.py,0,2,120,12,0.5,0.11
+embodiment_gemelo.py,0,3,120,12,0.8,-0.13
+embodiment_gemelo.py,1,100,120,12,0.0,-0.01
+embodiment_gemelo.py,1,101,120,12,0.2,0.22
+embodiment_gemelo.py,1,102,120,12,0.5,0.39
+embodiment_gemelo.py,1,103,120,12,0.8,-0.45
+embodiment_gemelo.py,2,200,120,12,0.0,0.15
+embodiment_gemelo.py,2,201,120,12,0.2,-0.09
+embodiment_gemelo.py,2,202,120,12,0.5,0.14
+embodiment_gemelo.py,2,203,120,12,0.8,0.83
+embodiment_gemelo.py,3,300,120,12,0.0,0.71
+embodiment_gemelo.py,3,301,120,12,0.2,0.53
+embodiment_gemelo.py,3,302,120,12,0.5,0.36
+embodiment_gemelo.py,3,303,120,12,0.8,0.18
+embodiment_gemelo.py,4,400,120,12,0.0,0.35
+embodiment_gemelo.py,4,401,120,12,0.2,-0.09
+embodiment_gemelo.py,4,402,120,12,0.5,-0.34
+embodiment_gemelo.py,4,403,120,12,0.8,-0.14
+embodiment_gemelo.py,5,500,120,12,0.0,0.24
+embodiment_gemelo.py,5,501,120,12,0.2,0.04
+embodiment_gemelo.py,5,502,120,12,0.5,-0.14
+embodiment_gemelo.py,5,503,120,12,0.8,-0.11
+embodiment_gemelo.py,6,600,120,12,0.0,0.55
+embodiment_gemelo.py,6,601,120,12,0.2,0.08
+embodiment_gemelo.py,6,602,120,12,0.5,-0.17
+embodiment_gemelo.py,6,603,120,12,0.8,-0.0
+embodiment_gemelo.py,7,700,120,12,0.0,-0.02
+embodiment_gemelo.py,7,701,120,12,0.2,-0.07
+embodiment_gemelo.py,7,702,120,12,0.5,0.69
+embodiment_gemelo.py,7,703,120,12,0.8,0.02
+embodiment_gemelo.py,8,800,120,12,0.0,0.3
+embodiment_gemelo.py,8,801,120,12,0.2,0.33
+embodiment_gemelo.py,8,802,120,12,0.5,0.18
+embodiment_gemelo.py,8,803,120,12,0.8,-0.03
+embodiment_gemelo.py,9,900,120,12,0.0,0.12
+embodiment_gemelo.py,9,901,120,12,0.2,-0.04
+embodiment_gemelo.py,9,902,120,12,0.5,-0.46
+embodiment_gemelo.py,9,903,120,12,0.8,-0.24
+embodiment_gemelo.py,10,1000,120,12,0.0,-0.34
+embodiment_gemelo.py,10,1001,120,12,0.2,0.38
+embodiment_gemelo.py,10,1002,120,12,0.5,0.36
+embodiment_gemelo.py,10,1003,120,12,0.8,0.48
+embodiment_gemelo.py,11,1100,120,12,0.0,0.08
+embodiment_gemelo.py,11,1101,120,12,0.2,0.23
+embodiment_gemelo.py,11,1102,120,12,0.5,0.39
+embodiment_gemelo.py,11,1103,120,12,0.8,0.21
+embodiment_gemelo.py,12,1200,120,12,0.0,-0.51
+embodiment_gemelo.py,12,1201,120,12,0.2,-0.19
+embodiment_gemelo.py,12,1202,120,12,0.5,0.1
+embodiment_gemelo.py,12,1203,120,12,0.8,-0.2
+embodiment_gemelo.py,13,1300,120,12,0.0,0.11
+embodiment_gemelo.py,13,1301,120,12,0.2,0.26
+embodiment_gemelo.py,13,1302,120,12,0.5,0.56
+embodiment_gemelo.py,13,1303,120,12,0.8,0.82
+embodiment_gemelo.py,14,1400,120,12,0.0,-0.3
+embodiment_gemelo.py,14,1401,120,12,0.2,0.79
+embodiment_gemelo.py,14,1402,120,12,0.5,0.42
+embodiment_gemelo.py,14,1403,120,12,0.8,0.74
+embodiment_gemelo.py,15,1500,120,12,0.0,0.36
+embodiment_gemelo.py,15,1501,120,12,0.2,0.47
+embodiment_gemelo.py,15,1502,120,12,0.5,-0.05
+embodiment_gemelo.py,15,1503,120,12,0.8,0.15
+embodiment_gemelo.py,0,0,300,30,0.0,0.12
+embodiment_gemelo.py,0,1,300,30,0.2,0.2
+embodiment_gemelo.py,0,2,300,30,0.5,0.23
+embodiment_gemelo.py,0,3,300,30,0.8,0.16
+embodiment_gemelo.py,1,100,300,30,0.0,0.16
+embodiment_gemelo.py,1,101,300,30,0.2,0.21
+embodiment_gemelo.py,1,102,300,30,0.5,0.2
+embodiment_gemelo.py,1,103,300,30,0.8,-0.14
+embodiment_gemelo.py,2,200,300,30,0.0,0.15
+embodiment_gemelo.py,2,201,300,30,0.2,-0.23
+embodiment_gemelo.py,2,202,300,30,0.5,0.19
+embodiment_gemelo.py,2,203,300,30,0.8,0.63
+embodiment_gemelo.py,3,300,300,30,0.0,0.18
+embodiment_gemelo.py,3,301,300,30,0.2,0.15
+embodiment_gemelo.py,3,302,300,30,0.5,-0.05
+embodiment_gemelo.py,3,303,300,30,0.8,0.29
+embodiment_gemelo.py,4,400,300,30,0.0,-0.01
+embodiment_gemelo.py,4,401,300,30,0.2,0.23
+embodiment_gemelo.py,4,402,300,30,0.5,-0.01
+embodiment_gemelo.py,4,403,300,30,0.8,0.1
+embodiment_gemelo.py,5,500,300,30,0.0,0.16
+embodiment_gemelo.py,5,501,300,30,0.2,0.1
+embodiment_gemelo.py,5,502,300,30,0.5,0.02
+embodiment_gemelo.py,5,503,300,30,0.8,0.19
+embodiment_gemelo.py,6,600,300,30,0.0,0.35
+embodiment_gemelo.py,6,601,300,30,0.2,0.03
+embodiment_gemelo.py,6,602,300,30,0.5,-0.07
+embodiment_gemelo.py,6,603,300,30,0.8,0.19
+embodiment_gemelo.py,7,700,300,30,0.0,0.01
+embodiment_gemelo.py,7,701,300,30,0.2,-0.25
+embodiment_gemelo.py,7,702,300,30,0.5,0.57
+embodiment_gemelo.py,7,703,300,30,0.8,0.24
+embodiment_gemelo.py,8,800,300,30,0.0,-0.06
+embodiment_gemelo.py,8,801,300,30,0.2,0.24
+embodiment_gemelo.py,8,802,300,30,0.5,0.33
+embodiment_gemelo.py,8,803,300,30,0.8,-0.1
+embodiment_gemelo.py,9,900,300,30,0.0,-0.14
+embodiment_gemelo.py,9,901,300,30,0.2,0.2
+embodiment_gemelo.py,9,902,300,30,0.5,0.26
+embodiment_gemelo.py,9,903,300,30,0.8,0.27
+embodiment_gemelo.py,10,1000,300,30,0.0,0.02
+embodiment_gemelo.py,10,1001,300,30,0.2,0.15
+embodiment_gemelo.py,10,1002,300,30,0.5,0.13
+embodiment_gemelo.py,10,1003,300,30,0.8,0.37
+embodiment_gemelo.py,11,1100,300,30,0.0,0.32
+embodiment_gemelo.py,11,1101,300,30,0.2,-0.01
+embodiment_gemelo.py,11,1102,300,30,0.5,0.29
+embodiment_gemelo.py,11,1103,300,30,0.8,0.47
+embodiment_gemelo.py,12,1200,300,30,0.0,-0.1
+embodiment_gemelo.py,12,1201,300,30,0.2,-0.05
+embodiment_gemelo.py,12,1202,300,30,0.5,0.16
+embodiment_gemelo.py,12,1203,300,30,0.8,-0.1
+embodiment_gemelo.py,13,1300,300,30,0.0,0.18
+embodiment_gemelo.py,13,1301,300,30,0.2,0.02
+embodiment_gemelo.py,13,1302,300,30,0.5,0.34
+embodiment_gemelo.py,13,1303,300,30,0.8,0.38
+embodiment_gemelo.py,14,1400,300,30,0.0,0.32
+embodiment_gemelo.py,14,1401,300,30,0.2,0.34
+embodiment_gemelo.py,14,1402,300,30,0.5,0.56
+embodiment_gemelo.py,14,1403,300,30,0.8,0.04
+embodiment_gemelo.py,15,1500,300,30,0.0,0.27
+embodiment_gemelo.py,15,1501,300,30,0.2,0.13
+embodiment_gemelo.py,15,1502,300,30,0.5,-0.08
+embodiment_gemelo.py,15,1503,300,30,0.8,0.37
+semillas 5000+,0,5000,300,30,0.0,-0.22
+semillas 5000+,0,5008,300,30,0.8,0.34
+semillas 5000+,1,5010,300,30,0.0,-0.3
+semillas 5000+,1,5018,300,30,0.8,0.3
+semillas 5000+,2,5020,300,30,0.0,-0.18
+semillas 5000+,2,5028,300,30,0.8,0.17
+semillas 5000+,3,5030,300,30,0.0,0.34
+semillas 5000+,3,5038,300,30,0.8,0.52
+semillas 5000+,4,5040,300,30,0.0,0.06
+semillas 5000+,4,5048,300,30,0.8,0.35
+semillas 5000+,5,5050,300,30,0.0,-0.04
+semillas 5000+,5,5058,300,30,0.8,0.26
+semillas 5000+,6,5060,300,30,0.0,-0.31
+semillas 5000+,6,5068,300,30,0.8,0.25
+semillas 5000+,7,5070,300,30,0.0,-0.12
+semillas 5000+,7,5078,300,30,0.8,0.56
+semillas 5000+,8,5080,300,30,0.0,0.17
+semillas 5000+,8,5088,300,30,0.8,0.27
+semillas 5000+,9,5090,300,30,0.0,-0.02
+semillas 5000+,9,5098,300,30,0.8,0.42
+semillas 5000+,10,5100,300,30,0.0,0.45
+semillas 5000+,10,5108,300,30,0.8,0.46
+semillas 5000+,11,5110,300,30,0.0,-0.1
+semillas 5000+,11,5118,300,30,0.8,-0.05
+semillas 5000+,12,5120,300,30,0.0,-0.09
+semillas 5000+,12,5128,300,30,0.8,0.31
+semillas 5000+,13,5130,300,30,0.0,-0.2
+semillas 5000+,13,5138,300,30,0.8,0.1
+semillas 5000+,14,5140,300,30,0.0,0.07
+semillas 5000+,14,5148,300,30,0.8,0.24
+semillas 5000+,15,5150,300,30,0.0,0.08
+semillas 5000+,15,5158,300,30,0.8,0.19
+semillas 5000+,16,5160,300,30,0.0,0.02
+semillas 5000+,16,5168,300,30,0.8,0.23
+semillas 5000+,17,5170,300,30,0.0,-0.02
+semillas 5000+,17,5178,300,30,0.8,0.5
+semillas 5000+,18,5180,300,30,0.0,0.08
+semillas 5000+,18,5188,300,30,0.8,0.14
+semillas 5000+,19,5190,300,30,0.0,0.07
+semillas 5000+,19,5198,300,30,0.8,0.25
+semillas 5000+,20,5200,300,30,0.0,-0.26
+semillas 5000+,20,5208,300,30,0.8,0.33
+semillas 5000+,21,5210,300,30,0.0,-0.17
+semillas 5000+,21,5218,300,30,0.8,0.45
+semillas 5000+,22,5220,300,30,0.0,0.0
+semillas 5000+,22,5228,300,30,0.8,0.14
+semillas 5000+,23,5230,300,30,0.0,0.34
+semillas 5000+,23,5238,300,30,0.8,0.3

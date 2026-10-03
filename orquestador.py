@@ -78,6 +78,17 @@ class Salidas:
         self.paso = StreamOutlet(config.crear_info('Paso'))
         self.est = StreamOutlet(config.crear_info('Estado'))
         self.marcadores = []                       # copia local, para evaluar y probar
+        self.registro = None                       # archivo con cada evento de Estado (plan B)
+
+    def registrar_en(self, ruta):
+        """Desde ahora cada evento de Estado tambien se guarda en ruta, con su hora, para poder
+        repetir la sesion en el tablero (repetir_sesion.py)."""
+        self.registro = open(ruta, 'a', encoding='utf-8')
+
+    def cerrar(self):
+        if self.registro is not None:
+            self.registro.close()
+            self.registro = None
 
     def marcador(self, texto, t=None):
         self.marcadores.append(texto)
@@ -88,6 +99,32 @@ class Salidas:
 
     def estado(self, **datos):
         self.est.push_sample([json.dumps(datos, default=float)])
+        if self.registro is not None:              # un fallo al grabar nunca detiene el lazo
+            try:
+                self.registro.write(json.dumps({'t': round(local_clock(), 3), 'evento': datos}, default=float) + '\n')
+                self.registro.flush()
+            except (OSError, ValueError):
+                self.registro = None
+
+
+def edad_modelos_h():
+    """Horas desde que se calibro el mas viejo de los dos modelos guardados, o None si falta alguno."""
+    rutas = [config.MODELOS / n for n in ('decoder_im.pkl', 'detector_errp.pkl')]
+    if not all(r.exists() for r in rutas):
+        return None
+    return (time.time() - min(r.stat().st_mtime for r in rutas)) / 3600
+
+
+def texto_edad_modelos():
+    """Hace cuanto se calibraron los modelos, con un aviso fuerte si no son de hoy."""
+    h = edad_modelos_h()
+    if h is None:
+        return 'no hay modelos guardados'
+    txt = f'calibrados hace {60 * h:.0f} min' if h < 1 else f'calibrados hace {h:.1f} h'
+    if h > config.MODELOS_EDAD_AVISO_H:
+        txt += (f'. OJO: tienen mas de {config.MODELOS_EDAD_AVISO_H:.0f} h. Si no son de ESTE piloto y de ESTA '
+                f'colocacion del casco (o son del gemelo), calibra de nuevo sin --saltar-calibracion')
+    return txt
 
 
 def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
@@ -277,6 +314,9 @@ class BackendSim:
 
     def inicio(self, seq, t_ack):
         return t_ack, 'ack'
+
+    def sin_movimiento(self):
+        pass
 
     def centrar(self, angulo):
         pass
@@ -492,13 +532,21 @@ class BackendReal:
             n += 1
 
             def tomar():
+                d = obj if not err else 1 - obj
+                paso = 0.15 if d else -0.15
+                if not 0.1 - 1e-9 <= theta[0] + paso <= 0.9 + 1e-9:
+                    # el movimiento no cabe en el recorrido: la ortesis vuelve al centro antes de
+                    # la senal. Sin movimiento no hay nada que ver y la epoca no tendria ErrP
+                    theta[0] = config.PUNTO_MEDIO
+                    orq.salidas.marcador(config.CENTRADO)
+                    self.ortesis.mover(theta[0], config.CENTRADO_DURACION_MS)
+                    time.sleep(min(self.a.espera, config.CENTRADO_DURACION_MS / 1000))
                 aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
                 orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
                 orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
                 time.sleep(self.a.espera)
-                d = obj if not err else 1 - obj
-                theta[0] = float(np.clip(theta[0] + (0.15 if d else -0.15), 0.1, 0.9))
-                orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, 0.15 if d else -0.15])
+                theta[0] = float(np.clip(theta[0] + paso, 0.1, 0.9))
+                orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, paso])
                 seq, t_ack, _ = self.ortesis.mover(theta[0])
                 if t_ack is None:
                     self.falla = 'la ortesis no confirmo el movimiento'
@@ -553,8 +601,15 @@ class BackendReal:
         if self.a.saltar_calibracion:
             self.decoder = self.hw.cargar('decoder_im.pkl')
             self.detector = self.hw.cargar('detector_errp.pkl')
-            aviso(f'Modelos cargados: MI BA {self.decoder.ba:.2f}, '
+            aviso(f'Modelos cargados ({texto_edad_modelos()}): MI BA {self.decoder.ba:.2f}, '
                   f'ErrP sens {self.detector.sens:.2f} espec {self.detector.espec:.2f}')
+        elif getattr(self.a, 'solo_errp', False):    # el decoder ya esta: se repite solo ErrP
+            self.decoder = self.hw.cargar('decoder_im.pkl')
+            aviso(f'Decoder de MI cargado (BA {self.decoder.ba:.2f}); se repite solo la calibracion de ErrP.')
+            orq.fsm.ir_a('CAL_MI')
+            orq.fsm.ir_a('CAL_ERRP')
+            if not self.calibrar_errp(orq):
+                return None
         else:
             orq.fsm.ir_a('CAL_MI')
             if not self.calibrar_mi(orq):
@@ -574,6 +629,9 @@ class BackendReal:
         """Con los datos de calibracion, el detector sigue aprendiendo en el lazo."""
         ruta = config.MODELOS / 'detector_errp_datos.npz'
         self.coadapta = None
+        if getattr(self.a, 'sin_coadaptativo', False):
+            aviso('  (detector co-adaptativo apagado con --sin-coadaptativo: el detector no cambia en el lazo)')
+            return
         if not ruta.exists():
             aviso('  (sin datos de calibracion del detector guardados: no se co-adapta)')
             return
@@ -650,6 +708,11 @@ class BackendReal:
         """Inicio real del movimiento (telemetria) o, si no hay, ACK + latencia mecanica media."""
         return self.ortesis.inicio_movimiento(seq, t_ack)
 
+    def sin_movimiento(self):
+        """La ortesis no se movio: no hay epoca que esperar, pero el paso dura lo mismo (asi la
+        ventana de MI del paso siguiente no es la misma que la de este)."""
+        time.sleep(config.EPOCA_ERRP[1])
+
     def errp(self, seq, t_ack, erroneo, delta):
         e = self.eeg.epoca(t_ack)
         if e is None:
@@ -666,7 +729,7 @@ class BackendReal:
         self.ortesis.cerrar()
         self.eeg.cerrar()
         if getattr(self, 'coadapta', None) is not None:
-            self.coadapta.esperar()
+            self.coadapta.esperar(timeout=10.0)      # un re-entrenamiento colgado no impide cerrar
 
 
 # ======================================================================
@@ -684,6 +747,7 @@ class Orquestador:
         self.vigilante = Vigilante()
         self.avisos_salud = []                       # lo que se dijo en consola sobre la salud
         self.excluidos, self.error_post = {}, None   # los llena evaluar()
+        self.sin_movimiento = 0                      # pasos que no movieron la ortesis (lo llena evaluar())
         # Tarea 2 (EXPLORATORIO): N1 de los movimientos propios y ajenos -> IIC
         self.embodiment = emb.IndiceEmbodiment(semilla=a.semilla)
         self.iic, self.con_ajenos = self.embodiment.estimar(), False
@@ -696,6 +760,7 @@ class Orquestador:
             self.iic = self.embodiment.estimar()
             self.f_csv = open(self.ruta_csv, 'a', newline='')
             self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
+            self.salidas.registrar_en(self.ruta_csv.with_name(self.ruta_csv.stem + config.SUFIJO_ESTADO))
             return
         base = datetime.now().strftime(f'sesion_{a.backend}_%Y%m%d_%H%M%S')
         self.ruta_csv, k = config.RESULTADOS / f'{base}.csv', 1
@@ -705,6 +770,7 @@ class Orquestador:
         self.f_csv = open(self.ruta_csv, 'w', newline='')
         self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
         self.csv.writeheader()
+        self.salidas.registrar_en(self.ruta_csv.with_name(self.ruta_csv.stem + config.SUFIJO_ESTADO))
 
     def preparar(self):
         inst = self.inst
@@ -846,13 +912,20 @@ class Orquestador:
             return False
         dec = self.agente.decidir(phi, self.desplazamiento)
         self.salidas.publicar_paso(dec)
-        self.angulo = float(np.clip(self.angulo + dec.delta, 0, 1))
+        antes = self.angulo
+        self.angulo = float(np.clip(antes + dec.delta, 0, 1))
+        # en el tope la ortesis no se mueve (o menos de lo que se percibe): nadie ve nada
+        quieto = config.IGNORAR_SIN_MOVIMIENTO and abs(self.angulo - antes) < config.PASO_VISIBLE - 1e-9
         seq, t_ack, lat = self.b.mover(self.angulo)
         erroneo = dec.direccion != meta
 
         alineacion, n1 = '', ''
         if t_ack is None:                            # sin ACK no hay instante del movimiento: sin epoca
             p_errp, art, excluido, t_ack = float('nan'), True, 'sin_ack', local_clock()
+        elif quieto:                                 # sin movimiento visible no hay ErrP que leer:
+            self.salidas.marcador(config.m_paso_quieto(seq), t_ack)   # ni epoca, ni N1, ni aprendizaje
+            p_errp, art, excluido, alineacion = float('nan'), True, '', config.SIN_MOVIMIENTO
+            self.b.sin_movimiento()
         else:
             self.salidas.marcador(config.m_paso_ack(seq), t_ack)   # estampado a la hora del ACK
             t_ini, alineacion = self.b.inicio(seq, t_ack)           # la epoca, al inicio real del movimiento
@@ -1032,6 +1105,10 @@ class Orquestador:
             self.iic = self.embodiment.estimar()
             aviso('  ' + emb.texto(self.iic))
             self.salidas.estado(tipo='iic', iic=self.iic)
+        self.sin_movimiento = sum(f['alineacion'] == config.SIN_MOVIMIENTO for f in validas)
+        if self.sin_movimiento:
+            aviso(f'  pasos sin movimiento (la ortesis ya estaba en el tope): {self.sin_movimiento} de {len(validas)}; '
+                  f'cuentan como decision, pero el agente no aprende de ellos')
         if not validas:
             aviso(f'  CSV: {self.ruta_csv}')
             return
@@ -1079,7 +1156,11 @@ class Orquestador:
             ba = co.ba_secuencial()
             aviso(f'  detector en vivo (cada epoca puntuada antes de entrenar con ella): BA '
                   + (f'{ba:.2f}' if ba is not None else 's/d') + f' en {len(co.historial)} epocas; '
-                  f'{co.version - 1} cambios de modelo, {co.descartes} descartados')
+                  f'{co.version - 1} cambios de modelo, {co.descartes} descartados'
+                  + (f'; {len(co.errores)} fallos de la co-adaptacion' if co.errores else '')
+                  + ('' if co.activo else ' (se apago sola)'))
+            for txt in co.errores:
+                aviso(f'    fallo: {txt}')
         aviso(f'  beta final = {self.filas[-1]["beta"]}  |  cambios detectados = {self.agente.n_cambios}'
               f'  |  detector vivo: sens {self.confianza.sens:.2f}, espec {self.confianza.espec:.2f}')
         aviso(f'  CSV: {self.ruta_csv}')
@@ -1091,6 +1172,7 @@ class Orquestador:
 
     def cerrar(self):
         self.f_csv.close()
+        self.salidas.cerrar()
         self.b.cerrar()
 
 
@@ -1154,7 +1236,12 @@ def argumentos(argv=None):
                     help='nombre del flujo LSL de EEG (en UnicornLSL, el que se escribio en la app o el numero de serie)')
     ap.add_argument('--eeg-tipo', dest='eeg_tipo', default=None,
                     help='tipo del flujo LSL de EEG, si se prefiere resolver por tipo')
-    ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true')
+    ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true',
+                    help='usa los modelos guardados (decoder y detector) de la ultima calibracion')
+    ap.add_argument('--solo-errp', dest='solo_errp', action='store_true',
+                    help='usa el decoder de MI guardado y repite solo la calibracion de ErrP (tras un CP3 NO GO)')
+    ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
+                    help='el detector de ErrP no se re-entrena en el lazo (por defecto si lo hace)')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
     # minimo 36 (antes 24): en el gemelo, la BA reportada era optimista en +0.02; con 36, +0.00
     ap.add_argument('--min_mi', type=int, default=36)
@@ -1190,7 +1277,8 @@ def correr(orq, a):
                        perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3, ajenos=True)
             completa = True
         else:
-            aviso('Detenido por NO GO. Plan B: sesion grabada (puente_lsl.py --placa playback).')
+            aviso('Detenido por NO GO. Que hacer en cada caso: docs/DOMINGO.md. Plan B: repetir una sesion '
+                  'grabada en el tablero (python repetir_sesion.py --ultima).')
     except KeyboardInterrupt:
         aviso('\nInterrumpido por el usuario.'
               + (' Para continuar esta sesion: el mismo comando con --reanudar.' if orq.lista else ''))

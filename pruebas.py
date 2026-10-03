@@ -57,6 +57,8 @@ def contrato():
     assert config.COLUMNAS_CSV[-6:] == ['salud', 'excluido', 'alineacion', 'ajeno', 'n1_uv', 'iic']
     # Tarea 2: movimientos ajenos anunciados, fuera del analisis del agente
     assert config.m_paso_ajeno(3) == 'paso_ajeno:3' and config.AVISO_AJENO == 'aviso_ajeno'
+    assert config.m_paso_quieto(3) == 'paso_quieto:3' and config.SIN_MOVIMIENTO == 'sin_movimiento'
+    assert config.IGNORAR_SIN_MOVIMIENTO is True
     assert 'ajeno' in config.MOTIVOS_EXCLUSION and config.CANALES_N1 == config.PAPELES['visual']
     # montaje del Unicorn Hybrid Black y el papel de cada sensor
     assert config.CANALES_EEG == ['Fz', 'C3', 'Cz', 'C4', 'Pz', 'PO7', 'Oz', 'PO8']
@@ -224,8 +226,8 @@ def p_hat_refleja_errp():
     class Calibrada(orquestador.BackendSim):
         def preparar(self, orq):
             return dict(super().preparar(orq), salida='calibrada')
-    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '60', '--pasos_adaptativo', '10',
-                                '--sin_perturbacion'])
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '90', '--pasos_adaptativo', '10',
+                                '--sin_perturbacion'])       # ~1 de cada 3 pasos no mueve la ortesis: sin P_hat
     orq = orquestador.Orquestador(Calibrada(a), a)
     orquestador.correr(orq, a)
     est = [f for f in orq.filas if f['estado'] == 'LAZO_ESTATICO' and f['P_hat'] != '']
@@ -345,8 +347,12 @@ def pausa_segura():
         if f['excluido'] and i:
             assert f['beta'] == filas[i - 1]['beta'], (i, f)
         assert len(f['salud']) == len(config.SUBSISTEMAS) and set(f['salud']) <= set('VARC'), f
-    # el detector calienta sus primeras 15 epocas validas sin emitir marcadores de salud
-    assert [f['salud'][3] for f in filas[:15]] == ['C'] * 15 and filas[20]['salud'][3] != 'C'
+    # el detector calienta sus primeras 15 epocas validas sin emitir marcadores de salud; un paso
+    # que no movio la ortesis no tiene epoca y no cuenta
+    con_epoca = [not f['excluido'] and f['artefacto'] == 0 for f in filas]
+    assert not all(con_epoca[:30]) and filas[0]['salud'][3] == 'C'
+    for i, f in enumerate(filas[:40]):
+        assert (f['salud'][3] == 'C') == (sum(con_epoca[:i]) < 15), (i, f['salud'], sum(con_epoca[:i]))
     i_det = next(i for i, m in enumerate(orq.salidas.marcadores) if m.startswith('salud:detector:'))
     assert sum(m.startswith('paso_ack:') for m in orq.salidas.marcadores[:i_det]) >= 15
     assert orq.fsm.estado == 'EVALUACION'
@@ -419,6 +425,112 @@ def calibracion_repeticiones():
 
 
 # ------------------------------------------------------------ persistencia
+@prueba
+def repetir_sesion():
+    """Plan B: cada sesion deja grabado, junto a su CSV, todo lo que publico en el flujo Estado
+    (con su hora). repetir_sesion.py lo vuelve a publicar: el tablero muestra la sesion igual que
+    en vivo y, si se quiere, la ortesis repite los mismos angulos. Sin casco ni calibracion."""
+    import json
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from pyqtgraph.Qt import QtWidgets
+    import orquestador
+    import repetir_sesion as rs
+    import tablero
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '5', '--pasos_estatico', '20',
+                                '--pasos_adaptativo', '60'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    orquestador.correr(orq, a)
+    ruta = orq.ruta_csv.with_name(orq.ruta_csv.stem + config.SUFIJO_ESTADO)
+    grabados = rs.leer(ruta)
+    tipos = [e['tipo'] for _, e in grabados]
+    assert tipos.count('paso') + tipos.count('ajeno') == len(orq.filas) == 80 and tipos.count('ajeno') == 6, tipos
+    assert tipos.count('cue') == 16 and 'checkpoint' in tipos and 'iic' in tipos
+    assert all(t2 >= t1 for (t1, _), (t2, _) in zip(grabados, grabados[1:]))
+    # la repeticion publica lo mismo y en el mismo orden; la ortesis va a los mismos angulos
+    publicados, angulos, esperas = [], [], []
+
+    class Ortesis:
+        def mover(self, fraccion, dur_ms=None):
+            angulos.append(fraccion)
+            return 1, 0.0, 1.0
+    n = rs.repetir(ruta, velocidad=2.0, completa=True, publicar=publicados.append, ortesis=Ortesis(),
+                   dormir=esperas.append, salida=lambda *_: None)
+    assert n == len(grabados) and publicados == [e for _, e in grabados]
+    assert angulos[:-1] == [e['angulo'] for _, e in grabados if e['tipo'] in ('paso', 'ajeno')]
+    assert angulos[-1] == config.POSICION_SEGURA           # al terminar, la ortesis queda abierta
+    assert all(0 <= d <= rs.ESPERA_MAX_S for d in esperas)
+    assert sum(esperas) <= (grabados[-1][0] - grabados[0][0]) / 2.0 + 1e-6
+    # por defecto empieza en el lazo: se salta la calibracion, pero conserva sus checkpoints
+    corto = []
+    rs.repetir(ruta, velocidad=0, publicar=corto.append, salida=lambda *_: None)
+    assert len(corto) <= len(publicados) and [e['tipo'] for e in corto].count('paso') == tipos.count('paso')
+    # el tablero la muestra completa sin errores
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    t = tablero.Tablero()
+    try:
+        t.timer.stop()
+        for e in publicados:
+            t._procesar(e)
+        t._dibujar()
+        assert 'paso 80' in t.lbl_estado.text(), t.lbl_estado.text()
+    finally:
+        t.close()
+    assert rs.ultima('sim').name == ruta.name
+    return f'{n} eventos grabados y repetidos ({tipos.count("paso")} pasos, {tipos.count("ajeno")} ajenos); el tablero y la ortesis los siguen'
+
+
+@prueba
+def modelos_del_dia():
+    """Dos protecciones para el dia de la demo. (1) Al cargar modelos ya calibrados se dice hace
+    cuanto se calibraron y, si son viejos, se avisa: en modelos/ pueden haber quedado los del
+    gemelo o los de otro piloto. (2) --solo-errp repite solo la calibracion de ErrP con el decoder
+    de MI ya calibrado (si falla el CP3 no hay que repetir los 5 minutos de MI)."""
+    import os
+    import tempfile
+    import types
+    from pathlib import Path
+    import orquestador
+    carpeta, original = Path(tempfile.mkdtemp()), config.MODELOS
+    config.MODELOS = carpeta
+    try:
+        assert orquestador.edad_modelos_h() is None                 # no hay modelos
+        for nombre in ('decoder_im.pkl', 'detector_errp.pkl'):
+            (carpeta / nombre).write_bytes(b'x')
+        assert orquestador.edad_modelos_h() < 0.01
+        viejo = time.time() - 30 * 3600
+        os.utime(carpeta / 'decoder_im.pkl', (viejo, viejo))        # cuenta el mas viejo de los dos
+        assert 29.9 < orquestador.edad_modelos_h() < 30.1
+        assert 'OJO' in orquestador.texto_edad_modelos() and '30' in orquestador.texto_edad_modelos()
+        os.utime(carpeta / 'decoder_im.pkl', None)
+        assert 'OJO' not in orquestador.texto_edad_modelos()
+    finally:
+        config.MODELOS = original
+    # --solo-errp: carga el decoder, no calibra MI y si calibra ErrP
+    a = orquestador.argumentos(['real', '--solo-errp'])
+    assert a.solo_errp and not orquestador.argumentos(['real']).solo_errp
+    llamadas = []
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.a = a
+    b.hw = types.SimpleNamespace(cargar=lambda n: llamadas.append(('cargar', n)) or types.SimpleNamespace(
+        ba=0.8, w0=np.ones(3), c0=0.0))
+    b.revisar = lambda orq: True
+    b.calibrar_mi = lambda orq: llamadas.append('mi') or True
+
+    def calibrar_errp(orq):
+        llamadas.append('errp')
+        b.detector = types.SimpleNamespace(sens=0.7, espec=0.9, p_error_cal=0.3, umbral=0.4)
+        return True
+    b.calibrar_errp = calibrar_errp
+    b.preparar_coadaptacion = lambda orq: llamadas.append('coadapta')
+    estados = []
+    orq = types.SimpleNamespace(fsm=types.SimpleNamespace(ir_a=estados.append))
+    p = b.preparar(orq)
+    assert llamadas == [('cargar', 'decoder_im.pkl'), 'errp', 'coadapta'], llamadas
+    assert estados == ['CAL_MI', 'CAL_ERRP'] and p['umbral'] == 0.4 and p['salida'] == 'calibrada'
+    return 'edad de los modelos con aviso si son viejos; --solo-errp repite solo la calibracion de ErrP'
+
+
 @prueba
 def instantanea_estado():
     """El estado del agente y del ConfianzaDetector sobrevive a un viaje por JSON (la
@@ -644,7 +756,8 @@ def caos_sim():
     assert orq.b.epocas_en_perdida, 'el caos estandar debe producir epocas cruzadas por una perdida de Bluetooth'
     for seq in orq.b.epocas_en_perdida:
         assert por_seq[seq]['excluido'] == 'epoca_invalida', por_seq[seq]
-    leve = _sesion_caos(0, caos=1, nivel='leve')              # el nivel leve excluye mucho menos
+    # el nivel leve excluye mucho menos (semilla 3: con la 1 sus pocas fallas caen en pasos sin epoca)
+    leve = _sesion_caos(0, caos=3, nivel='leve')
     por_fallas = lambda o: sum(n for m, n in o.excluidos.items() if m != 'ajeno')   # los ajenos no son fallas
     assert 0 < por_fallas(leve) < por_fallas(orq) / 3, (leve.excluidos, orq.excluidos)
     return f'360 pasos y {n_pausas} pausas sin excepcion; excluidos {orq.excluidos}'
@@ -803,6 +916,78 @@ def detector_coadaptativo():
 
 
 @prueba
+def coadaptativo_no_detiene_el_lazo():
+    """Nada de lo que falle en el detector co-adaptativo detiene el lazo: un re-entrenamiento que
+    lanza una excepcion, un candidato que falla al puntuar o un aviso de cambio que falla quedan
+    registrados (co.errores) y el lazo sigue con el detector vigente; con 3 fallos seguidos la
+    co-adaptacion se apaga sola. Cerrar no espera para siempre a un re-entrenamiento colgado.
+    --sin-coadaptativo la apaga desde el principio."""
+    import types
+    import hardware as hw
+    import orquestador
+
+    class Falso:                                              # detector de mentira, perfecto
+        umbral, canales, vistas, sens, espec, p_error_cal = 0.5, [0], 'dos', 0.7, 0.9, 0.3
+
+        def p_error(self, e):
+            return float(e[0])
+
+    class Roto(Falso):
+        def p_error(self, e):
+            raise ValueError('modelo corrupto')
+    epoca = lambda err: np.array([0.8 if err else 0.2])
+    det = Falso()
+
+    def lazo(co, n):
+        for k in range(n):                                    # como el lazo: observar nunca lanza
+            err = k % 3 == 0
+            co.observar(epoca(err), err, co.actual.p_error(epoca(err)))
+            co.esperar()
+        return co
+    nuevo = lambda **k: hw.DetectorCoadaptativo(det, [epoca(0), epoca(1)], [0, 1], cada=10, prueba=6, **k)
+    # 1) el re-entrenamiento lanza una excepcion; a la tercera seguida se apaga
+    co = nuevo()
+
+    def revienta(X, y):
+        raise RuntimeError('sin memoria')
+    co._entrenar = revienta
+    lazo(co, 25)
+    assert co.actual is det and co.activo and len(co.errores) == 2 and 'sin memoria' in co.errores[0], co.errores
+    lazo(co, 35)
+    assert len(co.errores) == 3 and not co.activo and co.actual is det, (co.errores, co.activo)
+    assert len(co.historial) == 60                            # la BA en vivo se sigue midiendo
+    # 2) el candidato falla al puntuar una epoca en la prueba en sombra
+    co = nuevo()
+    co._entrenar = lambda X, y: Roto()
+    lazo(co, 15)
+    assert co.actual is det and co.candidato is None and 'modelo corrupto' in co.errores[0], co.errores
+    # 3) el aviso de cambio (umbral, agente, confianza) falla: el cambio de modelo se deshace
+    def aviso_roto(d):
+        if d is not det:
+            raise KeyError('umbral')
+    co = nuevo(al_cambiar=aviso_roto)
+    co._entrenar = lambda X, y: Falso()
+    lazo(co, 20)
+    assert co.actual is det and co.version == 1 and 'umbral' in co.errores[0], (co.version, co.errores)
+    # 4) un re-entrenamiento colgado no bloquea el cierre
+    co = nuevo()
+    co._entrenar = lambda X, y: time.sleep(1.5) or Falso()
+    for k in range(10):
+        co.observar(epoca(k % 3 == 0), k % 3 == 0, 0.2)
+    t0 = time.perf_counter()
+    co.esperar(timeout=0.05)
+    assert time.perf_counter() - t0 < 0.5
+    # 5) el interruptor
+    a = orquestador.argumentos(['real', '--sin-coadaptativo'])
+    assert a.sin_coadaptativo and not orquestador.argumentos(['real']).sin_coadaptativo
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.a, b.hw, b.detector = a, hw, det
+    b.preparar_coadaptacion(types.SimpleNamespace(detector_cambiado=None))
+    assert b.coadapta is None
+    return 'excepcion al entrenar, candidato roto y aviso roto: registrados y el lazo sigue; 3 fallos seguidos lo apagan'
+
+
+@prueba
 def inicio_movimiento():
     """La epoca del ErrP se alinea al inicio REAL del movimiento: la telemetria T del ESP32 dice
     cuando el angulo empieza a cambiar (interpolando entre muestras), y su reloj se convierte al de
@@ -909,6 +1094,55 @@ def cierre_completo():
     assert all(marcas[i + 1] in (config.CUE_CERRAR, config.CUE_RELAJA)
                for i, m in enumerate(marcas) if m == config.CENTRADO)
     return f'ensayos que terminan cerrados del todo: {cierra:.0%}; abiertos del todo: {abre:.0%}'
+
+
+@prueba
+def paso_sin_movimiento():
+    """Un paso que no mueve la ortesis (ya estaba en el tope) no informa: nadie ve nada, asi que
+    no hay ErrP que leer. El agente no aprende de el, no cuenta como deteccion fallida para la
+    confianza del detector ni entra al IIC, y el gemelo no reacciona. Sigue contando como
+    decision (acierto o error) en el analisis."""
+    import orquestador
+    import cerebro_sintetico as cs
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '2', '--pasos_estatico', '40',
+                                '--pasos_adaptativo', '200'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    previa = config.PERTURBACION_LOGITS
+    config.PERTURBACION_LOGITS = 6.0     # perturbacion enorme: la ortesis se va al tope EQUIVOCADO y ahi se queda
+    try:
+        orquestador.correr(orq, a)
+    finally:
+        config.PERTURBACION_LOGITS = previa
+    f = orq.filas
+    quietos = [i for i, x in enumerate(f) if x['alineacion'] == config.SIN_MOVIMIENTO]
+    assert len(quietos) > 10, len(quietos)
+    for i in quietos:
+        x, ant = f[i], f[i - 1]
+        assert x['angulo'] in (0.0, 1.0), x                       # solo pasa en un tope
+        assert x['excluido'] == '' and x['artefacto'] == 1 and x['P_hat'] == '' and x['n1_uv'] == '', x
+        assert x['beta'] == ant['beta'], (i, x['beta'], ant['beta'])                 # no aprendio
+        assert (x['sens_viva'], x['espec_viva']) == (ant['sens_viva'], ant['espec_viva']), (i, x, ant)
+    movidos = [x for x in f if x['alineacion'] != config.SIN_MOVIMIENTO and not x['excluido']]
+    assert all(x['P_hat'] != '' or x['artefacto'] == 1 for x in movidos)
+    errores_quietos = sum(f[i]['error_verdadero'] for i in quietos)
+    assert errores_quietos >= 3, errores_quietos    # el caso que importa: errores que nadie vio
+    assert orq.agente.beta > 3.0, orq.agente.beta   # y aun asi aprende, con los pasos que si se ven
+    # su marcador es paso_quieto, no paso_ack: quien corte epocas con los marcadores no lo toma
+    marc = orq.salidas.marcadores
+    for i in quietos:
+        assert config.m_paso_quieto(f[i]['seq']) in marc and config.m_paso_ack(f[i]['seq']) not in marc, f[i]
+    assert sum(m.startswith('paso_quieto:') for m in marc) == len(quietos)
+    assert orq.sin_movimiento == len(quietos)        # EVALUACION dice cuantos fueron
+    # el gemelo solo reacciona a paso_ack: un paso que no movio la ortesis no le provoca nada
+    cer = cs.Cerebro(cs._args(semilla=0))
+    cer.meta, cer.dir_paso = 1, -1
+    n = len(cer.eventos)
+    cer._marcador(config.m_paso_quieto(3), 5.0)
+    assert len(cer.eventos) == n
+    cer._marcador(config.m_paso_ack(4), 6.0)
+    assert len(cer.eventos) > n
+    return (f'{len(quietos)} de {len(f)} pasos sin movimiento ({errores_quietos} eran errores): sin aprendizaje ni '
+            f'cuenta para la confianza del detector; el gemelo no reacciona')
 
 
 @prueba
@@ -1056,11 +1290,21 @@ def calibracion_errp_fija():
     b.hw, b.eeg, b.ortesis, b.detector = hw, EEG(), hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0), None
     b.a = types.SimpleNamespace(ensayos_errp=60, p_error=0.3, espera=0.0, forzar=True)
     orq = types.SimpleNamespace(salidas=Salidas())
+    posiciones, mover = [], b.ortesis.mover
+    b.ortesis.mover = lambda fraccion, *r: (posiciones.append(fraccion), mover(fraccion, *r))[1]
     assert b.calibrar_errp(orq)
     assert len(b.detector.y_cal) == 60 and b.detector.ba > 0.9, (len(b.detector.y_cal), b.detector.ba)
+    # cada ensayo mueve la ortesis de verdad: si el movimiento no cabe en el recorrido, antes
+    # vuelve al centro (sin movimiento no hay nada que ver, y la epoca no tendria ErrP)
+    saltos = np.abs(np.diff(posiciones))
+    ensayos = np.isclose(saltos, 0.15)
+    assert ensayos.sum() == 60, (ensayos.sum(), np.round(saltos, 2))
+    assert all(np.isclose(posiciones[i + 1], 0.5) for i in np.flatnonzero(~ensayos)), np.round(posiciones, 2)
+    assert min(posiciones) >= 0.1 - 1e-9 and max(posiciones) <= 0.9 + 1e-9
     pd = b.detector.por_direccion                          # B2: el desglose por direccion llega al detector
     assert pd['cerrar']['n'] + pd['abrir']['n'] == 60 and min(pd['cerrar']['n'], pd['abrir']['n']) >= 25, pd
-    return f'usa las 60 epocas pedidas aunque el detector es casi perfecto (BA {b.detector.ba:.2f})'
+    return (f'usa las 60 epocas pedidas aunque el detector es casi perfecto (BA {b.detector.ba:.2f}); '
+            f'los 60 ensayos mueven la ortesis ({int((~ensayos).sum())} vueltas al centro)')
 
 
 @prueba
@@ -1499,7 +1743,14 @@ def dos_flujos_eeg():
 def entrada_unicorn():
     """EntradaEEG contra las fuentes de un Unicorn (gemelo): el flujo del puente, con IMU aparte,
     y el flujo unico de la app UnicornLSL (17 canales, resuelto por tipo o por nombre, hora por
-    contador). Con perdidas de Bluetooth la ventana de MI sigue saliendo."""
+    contador). Con perdidas de Bluetooth la ventana de MI sigue saliendo.
+
+    Dos cosas del gemelo son al azar y la prueba las espera en vez de suponerlas (por suponerlas
+    fallaba a veces: 1 de 2 corridas de --completa el 3 de octubre). Con 40 perdidas por minuto se
+    pierde ~7 % de las muestras, pero a rachas: la ventana de MI (tolera 10 %) deja de salir hasta
+    7 s seguidos. Y la cabeza puede pasar 7 s quieta. Durante una perdida la ultima muestra tiene
+    hasta 0.26 s: el retraso es el menor de varias lecturas (un desfase de la hora por contador se
+    veria en todas)."""
     import hardware as hw
     from pylsl import local_clock
 
@@ -1513,14 +1764,24 @@ def entrada_unicorn():
                 time.sleep(7.0)
                 x, t = eeg._crudo(6.0)
                 l = eeg.lecturas()
-                for _ in range(10):                # con ~7 % de perdidas casi todas las ventanas valen
+                for _ in range(30):                # hasta 15 s: las perdidas vienen a rachas
                     ventana_mi = eeg.ventana(3.0, config.SALUD['mi_perdida_max'], config.SALUD['mi_hueco_max_s'])[0]
                     if ventana_mi is not None:
                         break
                     time.sleep(0.5)
                 x, t = eeg._crudo(18.0)            # todo lo grabado: asi siempre hay algun hueco
                 giro = eeg.movimiento(t[-1] - 10.0, t[-1])
-                retraso = local_clock() - t[-1]
+                for _ in range(20):                # hasta 10 s mas: la cabeza se mueve al azar
+                    if giro is not None and giro > 20:
+                        break
+                    time.sleep(0.5)
+                    x, t = eeg._crudo(18.0)
+                    giro = eeg.movimiento(t[-1] - 10.0, t[-1])
+                retrasos = [local_clock() - t[-1]]
+                for _ in range(4):                 # fuera de una perdida de Bluetooth en curso
+                    time.sleep(0.1)
+                    retrasos.append(local_clock() - eeg.ultimo_t())
+                retraso = min(retrasos)
                 return x, t, l, ventana_mi, giro, retraso
             finally:
                 eeg.cerrar()
@@ -1924,9 +2185,11 @@ def lazo_real_caos():
 RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
-           'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo', 'iic_estimador', 'gemelo_embodiment',
+           'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
+           'paso_sin_movimiento',
+           'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

@@ -444,11 +444,13 @@ def sesion_embodiment(n=300, p_error=0.2, **k):
 def banco(a):
     import hardware as hw
     print(f'Banco offline: ERD {a.erd}, ErrP {a.errp} uV, fatiga {a.fatiga}')
+    # como la calibracion real: canales y vistas elegidos por validacion anidada
     X, y = sesion_mi(40, erd=a.erd, fatiga=a.fatiga, semilla=a.semilla)
-    print(f'  decoder MI (40 ensayos): BA {hw.DecoderIM().ajustar(X, y).ba:.2f}')
-    X, y = sesion_errp(120, erd=a.erd, errp=a.errp, semilla=a.semilla)
-    d = hw.DetectorErrP().ajustar(X, y)
-    print(f'  detector ErrP (120 epocas): sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f}')
+    dec = hw.DecoderIM().ajustar(X, y, config.candidatos('decoder'))
+    print(f'  decoder MI (40 ensayos): BA {dec.ba:.2f} ({dec.eleccion})')
+    X, y = sesion_errp(120, erd=a.erd, errp=a.errp, theta=a.theta, semilla=a.semilla)
+    d = hw.DetectorErrP().ajustar(X, y, config.candidatos('detector'))
+    print(f'  detector ErrP (120 epocas): sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f} ({d.eleccion})')
 
 
 def main():
