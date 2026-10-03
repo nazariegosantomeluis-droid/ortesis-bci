@@ -968,8 +968,8 @@ class Orquestador:
                     p['rng'] = rng.bit_generator.state
                 p['meta'] = p['orden'].pop()
                 self.iniciar_ensayo(p['meta'])
-            elif retomado:
-                self.iniciar_ensayo(p['meta'])
+            elif retomado:                           # reanudada a medio ensayo: sigue desde su angulo,
+                self.presentar(p['meta'])            # igual que si no se hubiera interrumpido
             retomado, meta = False, p['meta']
             if perturbar_en is not None and t == perturbar_en:
                 previo = self.fsm.estado
@@ -994,7 +994,8 @@ class Orquestador:
 
     def iniciar_ensayo(self, meta):
         """Cue del ensayo. Antes, la ortesis vuelve al punto medio: asi puede cerrar o abrir
-        completa en los pasos del ensayo (tambien al retomarlo tras una pausa o una reanudacion)."""
+        completa en los pasos del ensayo (tambien al retomarlo tras una pausa segura, que la
+        dejo en la posicion segura)."""
         if config.CENTRAR_ENSAYO:
             self.angulo = config.PUNTO_MEDIO
             self.salidas.marcador(config.CENTRADO)
