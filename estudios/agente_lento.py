@@ -46,10 +46,14 @@ META_BETA = 0.7 * config.PERTURBACION_LOGITS               # recuperacion del CP
 # Regimenes del gemelo y del detector. 'actual': lo que hace hoy la calibracion real (elige
 # canales y vistas; el gemelo tiene theta tras el error). 'ayer': el de las corridas lentas del
 # 2 de octubre (gemelo sin theta, detector de 8 canales y dos vistas). 'debil': ErrP mas chico.
+# 'nulo': sin ErrP (control negativo).
 REGIMENES = {
     'actual': {'errp': 6.0, 'theta': 3.0, 'candidatos': None},
     'ayer':   {'errp': 6.0, 'theta': 0.0, 'candidatos': {'8 canales, dos vistas': (list(range(8)), 'dos')}},
     'debil':  {'errp': 4.0, 'theta': 0.0, 'candidatos': None},
+    # CONTROL NEGATIVO: el gemelo no produce ErrP. Un agente que aprende del ErrP NO debe
+    # recuperarse aqui; si se recupera, lo mueve otra cosa (el supuesto de metas balanceadas).
+    'nulo':   {'errp': 0.0, 'theta': 0.0, 'candidatos': None},
 }
 REGIMEN = 'actual'
 
@@ -132,6 +136,7 @@ class Agente(AgenteErrP):
     sin_fiabilidad = False      # True: P_hat no escala el LLR calibrado por la fiabilidad
     transformar = None          # p_errp -> p_errp' antes de usarla (recalibracion candidata)
     prior_al_cambio = None      # p. ej. 0.5: al detectar un cambio, el prior de error vuelve ahi
+    prior_prediccion = None     # igual, pero solo si el cambio lo detecto el chequeo predictivo (ErrP)
     prior_momentos = None       # alfa: prior = tasa de detecciones corregida por sens y espec vivas
 
     def prob_error(self, p_errp, sens=None, espec=None, fiabilidad=1.0):
@@ -144,6 +149,8 @@ class Agente(AgenteErrP):
         info = super().actualizar(p_errp, artefacto, fiabilidad, sens, espec, peso)
         if info['cambio'] and self.prior_al_cambio is not None:
             self.prior = self.prior_al_cambio
+        if info['cambio'] == 'prediccion' and self.prior_prediccion is not None:
+            self.prior = max(self.prior, self.prior_prediccion)
         if self.prior_momentos and np.isfinite(info['P_hat']) and sens is not None:
             # tasa de detecciones = sens * pi + (1 - espec) * (1 - pi)  ->  pi
             self._tasa = getattr(self, '_tasa', self.prior * sens + (1 - self.prior) * (1 - espec))
@@ -158,10 +165,14 @@ class Agente(AgenteErrP):
 
 
 def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabilidad=False, transformar=None,
-         prior_al_cambio=None, prior_momentos=None, alfa_prior=None, coadaptar=False):
+         prior_al_cambio=None, prior_momentos=None, alfa_prior=None, coadaptar=False, prior_prediccion=None,
+         evidencia_nula=False):
     """Una sesion del lazo (estatico + adaptativo con perturbacion). Devuelve una fila por paso.
     coadaptar: el detector se re-entrena en el lazo como en BackendReal (DetectorCoadaptativo); aqui
-    el re-entrenamiento termina antes del paso siguiente (en vivo tarda unos pasos)."""
+    el re-entrenamiento termina antes del paso siguiente (en vivo tarda unos pasos).
+    evidencia_nula: CONTROL NEGATIVO. El agente recibe siempre la tasa base como salida del detector
+    (LLR = 0: el ErrP no le dice nada), pero la compuerta de confianza sigue abierta porque se
+    alimenta del detector real. Un agente que aprende del ErrP no debe recuperarse asi."""
     dec, det = copy.deepcopy(mod['dec']), mod['det']
     m = Mundo2(semilla_lazo)
     m.avanzar(4.0)
@@ -177,6 +188,7 @@ def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabili
     ag.sin_fiabilidad = sin_fiabilidad
     ag.transformar = transformar(mod) if transformar else None
     ag.prior_al_cambio, ag.prior_momentos, ag.umbral_momentos = prior_al_cambio, prior_momentos, det.umbral
+    ag.prior_prediccion = prior_prediccion
     conf = ConfianzaDetector(sens, espec)
     umbral, co = [det.umbral], None
     if coadaptar:
@@ -213,7 +225,8 @@ def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabili
             sv, ev = conf.vivo()
             fb = conf.fiabilidad_bruta
             prior = ag.prior
-            info = ag.actualizar(p, art, fb, sv, ev, peso=fiab if aprender else 0.0)
+            info = ag.actualizar(det.p_error_cal if evidencia_nula else p, art, fb, sv, ev,
+                                 peso=fiab if aprender else 0.0)
             filas.append({'bloque': bloque, 't': t, 'post': despl != 0, 'meta': meta, 'z': d.z,
                           'p_prima': d.p_prima, 'erroneo': bool(erroneo), 'sombra': d.direccion_sombra != meta,
                           'p_errp': p, 'detectado': bool(detectado), 'art': bool(art), 'P_hat': info['P_hat'],
@@ -255,8 +268,9 @@ def platt_en_logit(mod):
     return lambda p: float(sigmoide(a * logit(p) + b))
 
 
+BASE = 'calibrada (hoy)'
 VARIANTES = {
-    'calibrada (hoy)': {},
+    BASE: {},
     'binaria (como el simulador)': {'salida': 'binaria'},
     'calibrada + chequeo predictivo con el umbral del detector': {'umbral_cambio': True},
     'calibrada + sin escalar el LLR por la fiabilidad': {'sin_fiabilidad': True},
@@ -265,6 +279,11 @@ VARIANTES = {
     'calibrada + prior a 0.5 al detectar un cambio': {'prior_al_cambio': 0.5},
     'calibrada + prior por momentos (alfa 0.10)': {'prior_momentos': 0.10},
     'binaria + prior a 0.5 al detectar un cambio': {'salida': 'binaria', 'prior_al_cambio': 0.5},
+    'calibrada + prior a 0.5 solo si el cambio es por prediccion': {'prior_prediccion': 0.5},
+    'calibrada + lo mismo, con el umbral del detector en el chequeo': {'prior_prediccion': 0.5, 'umbral_cambio': True},
+    'CONTROL sin evidencia del ErrP: calibrada (hoy)': {'evidencia_nula': True},
+    'CONTROL sin evidencia del ErrP: prior a 0.5 al detectar un cambio': {'evidencia_nula': True, 'prior_al_cambio': 0.5},
+    'CONTROL sin evidencia del ErrP: prior a 0.5 solo por prediccion': {'evidencia_nula': True, 'prior_prediccion': 0.5},
 }
 
 
@@ -315,7 +334,7 @@ def sesiones(filas, variante):
     return out
 
 
-def errores_post(filas, variante='calibrada (hoy)'):
+def errores_post(filas, variante=BASE):
     """Los errores reales (sin artefacto) de los 57 pasos tras perturbar, con su evidencia."""
     return [f for f in filas[variante] if f['post'] and f['t'] < PERTURBA_EN + VENTANA
             and f['erroneo'] and not f['art']]
@@ -358,38 +377,52 @@ def informe(regimenes=('actual', 'ayer', 'debil'), salida=print):
 
 
 def simulador(n=30, salida=print):
-    """La correccion candidata (prior a 0.5 al detectar un cambio) en simulador_lazo.py: no debe
-    empeorar las cifras de referencia. Salida binaria, como siempre en el simulador."""
+    """Las correcciones candidatas del prior en simulador_lazo.py (salida binaria), con el CONTROL
+    NEGATIVO: con un detector sin informacion el agente NO debe recuperarse. Si se recupera, lo
+    mueve el supuesto de metas balanceadas (el detector de sesgo), no el ErrP."""
     import simulador_lazo as sl
+    variantes = (('antes', {}),
+                 ('A: prior a 0.5 con cualquier cambio', {'prior_al_cambio': 0.5}),
+                 ('B: prior a 0.5 solo si el cambio es por prediccion', {'prior_prediccion': 0.5}),
+                 ('C: prior por momentos (alfa 0.10)', {'prior_momentos': 0.10}),
+                 ('D: prior mas rapido (alfa 0.10)', {'alfa_prior': 0.10}))
 
-    def una(semilla, prior_al_cambio, sens, espec, falla=None, pasos=600):
+    def una(semilla, sens, espec, alfa_prior=None, **ganchos):
         mk = lambda r: sl.PilotoSimulado(sens=sens, espec=espec, semilla_sujeto=semilla, semilla_ruido=r)
         w0, c0 = sl.calibrar(mk(10_000 + semilla))
-        ag = Agente(w0, c0, ConfigAgente(modo='bayes', sens=sens, espec=espec))
-        ag.prior_al_cambio = prior_al_cambio
-        r = sl.simular(ag, mk(semilla + 1), ConfianzaDetector(sens, espec), pasos, pasos // 2, falla=falla, w_ref=w0)
-        k = pasos // 2
-        rec = np.flatnonzero(r['beta'][k:] >= r['beta'][k - 1] + META_BETA)
-        return np.r_[sl.metricas(r, k)[:3], (r['cambio'][:k] > 0).sum(),
-                     (rec[0] + 1) * config.CICLO_S if rec.size else np.nan]
+        cfg = ConfigAgente(modo='bayes', sens=sens, espec=espec)
+        if alfa_prior:
+            cfg.alfa_prior = alfa_prior
+        ag = Agente(w0, c0, cfg)
+        ag.umbral_momentos = 0.5
+        for k, v in ganchos.items():
+            setattr(ag, k, v)
+        r = sl.simular(ag, mk(semilla + 1), ConfianzaDetector(sens, espec), 600, 300, w_ref=w0)
+        rec = np.flatnonzero(r['beta'][300:] >= r['beta'][299] + META_BETA)
+        return np.r_[sl.metricas(r, 300)[:3], (rec[0] + 1) * config.CICLO_S if rec.size else np.nan]
 
-    salida(f'\nSimulador ({n} sujetos): hoy -> con el prior a 0.5 al detectar un cambio (diferencia pareada +- EE)')
-    for nombre, sens, espec, falla in (('referencia (sens 0.70, espec 0.90)', 0.70, 0.90, None),
-                                       ('detector debil (sens 0.55, espec 0.90)', 0.55, 0.90, None),
-                                       ('detector muy debil (sens 0.45, espec 0.85)', 0.45, 0.85, None),
-                                       ('falla del detector en los pasos 150 a 200', 0.70, 0.90, (150, 200))):
-        A = np.array([una(s_, None, sens, espec, falla) for s_ in range(n)])
-        B = np.array([una(s_, 0.5, sens, espec, falla) for s_ in range(n)])
-        d = B - A
-        ee = lambda i: d[:, i].std(ddof=1) / np.sqrt(n)
-        salida(f'  {nombre:44s} error antes {A[:, 0].mean():.3f} -> {B[:, 0].mean():.3f} ({d[:, 0].mean():+.3f} +- {ee(0):.3f}) | '
-               f'2 min {A[:, 1].mean():.3f} -> {B[:, 1].mean():.3f} ({d[:, 1].mean():+.3f} +- {ee(1):.3f}) | despues '
-               f'{A[:, 2].mean():.3f} -> {B[:, 2].mean():.3f} | recuperacion {np.nanmean(A[:, 4]):.0f} -> '
-               f'{np.nanmean(B[:, 4]):.0f} s | cambios en falso antes de perturbar {A[:, 3].mean():.1f} -> {B[:, 3].mean():.1f}')
+    salida(f'\nSimulador ({n} sujetos, salida binaria): correcciones candidatas del prior y control negativo')
+    for nombre, sens, espec in (('detector de referencia (sens 0.70, espec 0.90)', 0.70, 0.90),
+                                ('detector debil (sens 0.40, espec 0.90)', 0.40, 0.90),
+                                ('CONTROL: detector sin informacion (sens 0.12, espec 0.90)', 0.12, 0.90)):
+        salida(f'  {nombre}')
+        base = None
+        for et, kw in variantes:
+            M = np.array([una(s_, sens, espec, **kw) for s_ in range(n)])
+            base = M if base is None else base
+            d = M[:, 1] - base[:, 1]
+            rec = int(np.isfinite(M[:, 3]).sum())
+            salida(f'    {et:52s} error antes {M[:, 0].mean():.3f} | 2 min {M[:, 1].mean():.3f} ({d.mean():+.3f} +- '
+                   f'{d.std(ddof=1) / np.sqrt(n):.3f}) | despues {M[:, 2].mean():.3f} | recuperan {rec:2d}/{n}'
+                   + (f' en {np.nanmean(M[:, 3]):.0f} s' if rec else ''))
 
 
 NOMBRES_REGIMEN = {'actual': 'detector actual\n(BA viva 0.82)', 'ayer': 'detector de ayer\n(0.74)',
                    'debil': 'detector d\u00e9bil\n(0.68)'}
+A_CUALQUIERA = 'calibrada + prior a 0.5 al detectar un cambio'
+B_PREDICCION = 'calibrada + prior a 0.5 solo si el cambio es por prediccion'
+SIN_ERRP_HOY = 'CONTROL sin evidencia del ErrP: calibrada (hoy)'
+SIN_ERRP_A = 'CONTROL sin evidencia del ErrP: prior a 0.5 al detectar un cambio'
 
 
 def graficar(datos, ruta=FIGURA):
@@ -397,56 +430,67 @@ def graficar(datos, ruta=FIGURA):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    azul, naranja, verde = '#2a78d6', '#eb6834', '#2e9e6b'
+    azul, naranja, verde, morado = '#2a78d6', '#eb6834', '#2e9e6b', '#8a56c2'
     tinta, tinta2, rejilla = '#0b0b0b', '#52514e', '#e4e3df'
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4.8))
+    fig, ax = plt.subplots(1, 4, figsize=(20, 4.9))
     fig.patch.set_facecolor('#fcfcfb')
 
-    # Panel 1: beta tras la perturbacion en el regimen mas debil disponible
-    reg = 'debil' if 'debil' in datos else list(datos)[-1]
-    for v, color in (('calibrada (hoy)', azul), ('binaria (como el simulador)', naranja),
-                     ('calibrada + prior a 0.5 al detectar un cambio', verde)):
-        db = np.array([x['db'][:VENTANA + 20] for x in sesiones(datos[reg], v)])
-        x = np.arange(1, db.shape[1] + 1)
-        m, ee = db.mean(0), db.std(0, ddof=1) / np.sqrt(len(db))
-        ax[0].fill_between(x, m - ee, m + ee, color=color, alpha=0.15, lw=0)
-        ax[0].plot(x, m, color=color, lw=2, label=v)
-    ax[0].axhline(META_BETA, color=tinta2, ls='--', lw=1)
-    ax[0].text(VENTANA + 20, META_BETA + 0.05, 'recuperaci\u00f3n del CP4', ha='right', fontsize=8, color=tinta2)
-    ax[0].axvline(VENTANA, color=rejilla, lw=6, zorder=0)
-    ax[0].set_title('\u03b2 tras la perturbaci\u00f3n (detector d\u00e9bil)', color=tinta)
-    ax[0].set_xlabel('pasos tras la perturbaci\u00f3n', color=tinta2)
-    ax[0].set_ylabel('cambio de \u03b2 (logits)', color=tinta2)
-    ax[0].legend(loc='lower right', frameon=False, fontsize=8)
+    def betas(a, reg, variantes, titulo):
+        for v, color, nombre, *estilo in variantes:
+            if v not in datos[reg]:
+                continue
+            db = np.array([x['db'][:VENTANA + 20] for x in sesiones(datos[reg], v)])
+            x = np.arange(1, db.shape[1] + 1)
+            m, ee = db.mean(0), db.std(0, ddof=1) / np.sqrt(len(db))
+            a.fill_between(x, m - ee, m + ee, color=color, alpha=0.15, lw=0)
+            a.plot(x, m, color=color, lw=2, label=nombre, ls=estilo[0] if estilo else '-')
+        a.axhline(META_BETA, color=tinta2, ls='--', lw=1)
+        a.text(VENTANA + 20, META_BETA + 0.05, 'recuperaci\u00f3n del CP4', ha='right', fontsize=8, color=tinta2)
+        a.axvline(VENTANA, color=rejilla, lw=6, zorder=0)
+        a.set_ylim(-0.6, 2.9)
+        a.set_title(titulo, color=tinta)
+        a.set_xlabel('pasos tras la perturbaci\u00f3n', color=tinta2)
+        a.set_ylabel('cambio de \u03b2 (logits)', color=tinta2)
+        a.legend(loc='lower right', frameon=False, fontsize=8)
 
-    # Panel 2: P_hat de los errores reales, sobre las mismas epocas
+    variantes = ((BASE, azul, 'calibrada (hoy)'), ('binaria (como el simulador)', naranja, 'binaria (como el simulador)'),
+                 (A_CUALQUIERA, verde, 'prior a 0.5 con cualquier cambio'),
+                 (B_PREDICCION, morado, 'prior a 0.5 solo si el cambio viene del ErrP'))
+    control = ((BASE, azul, 'hoy, con el ErrP'), (SIN_ERRP_HOY, azul, 'hoy, SIN la evidencia del ErrP', '--'),
+               (A_CUALQUIERA, verde, 'prior a 0.5 con cualquier cambio, con el ErrP'),
+               (SIN_ERRP_A, verde, 'prior a 0.5 con cualquier cambio, SIN el ErrP', '--'))
+    if 'debil' in datos:
+        betas(ax[0], 'debil', variantes, '\u03b2 tras la perturbaci\u00f3n (detector d\u00e9bil)')
+        betas(ax[1], 'debil', control, 'Control negativo: el mismo lazo sin la evidencia del ErrP')
+
+    # Panel 3: P_hat de los errores reales, sobre las mismas epocas
     marcas, k = [], 0.0
-    for reg_ in datos:
+    for reg_ in (r for r in ('actual', 'ayer', 'debil') if r in datos):
         f = errores_post(datos[reg_])
         grupos = ((azul, [x['P_hat'] for x in f]),
                   (naranja, [float(sigmoide(logit(x['prior']) + x['llr_bin'])) for x in f]),
                   (verde, [float(sigmoide(x['fb'] * x['llr_cal'])) for x in f]))
         for color, v in grupos:
-            ax[1].boxplot([v], positions=[k], widths=0.7, patch_artist=True, showfliers=False,
+            ax[2].boxplot([v], positions=[k], widths=0.7, patch_artist=True, showfliers=False,
                           medianprops={'color': tinta}, whiskerprops={'color': tinta2}, capprops={'color': tinta2},
                           boxprops={'facecolor': color, 'alpha': 0.55, 'edgecolor': tinta2})
-            ax[1].text(k, 1.03, f'{100 * np.mean(np.array(v) > 0.5):.0f} %', ha='center', fontsize=8, color=tinta2)
+            ax[2].text(k, 1.03, f'{100 * np.mean(np.array(v) > 0.5):.0f} %', ha='center', fontsize=8, color=tinta2)
             k += 1
         marcas.append((k - 2, reg_))
         k += 0.8
-    ax[1].axhline(0.5, color=tinta2, ls='--', lw=1)
-    ax[1].set_xticks([p_ for p_, _ in marcas])
-    ax[1].set_xticklabels([NOMBRES_REGIMEN.get(r_, r_) for _, r_ in marcas])
-    ax[1].set_ylim(-0.32, 1.1)
-    ax[1].set_yticks(np.arange(0, 1.01, 0.2))
-    ax[1].set_title('P_hat de los errores reales (arriba: cu\u00e1ntos pasan de 0.5)', color=tinta)
-    ax[1].set_ylabel('P_hat', color=tinta2)
+    ax[2].axhline(0.5, color=tinta2, ls='--', lw=1)
+    ax[2].set_xticks([p_ for p_, _ in marcas])
+    ax[2].set_xticklabels([NOMBRES_REGIMEN.get(r_, r_) for _, r_ in marcas])
+    ax[2].set_ylim(-0.32, 1.1)
+    ax[2].set_yticks(np.arange(0, 1.01, 0.2))
+    ax[2].set_title('P_hat de los errores reales (arriba: cu\u00e1ntos pasan de 0.5)', color=tinta)
+    ax[2].set_ylabel('P_hat', color=tinta2)
     for nombre, color in (('calibrada, con el prior del agente', azul), ('binaria, con el prior del agente', naranja),
                           ('calibrada, con prior 0.5', verde)):
-        ax[1].bar([0], [0], color=color, alpha=0.55, label=nombre)
-    ax[1].legend(loc='lower left', frameon=False, fontsize=8)
+        ax[2].bar([0], [0], color=color, alpha=0.55, label=nombre)
+    ax[2].legend(loc='lower left', frameon=False, fontsize=8)
 
-    # Panel 3: confiabilidad del detector calibrado
+    # Panel 4: confiabilidad del detector calibrado
     for reg_, color, nombre in (('actual', azul, 'detector actual'), ('ayer', naranja, 'detector de ayer')):
         patron = 'sujeto_?.pkl' if reg_ == 'actual' else f'sujeto_?_{reg_}.pkl'
         mods = [pickle.loads(r.read_bytes()) for r in sorted(CACHE.glob(patron))]
@@ -455,15 +499,15 @@ def graficar(datos, ruta=FIGURA):
         p_ = np.concatenate([m['p_nuevas'] for m in mods])
         y_ = np.concatenate([m['y_nuevas'] for m in mods])
         tabla, pendiente, _ = confiabilidad(p_, y_)
-        ax[2].plot([a for a, _, _ in tabla], [b for _, b, _ in tabla], color=color, lw=2, marker='o', ms=6,
+        ax[3].plot([a for a, _, _ in tabla], [b for _, b, _ in tabla], color=color, lw=2, marker='o', ms=6,
                    label=f'{nombre}: pendiente {pendiente:.2f}')
-    ax[2].plot([0, 1], [0, 1], color=tinta2, ls='--', lw=1)
-    ax[2].set_xlim(0, 1)
-    ax[2].set_ylim(0, 1)
-    ax[2].set_title('Confiabilidad del detector calibrado', color=tinta)
-    ax[2].set_xlabel('probabilidad de error predicha', color=tinta2)
-    ax[2].set_ylabel('fracci\u00f3n de errores observada', color=tinta2)
-    ax[2].legend(loc='upper left', frameon=False, fontsize=8)
+    ax[3].plot([0, 1], [0, 1], color=tinta2, ls='--', lw=1)
+    ax[3].set_xlim(0, 1)
+    ax[3].set_ylim(0, 1)
+    ax[3].set_title('Confiabilidad del detector calibrado', color=tinta)
+    ax[3].set_xlabel('probabilidad de error predicha', color=tinta2)
+    ax[3].set_ylabel('fracci\u00f3n de errores observada', color=tinta2)
+    ax[3].legend(loc='upper left', frameon=False, fontsize=8)
 
     for a in ax:
         a.set_facecolor('#fcfcfb')
@@ -475,8 +519,9 @@ def graficar(datos, ruta=FIGURA):
             a.spines[lado].set_color(tinta2)
         a.tick_params(colors=tinta2)
     fig.text(0.01, 0.01, 'Gemelo digital sin LSL, 4 sujetos x 4 lazos por variante (no son datos de una persona). '
-             'Perturbaci\u00f3n de 2.4 logits; franja gris: los 57 pasos (2 min) del CP4.\nPendiente de calibraci\u00f3n: '
-             '1 = calibrado; mayor que 1 = probabilidades comprimidas hacia la tasa base (1600 \u00e9pocas nuevas por detector).',
+             'Perturbaci\u00f3n de 2.4 logits; franja gris: los 57 pasos (2 min) del CP4. Control negativo: el agente recibe '
+             'LLR = 0 con la compuerta de confianza abierta; si aprende del ErrP, no debe recuperarse.\nPendiente de calibraci\u00f3n: 1 = calibrado; mayor que 1 = '
+             'probabilidades comprimidas hacia la tasa base (1600 \u00e9pocas nuevas por detector).',
              fontsize=8, color=tinta2, linespacing=1.5)
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     ruta.parent.mkdir(parents=True, exist_ok=True)

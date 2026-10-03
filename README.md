@@ -61,7 +61,9 @@ python pruebas.py                    # debe decir 39/39 pruebas pasaron
 **Señal (`hardware.py`, `puente_lsl.py`)**
 
 - **Recentrado riemanniano no supervisado.** El decoder de MI se re-centra solo con cada ventana. En la prueba, tras mezclar canales pasa de 50 % a 98 % de exactitud sin recalibrar.
-- **Detector de ErrP de dos vistas fusionadas** (temporal con LDA encogido + geométrica de Riemann), con probabilidades calibradas, umbral de Neyman-Pearson (especificidad ≥ 0.90) y detector de rareza para épocas fuera de distribución.
+- **Detector de ErrP de dos o tres vistas fusionadas** (temporal con LDA encogido, geométrica de Riemann y, opcional, potencia theta en Fz y Cz), con probabilidades calibradas, umbral de Neyman-Pearson (especificidad ≥ 0.90) y detector de rareza para épocas fuera de distribución. La calibración elige por validación cruzada anidada los canales (los de su papel o los 8) y las vistas, y registra la elección.
+- **Época alineada al movimiento real.** La época del ErrP se corta donde la telemetría del ESP32 dice que la órtesis empezó a moverse. Sin telemetría usa el ACK más la latencia mecánica media medida; si tampoco la hay, el ACK. La columna `alineacion` del CSV dice cuál se usó en cada paso.
+- **Detector co-adaptativo** (encendido por defecto; `--sin-coadaptativo` lo apaga). El detector se re-entrena en otro hilo cada 20 épocas del lazo, y el modelo nuevo solo reemplaza al vigente si en una prueba en sombra de 30 épocas no es peor. Ningún fallo del re-entrenamiento detiene el lazo: queda registrado en consola y en EVALUACION, y el lazo sigue con el modelo vigente; con tres fallos seguidos se apaga solo. En el gemelo sube la BA viva unos 0.02 y no cambia el error del agente (±0.01).
 - **Calibración honesta.** MI se detiene sola cuando el intervalo de confianza ya decide (mínimo 36 ensayos); el detector de ErrP usa siempre 120 épocas con el umbral elegido por validación anidada (ver el hallazgo de la maldición del ganador).
 - **Hora por contador.** La hora de cada muestra se reconstruye con el contador del casco, sin el jitter de llegada por Bluetooth; una pérdida queda como un hueco visible.
 
@@ -118,6 +120,27 @@ La parada secuencial revisaba cada 10 épocas y daba GO en cuanto el estimado sa
 **La corrección.** El detector de ErrP se calibra siempre con las 120 épocas, sin GO ni NO GO tempranos, y el umbral se elige dentro de cada pliegue (validación anidada): lo reportado queda a −0.02 ± 0.04 de lo real. MI exige al menos 36 ensayos. Además, el primer paso de cada ensayo fallaba más (0.22 contra 0.18) porque su ventana empezaba con la transición mental; esperar 1 s más tras la señal lo baja a 0.15. El resto del 0.37 era ruido: un bloque estático de 30 pasos tiene desviación de 0.08 (en vivo, con 150 pasos: BA 0.83 en calibración y 0.20 de error).
 
 **El costo honesto.** Con el montaje del Unicorn (3 electrodos fronto-centrales) y el ErrP del gemelo, la BA real del detector ronda 0.73 y el CP3 (0.75) dio GO en 1 de 16 sujetos. Antes "pasaba" por el sesgo. Son cifras del gemelo, no de una persona.
+
+## Control negativo: el agente aprende del ErrP, y por eso su velocidad depende del detector
+
+**El síntoma.** En tres corridas contra el gemelo, el agente tardó de 56 a 80 pasos en recuperarse de la perturbación y en dos de ellas empató con el decoder sin aprender; en el simulador tarda unos 20.
+
+**Lo que se midió** (`estudios/agente_lento.py`: el lazo completo del gemelo sin LSL, con la misma aritmética del orquestador; 4 sujetos × 4 lazos por variante y el mismo ruido en todas). Error del agente en los 2 minutos tras perturbar (el decoder sin aprender queda en 0.49):
+
+| Detector (BA viva) | Salida calibrada (la de hoy) | Salida binaria | Prior a 0.5 al detectar un cambio (descartada) |
+|---|---|---|---|
+| El actual (0.82) | 0.280 | 0.282 | 0.246 |
+| El de aquellas corridas (0.74) | 0.294 | 0.312 | 0.257 |
+| Uno débil (0.68) | 0.316 | 0.360 | 0.274 |
+
+- **No era la salida calibrada.** La binaria no es más rápida, y con detector débil es peor (+0.044 ± 0.018). La calibración de Platt sí comprimía las probabilidades del detector de aquellas corridas (pendiente de calibración 1.31 contra 1.05 del actual), pero corregir eso apenas mejora (−0.016 ± 0.012).
+- **Era la evidencia.** El agente calcula la probabilidad de haberse equivocado combinando su prior de error (~0.23) con lo que dice el detector. Con ese prior, un error solo lo convence (probabilidad mayor que 0.5) si el detector es rotundo: pasa con el 65 % de los errores con el detector actual, con el 44 % con el de aquellas corridas y con el 24 % con el débil.
+- **La corrección tentadora se descartó.** Subir el prior a 0.5 cuando se detecta un cambio es la variante más rápida de la tabla, pero **falla el control negativo**: si al agente se le quita la evidencia del ErrP (recibe siempre la tasa base), se recupera igual, 16 de 16 sesiones. Lo que lo mueve ahí es el detector de sesgo, que supone metas balanceadas, y no el cerebro del piloto. En el simulador, con un detector sin información, pasa lo mismo: 30 de 30 sujetos.
+- **El agente de hoy pasa ese control.** Sin la evidencia del ErrP casi no se recupera: 4 de 16 sesiones contra 13 de 16, y su error sube +0.121 ± 0.019. Por eso no se cambió: su velocidad depende de la calidad del detector, como muestra la curva de robustez, y eso es justo lo que afirma el proyecto.
+
+![Agente lento: β tras la perturbación, control negativo, P_hat de los errores y confiabilidad del detector](docs/figuras/agente_lento.png)
+
+Son cifras del gemelo, no de una persona. Parte de la mejora del detector actual viene de la actividad theta tras el error, que programamos nosotros.
 
 ## Resiliencia: el lazo que no se cae
 
@@ -266,7 +289,7 @@ python orquestador.py real --puerto COM4
 
 Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
 
-Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`.
+Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`. Para que el detector no cambie durante el lazo: `--sin-coadaptativo`.
 **Plan B** (checkpoint 3 falla): `python puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv` y correr el orquestador igual.
 
 El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
