@@ -38,6 +38,7 @@ python pruebas.py                    # debe decir 42/42 pruebas pasaron
 | `hardware.py` | EEG por LSL, órtesis por USB (o simulada), decoder de MI con recentrado y detector de ErrP calibrado. |
 | `puente_lsl.py` | BrainFlow → LSL: Unicorn (`--placa unicorn --serie <num>`), placa sintética, playback o Cyton. Publica `EEG` e `IMU` con la hora de cada muestra reconstruida por contador, y registra los huecos de Bluetooth. |
 | `verificar_unicorn.py` | Con el casco puesto: comprueba orden de canales, unidades, contador, IMU, batería y validez, y dice qué fuente usar. |
+| `bloque_sham.py` | Bloque sham (B1): con el piloto en reposo la órtesis se mueve al azar y `p(t)` del decoder no debe seguirla (`hardware.evaluar_sham`). |
 | `cerebro_sintetico.py` | **Gemelo digital del piloto**: publica EEG por LSL que *reacciona* al lazo (ERD al imaginar, ErrP cuando la órtesis se equivoca, N1 visual atenuada según `--embodiment`). Reemplaza al casco para ensayar. |
 | `embodiment.py` | Tarea 2 (exploratorio): N1 visual de cada movimiento e índice de integración corporal (IIC) con intervalo y tendencia. |
 | `estudios/` | Mediciones offline con el gemelo y el simulador que respaldan cada decisión (ver su README). |
@@ -278,6 +279,18 @@ En el simulador el agente sigue claramente por debajo de la sombra con caos leve
 
 Todo esto vale para el gemelo: el tamaño del efecto lo programamos nosotros y en una persona se desconoce. Lo que sí se traslada es la escala: el ancho del intervalo baja con la raíz del número de ajenos.
 
+## Bloque sham y especificidad por dirección (B1 y B2)
+
+**Sham.** Con el piloto en reposo, la órtesis vuelve al centro y se mueve sola a 0.5 ± 0.2 (mitad cerrar, mitad abrir, 40 pasos); la ventana de MI va de 0.5 s antes a 1.5 s después del movimiento. `hardware.evaluar_sham` mide la AUC de `p` contra la dirección con un intervalo bootstrap del 95 %: PASA si el intervalo incluye 0.5. Si FALLA, `p(t)` está leyendo los servos, los cables o la respuesta visual, no la intención. Con 40 pasos el intervalo mide ~±0.2: detecta que `p` siga a la órtesis con claridad, no un seguimiento leve. Se corre después del CP3 y no cambia la máquina de estados:
+
+```bash
+python bloque_sham.py --puerto COM4        # o --ortesis-sim; sale con código 1 si FALLA
+```
+
+Medido en el gemelo (EXPLORATORIO; `pruebas.py`, prueba `bloque_sham`): piloto en reposo, AUC 0.34 a 0.65 en 12 sesiones, ninguna con falsa alarma; piloto que imagina lo que hace la órtesis, AUC 0.73 a 0.95 en 6 de 6, todas detectadas. Con etiquetas independientes del EEG, el criterio da falsa alarma en 5.5 % de 600 simulaciones, como corresponde a un intervalo al 95 %. Falta probarlo con el casco: el gemelo no tiene ruido de servos.
+
+**Especificidad por dirección.** `calibrar_errp` pasa la dirección en que se movió la órtesis a `DetectorErrP.ajustar(direccion=...)`, que desglosa las predicciones de su validación anidada en `detector.por_direccion` (sensibilidad, especificidad y BA de cerrar y de abrir, y `dif_espec`). La consola la imprime tras la BA. Si la diferencia de especificidad pasa de `config.ESPEC_DIF_MAX` (0.05) **solo avisa**, no da NO GO: con 120 épocas quedan ~40 aciertos por dirección y el azar solo produce una diferencia de ~0.06. El umbral sigue siendo uno solo para las dos direcciones; umbrales por dirección en el agente quedan como decisión pendiente.
+
 ## Probar sin hardware
 
 ```bash
@@ -321,6 +334,8 @@ Si el CP3 da NO GO, `--solo-errp` repite solo la calibración de ErrP con el dec
 **Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite la última sesión real en el tablero, y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
 
 El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
+
+**Bloque sham (opcional, ~3 min, lo decide P1):** el orquestador no tiene un estado para él y comparte el casco y la órtesis, así que se corre entre dos arranques. Deja que el orquestador llegue al CP3, detenlo con Ctrl+C al entrar a `LAZO_ESTATICO` (los modelos ya están en `modelos/`), corre `python bloque_sham.py --puerto COM4` con el piloto en reposo y sigue con `python orquestador.py real --puerto COM4 --saltar-calibracion`.
 
 **Antes de empezar:** cierra cualquier `cerebro_sintetico.py` o `puente_lsl.py` que haya quedado abierto en otra terminal. Debe haber un solo flujo `EEG` en la red; `python ver_flujos.py` lo muestra.
 

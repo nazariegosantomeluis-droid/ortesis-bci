@@ -522,7 +522,7 @@ class BackendReal:
             b = [(obj, i < n_err) for obj in (0, 1) for i in range(10)]
             return [b[i] for i in rng.permutation(len(b))]
 
-        plan, X, y, n = [], [], [], 0
+        plan, X, y, dirs, n = [], [], [], [], 0     # dirs: direccion en que SE MOVIO la ortesis (1 = cerrar)
         theta = [0.5]
         self.ortesis.mover(theta[0])
         while n < self.a.ensayos_errp:
@@ -563,20 +563,28 @@ class BackendReal:
             if e is not None:
                 X.append(e)
                 y.append(int(err))
+                dirs.append(obj if not err else 1 - obj)
         # Todas las epocas pedidas, sin GO ni NO GO tempranos: con 40 a 60 epocas la parada
         # secuencial elegia estimados inflados por suerte (en el gemelo: 0.87 reportado contra
         # 0.69 real). El umbral se elige con validacion anidada (DetectorErrP.ajustar).
         if self._ajustable(y):
-            self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y), config.candidatos('detector'))
+            self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y), config.candidatos('detector'),
+                                                          direccion=np.array(dirs))
             aviso('    eleccion del detector (AUC de validacion cruzada): '
                   + ', '.join(f'{n} {v:.2f}' for n, v in self.detector.puntajes.items())
                   + f' -> {self.detector.eleccion}')
             lo, hi = self.hw.intervalo_ba(np.array(y), self.detector.pred_cv)
             aviso(f'    [{len(y)} epocas] BA {self.detector.ba:.2f}  IC90 [{lo:.2f}, {hi:.2f}]')
+            pd = self.detector.por_direccion
+            aviso(f"    por direccion: cerrar sens {pd['cerrar']['sens']:.2f} espec {pd['cerrar']['espec']:.2f} | "
+                  f"abrir sens {pd['abrir']['sens']:.2f} espec {pd['abrir']['espec']:.2f} | dif de espec {pd['dif_espec']:.2f}"
+                  + (f" (> {config.ESPEC_DIF_MAX}: aviso, no NO GO; con ~40 aciertos por direccion el azar solo da ~0.06)"
+                     if pd['avisa'] else ''))
         if self.detector is None:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
             return False
-        np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
+        np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y),
+                 direccion=np.array(dirs))
         config.MODELOS.mkdir(exist_ok=True)
         np.savez(config.MODELOS / 'detector_errp_datos.npz', X=np.array(X), y=np.array(y))   # para co-adaptar
         self.hw.guardar(self.detector, 'detector_errp.pkl')

@@ -171,6 +171,11 @@ MI_EXACTITUD_MIN = 0.70         # checkpoint 2
 BA_MIN           = 0.75         # checkpoint 3
 ESPEC_MIN        = 0.90
 RECUPERACION_MAX_S = 120.0      # checkpoint 4
+ESPEC_DIF_MAX    = 0.05         # B2: diferencia maxima de especificidad entre cerrar y abrir (solo avisa)
+# bloque sham (B1): la ortesis se mueve al azar con el piloto en reposo; p(t) no debe seguirla.
+# Pasa si el intervalo de confianza de la AUC (p contra la direccion del movimiento) incluye 0.5.
+SHAM_PASOS       = 40           # 20 cerrar y 20 abrir
+SHAM_NIVEL_IC    = 0.95
 PERTURBACION_LOGITS = 2.4
 
 # ============================ Ortesis (USB serial) ============================
