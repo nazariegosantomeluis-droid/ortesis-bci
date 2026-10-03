@@ -420,6 +420,112 @@ def calibracion_repeticiones():
 
 # ------------------------------------------------------------ persistencia
 @prueba
+def repetir_sesion():
+    """Plan B: cada sesion deja grabado, junto a su CSV, todo lo que publico en el flujo Estado
+    (con su hora). repetir_sesion.py lo vuelve a publicar: el tablero muestra la sesion igual que
+    en vivo y, si se quiere, la ortesis repite los mismos angulos. Sin casco ni calibracion."""
+    import json
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from pyqtgraph.Qt import QtWidgets
+    import orquestador
+    import repetir_sesion as rs
+    import tablero
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '5', '--pasos_estatico', '20',
+                                '--pasos_adaptativo', '60'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    orquestador.correr(orq, a)
+    ruta = orq.ruta_csv.with_name(orq.ruta_csv.stem + config.SUFIJO_ESTADO)
+    grabados = rs.leer(ruta)
+    tipos = [e['tipo'] for _, e in grabados]
+    assert tipos.count('paso') + tipos.count('ajeno') == len(orq.filas) == 80 and tipos.count('ajeno') == 6, tipos
+    assert tipos.count('cue') == 16 and 'checkpoint' in tipos and 'iic' in tipos
+    assert all(t2 >= t1 for (t1, _), (t2, _) in zip(grabados, grabados[1:]))
+    # la repeticion publica lo mismo y en el mismo orden; la ortesis va a los mismos angulos
+    publicados, angulos, esperas = [], [], []
+
+    class Ortesis:
+        def mover(self, fraccion, dur_ms=None):
+            angulos.append(fraccion)
+            return 1, 0.0, 1.0
+    n = rs.repetir(ruta, velocidad=2.0, completa=True, publicar=publicados.append, ortesis=Ortesis(),
+                   dormir=esperas.append, salida=lambda *_: None)
+    assert n == len(grabados) and publicados == [e for _, e in grabados]
+    assert angulos[:-1] == [e['angulo'] for _, e in grabados if e['tipo'] in ('paso', 'ajeno')]
+    assert angulos[-1] == config.POSICION_SEGURA           # al terminar, la ortesis queda abierta
+    assert all(0 <= d <= rs.ESPERA_MAX_S for d in esperas)
+    assert sum(esperas) <= (grabados[-1][0] - grabados[0][0]) / 2.0 + 1e-6
+    # por defecto empieza en el lazo: se salta la calibracion, pero conserva sus checkpoints
+    corto = []
+    rs.repetir(ruta, velocidad=0, publicar=corto.append, salida=lambda *_: None)
+    assert len(corto) <= len(publicados) and [e['tipo'] for e in corto].count('paso') == tipos.count('paso')
+    # el tablero la muestra completa sin errores
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    t = tablero.Tablero()
+    try:
+        t.timer.stop()
+        for e in publicados:
+            t._procesar(e)
+        t._dibujar()
+        assert 'paso 80' in t.lbl_estado.text(), t.lbl_estado.text()
+    finally:
+        t.close()
+    assert rs.ultima('sim').name == ruta.name
+    return f'{n} eventos grabados y repetidos ({tipos.count("paso")} pasos, {tipos.count("ajeno")} ajenos); el tablero y la ortesis los siguen'
+
+
+@prueba
+def modelos_del_dia():
+    """Dos protecciones para el dia de la demo. (1) Al cargar modelos ya calibrados se dice hace
+    cuanto se calibraron y, si son viejos, se avisa: en modelos/ pueden haber quedado los del
+    gemelo o los de otro piloto. (2) --solo-errp repite solo la calibracion de ErrP con el decoder
+    de MI ya calibrado (si falla el CP3 no hay que repetir los 5 minutos de MI)."""
+    import os
+    import tempfile
+    import types
+    from pathlib import Path
+    import orquestador
+    carpeta, original = Path(tempfile.mkdtemp()), config.MODELOS
+    config.MODELOS = carpeta
+    try:
+        assert orquestador.edad_modelos_h() is None                 # no hay modelos
+        for nombre in ('decoder_im.pkl', 'detector_errp.pkl'):
+            (carpeta / nombre).write_bytes(b'x')
+        assert orquestador.edad_modelos_h() < 0.01
+        viejo = time.time() - 30 * 3600
+        os.utime(carpeta / 'decoder_im.pkl', (viejo, viejo))        # cuenta el mas viejo de los dos
+        assert 29.9 < orquestador.edad_modelos_h() < 30.1
+        assert 'OJO' in orquestador.texto_edad_modelos() and '30' in orquestador.texto_edad_modelos()
+        os.utime(carpeta / 'decoder_im.pkl', None)
+        assert 'OJO' not in orquestador.texto_edad_modelos()
+    finally:
+        config.MODELOS = original
+    # --solo-errp: carga el decoder, no calibra MI y si calibra ErrP
+    a = orquestador.argumentos(['real', '--solo-errp'])
+    assert a.solo_errp and not orquestador.argumentos(['real']).solo_errp
+    llamadas = []
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.a = a
+    b.hw = types.SimpleNamespace(cargar=lambda n: llamadas.append(('cargar', n)) or types.SimpleNamespace(
+        ba=0.8, w0=np.ones(3), c0=0.0))
+    b.revisar = lambda orq: True
+    b.calibrar_mi = lambda orq: llamadas.append('mi') or True
+
+    def calibrar_errp(orq):
+        llamadas.append('errp')
+        b.detector = types.SimpleNamespace(sens=0.7, espec=0.9, p_error_cal=0.3, umbral=0.4)
+        return True
+    b.calibrar_errp = calibrar_errp
+    b.preparar_coadaptacion = lambda orq: llamadas.append('coadapta')
+    estados = []
+    orq = types.SimpleNamespace(fsm=types.SimpleNamespace(ir_a=estados.append))
+    p = b.preparar(orq)
+    assert llamadas == [('cargar', 'decoder_im.pkl'), 'errp', 'coadapta'], llamadas
+    assert estados == ['CAL_MI', 'CAL_ERRP'] and p['umbral'] == 0.4 and p['salida'] == 'calibrada'
+    return 'edad de los modelos con aviso si son viejos; --solo-errp repite solo la calibracion de ErrP'
+
+
+@prueba
 def instantanea_estado():
     """El estado del agente y del ConfianzaDetector sobrevive a un viaje por JSON (la
     trayectoria futura es identica), y la instantanea se escribe de forma atomica."""
@@ -1913,7 +2019,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'tablero_salud', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

@@ -257,3 +257,8 @@ RESULTADOS = RAIZ / 'resultados'
 MODELOS    = RAIZ / 'modelos'
 IMPEDANCIAS_JSON = RESULTADOS / 'impedancias.json'
 ESTADO_SESION_JSON = RESULTADOS / 'estado_sesion.json'
+# junto al CSV de cada sesion: todo lo que se publico en el flujo Estado, una linea JSON por
+# evento con su hora ({'t': ..., 'evento': {...}}). Lo usa repetir_sesion.py (plan B)
+SUFIJO_ESTADO = '_estado.jsonl'
+# modelos calibrados hace mas que esto: aviso al cargarlos (pueden ser de otro piloto o del gemelo)
+MODELOS_EDAD_AVISO_H = 6.0

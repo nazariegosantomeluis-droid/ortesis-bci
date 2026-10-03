@@ -78,6 +78,17 @@ class Salidas:
         self.paso = StreamOutlet(config.crear_info('Paso'))
         self.est = StreamOutlet(config.crear_info('Estado'))
         self.marcadores = []                       # copia local, para evaluar y probar
+        self.registro = None                       # archivo con cada evento de Estado (plan B)
+
+    def registrar_en(self, ruta):
+        """Desde ahora cada evento de Estado tambien se guarda en ruta, con su hora, para poder
+        repetir la sesion en el tablero (repetir_sesion.py)."""
+        self.registro = open(ruta, 'a', encoding='utf-8')
+
+    def cerrar(self):
+        if self.registro is not None:
+            self.registro.close()
+            self.registro = None
 
     def marcador(self, texto, t=None):
         self.marcadores.append(texto)
@@ -88,6 +99,32 @@ class Salidas:
 
     def estado(self, **datos):
         self.est.push_sample([json.dumps(datos, default=float)])
+        if self.registro is not None:              # un fallo al grabar nunca detiene el lazo
+            try:
+                self.registro.write(json.dumps({'t': round(local_clock(), 3), 'evento': datos}, default=float) + '\n')
+                self.registro.flush()
+            except (OSError, ValueError):
+                self.registro = None
+
+
+def edad_modelos_h():
+    """Horas desde que se calibro el mas viejo de los dos modelos guardados, o None si falta alguno."""
+    rutas = [config.MODELOS / n for n in ('decoder_im.pkl', 'detector_errp.pkl')]
+    if not all(r.exists() for r in rutas):
+        return None
+    return (time.time() - min(r.stat().st_mtime for r in rutas)) / 3600
+
+
+def texto_edad_modelos():
+    """Hace cuanto se calibraron los modelos, con un aviso fuerte si no son de hoy."""
+    h = edad_modelos_h()
+    if h is None:
+        return 'no hay modelos guardados'
+    txt = f'calibrados hace {60 * h:.0f} min' if h < 1 else f'calibrados hace {h:.1f} h'
+    if h > config.MODELOS_EDAD_AVISO_H:
+        txt += (f'. OJO: tienen mas de {config.MODELOS_EDAD_AVISO_H:.0f} h. Si no son de ESTE piloto y de ESTA '
+                f'colocacion del casco (o son del gemelo), calibra de nuevo sin --saltar-calibracion')
+    return txt
 
 
 def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
@@ -545,8 +582,15 @@ class BackendReal:
         if self.a.saltar_calibracion:
             self.decoder = self.hw.cargar('decoder_im.pkl')
             self.detector = self.hw.cargar('detector_errp.pkl')
-            aviso(f'Modelos cargados: MI BA {self.decoder.ba:.2f}, '
+            aviso(f'Modelos cargados ({texto_edad_modelos()}): MI BA {self.decoder.ba:.2f}, '
                   f'ErrP sens {self.detector.sens:.2f} espec {self.detector.espec:.2f}')
+        elif getattr(self.a, 'solo_errp', False):    # el decoder ya esta: se repite solo ErrP
+            self.decoder = self.hw.cargar('decoder_im.pkl')
+            aviso(f'Decoder de MI cargado (BA {self.decoder.ba:.2f}); se repite solo la calibracion de ErrP.')
+            orq.fsm.ir_a('CAL_MI')
+            orq.fsm.ir_a('CAL_ERRP')
+            if not self.calibrar_errp(orq):
+                return None
         else:
             orq.fsm.ir_a('CAL_MI')
             if not self.calibrar_mi(orq):
@@ -691,6 +735,7 @@ class Orquestador:
             self.iic = self.embodiment.estimar()
             self.f_csv = open(self.ruta_csv, 'a', newline='')
             self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
+            self.salidas.registrar_en(self.ruta_csv.with_name(self.ruta_csv.stem + config.SUFIJO_ESTADO))
             return
         base = datetime.now().strftime(f'sesion_{a.backend}_%Y%m%d_%H%M%S')
         self.ruta_csv, k = config.RESULTADOS / f'{base}.csv', 1
@@ -700,6 +745,7 @@ class Orquestador:
         self.f_csv = open(self.ruta_csv, 'w', newline='')
         self.csv = csv.DictWriter(self.f_csv, fieldnames=config.COLUMNAS_CSV)
         self.csv.writeheader()
+        self.salidas.registrar_en(self.ruta_csv.with_name(self.ruta_csv.stem + config.SUFIJO_ESTADO))
 
     def preparar(self):
         inst = self.inst
@@ -1090,6 +1136,7 @@ class Orquestador:
 
     def cerrar(self):
         self.f_csv.close()
+        self.salidas.cerrar()
         self.b.cerrar()
 
 
@@ -1153,7 +1200,10 @@ def argumentos(argv=None):
                     help='nombre del flujo LSL de EEG (en UnicornLSL, el que se escribio en la app o el numero de serie)')
     ap.add_argument('--eeg-tipo', dest='eeg_tipo', default=None,
                     help='tipo del flujo LSL de EEG, si se prefiere resolver por tipo')
-    ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true')
+    ap.add_argument('--saltar-calibracion', dest='saltar_calibracion', action='store_true',
+                    help='usa los modelos guardados (decoder y detector) de la ultima calibracion')
+    ap.add_argument('--solo-errp', dest='solo_errp', action='store_true',
+                    help='usa el decoder de MI guardado y repite solo la calibracion de ErrP (tras un CP3 NO GO)')
     ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
                     help='el detector de ErrP no se re-entrena en el lazo (por defecto si lo hace)')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
@@ -1191,7 +1241,8 @@ def correr(orq, a):
                        perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3, ajenos=True)
             completa = True
         else:
-            aviso('Detenido por NO GO. Plan B: sesion grabada (puente_lsl.py --placa playback).')
+            aviso('Detenido por NO GO. Que hacer en cada caso: docs/DOMINGO.md. Plan B: repetir una sesion '
+                  'grabada en el tablero (python repetir_sesion.py --ultima).')
     except KeyboardInterrupt:
         aviso('\nInterrumpido por el usuario.'
               + (' Para continuar esta sesion: el mismo comando con --reanudar.' if orq.lista else ''))
