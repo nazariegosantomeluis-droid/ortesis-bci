@@ -14,6 +14,7 @@ Mediciones offline con el gemelo (sin LSL ni casco), para decidir con evidencia.
 | `calibracion_errp_fija.py [sujetos]` | Calibración del detector con 120 épocas fijas y umbral anidado: lo reportado contra lo real en 180 épocas nuevas, y cuántos sujetos dan GO en el CP3. |
 | `alineacion_epoca.py [sujetos]` | Época del ErrP cortada en el ACK, en el inicio real del movimiento y en el inicio por telemetría. Solo verifica: el efecto lo programamos en el gemelo. |
 | `embodiment_gemelo.py [sujetos] [movimientos]` | Aceptación de la Tarea 2 (verificación, no evidencia): IIC de sesiones independientes del gemelo con embodiment 0, 0.2, 0.5 y 0.8 (uno de cada 10 movimientos ajeno); cobertura de 0 con embodiment 0 y Spearman por sujeto y con todas las sesiones juntas (intervalo remuestreando sujetos). |
+| `potencia_iic.py` | Análisis de potencia del IIC con las 176 sesiones del gemelo ya simuladas (`datos/iic_gemelo.csv`; no genera EEG): modelo d = κ × embodiment con ruido √(c / ajenos), cuántos movimientos ajenos piden un intervalo de ±0.2 y un Spearman significativo. Guarda `docs/figuras/potencia_iic.png`. |
 | `cierre_completo.py [sujetos]` | Por qué la órtesis casi nunca cerraba completa (solo `simulador_lazo.py`): fracción de ensayos que terminan cerrados o abiertos del todo, y error, con paso máximo mayor y con cada ensayo desde el punto medio. |
 
 Resultados del 2 de octubre de 2026 en `TAREAS.md` (sección de la brecha). Son cifras del gemelo, no de una persona.

@@ -69,6 +69,13 @@ Scripts en `estudios/`. **Reportado a Luis y corregido** (tabla de abajo).
 
 **Abierto:** en el gemelo con el montaje del Unicorn el agente no supera a la sombra en los 2 min tras perturbar (0.47 vs 0.47 en dos corridas); en el simulador sí (0.21 vs 0.31). Primer análisis, solo con los CSV de esas corridas (2 de octubre, noche): el agente **aprende lento**. Beta sube +0.2 a +1.2 en los 20 pasos tras perturbar, contra +1.8 a +2.0 con el montaje anterior. No se congela: fiabilidad media de 0.92 a 0.96. En 2 de 3 corridas no cambió ni una decisión respecto a la sombra en esos 57 pasos. Coincide con una BA viva del detector de 0.72–0.74 al perturbar (antes 0.86–0.87), como predice la curva de robustez, pero una corrida con 0.84 también fue lenta. Indicio, no conclusión: falta medir con varias semillas del gemelo (por ejemplo, con `--errp` más alto para ver si la recuperación se acelera).
 
+### Sábado 3 de octubre: plan de Luis
+
+**A las 20:00 del sábado se congela el código.** Después de esa hora, solo correcciones de errores.
+
+1. **Prioridad 1 (máximo 3 h): el agente lento en el gemelo.** Hipótesis principal: el simulador usa la salida binaria del detector y el modo real, la calibrada. Si la calibración de Platt sobre un detector débil comprime las probabilidades cerca de la tasa base, cada ErrP aporta poca evidencia y beta se mueve poco, incluso con BA alta. Medir en el gemelo, con 4 semillas: (1) el agente en modo binario contra calibrado sobre las mismas épocas; (2) la distribución de `P_hat` y del LLR tras la perturbación; (3) un diagrama de confiabilidad del detector calibrado. Reportar la causa con números y proponer la corrección.
+2. Después, en este orden: el detector co-adaptativo, la alineación al movimiento real con respaldo por ACK y theta solo si sobra tiempo.
+
 ### Orden acordado tras el commit 5 (2 de octubre, tarde)
 
 1. Brecha calibración → lazo: ablaciones en el gemelo, reportar la causa con números antes de corregir; el bug de `P_hat` se corrige en el mismo bloque.
@@ -156,7 +163,9 @@ Después: Tarea 2 mínima, con la atenuación sensorial en PO7/Oz/PO8 como firma
 > - Cuestionario: al final de una sesión `real` con terminal interactiva (`--sin-cuestionario` lo salta); se guarda en `resultados/sesion_..._cuestionario.json` con el IIC.
 > - Movimientos ajenos por defecto también en `sim` (`--ajenos-cada 0` los apaga); las pruebas de pausas usan `--ajenos-cada 0`.
 >
-> **Aceptación en el gemelo (`estudios/embodiment_gemelo.py`, 16 sujetos): NO se cumple.** Con 12 ajenos por sesión (la demo) el IIC no ordena embodiment 0.2 / 0.5 / 0.8 (Spearman de todas las sesiones −0.12 [−0.31, +0.07]); con 30, apenas (+0.24 [−0.03, +0.50]; orden perfecto en 4 de 16 sujetos). Con embodiment 0 el intervalo incluye 0 en 88 % y 100 %, y no hay sesgo (64 sesiones nulas: +0.01). Falta potencia: en el gemelo d ≈ 0.3 con embodiment 0.8, y con 12 ajenos el intervalo mide ±0.5. **Decisión pendiente de Luis** (cambia el diseño): (a) dejarlo así y mostrar el IIC como exploratorio con intervalo ancho; (b) subir la fracción de ajenos (25 % da ~30 ajenos en 120 pasos, a costa de aprendizaje); (c) agregar un bloque corto de embodiment al final (60 movimientos, 30 ajenos, ~2.5 min).
+> **Aceptación en el gemelo (`estudios/embodiment_gemelo.py`, 16 sujetos): NO se cumple.** Con 12 ajenos por sesión (la demo) el IIC no ordena embodiment 0.2 / 0.5 / 0.8 (Spearman de todas las sesiones −0.12 [−0.31, +0.07]); con 30, apenas (+0.24 [−0.03, +0.50]; orden perfecto en 4 de 16 sujetos). Con embodiment 0 el intervalo incluye 0 en 88 % y 100 %, y no hay sesgo (64 sesiones nulas: +0.01). Falta potencia: en el gemelo d ≈ 0.3 con embodiment 0.8, y con 12 ajenos el intervalo mide ±0.5. Las opciones eran: (a) dejarlo así y mostrar el IIC como exploratorio con intervalo ancho; (b) subir la fracción de ajenos; (c) agregar un bloque corto de embodiment al final. **Decisión de Luis (3 de octubre): opción (a), exploratorio.**
+>
+> **Análisis de potencia** (`estudios/potencia_iic.py`, con las 176 sesiones ya simuladas; figura `docs/figuras/potencia_iic.png`): el IIC de una sesión es su d verdadera más ruido de desviación √(1.14 / ajenos); en el gemelo d = 0.32 × embodiment. Un intervalo de ±0.2 pide **77 ajenos** (~770 pasos del lazo; la demo tiene 120). Para un Spearman significativo (una cola, 0.05) con 16 sujetos por nivel: potencia de 52 % con 12 ajenos y de 80 % con **29**. Un Spearman esperado de 0.5 pide ~60 ajenos; de 0.8, ~300.
 
 **Objetivo:** medir en vivo qué tanto el cerebro del piloto trata a la órtesis como parte de su propio cuerpo. Es el componente científico más novedoso del proyecto y venía en la idea original. Debe presentarse como **métrica exploratoria**, no validada clínicamente.
 

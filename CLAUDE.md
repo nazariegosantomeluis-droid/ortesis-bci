@@ -73,6 +73,6 @@ Medidos el 2 de octubre de 2026 en la máquina de Luis (Windows 11, Python 3.11,
 - Calibración de ErrP corregida (16 sujetos del gemelo, `estudios/calibracion_errp_fija.py`): BA reportada 0.70 contra 0.73 real; CP3 en GO en 1 de 16.
 - Curva de robustez (simulador, `docs/figuras/curva_robustez.png`): con BA del detector ≥ 0.75 la recuperación ya es casi plana (~60 s); con 0.65, 162 s.
 - Cierre completo (simulador, 30 sujetos, `estudios/cierre_completo.py`): con cada ensayo desde 0.5 y paso máximo 0.30, la órtesis termina cerrada del todo en 68 % de los ensayos de cerrar (antes 27 %) y abierta en 75 % (antes 41 %), mismo error.
-- IIC de la Tarea 2 (gemelo, 16 sujetos, `estudios/embodiment_gemelo.py`; EXPLORATORIO y solo verificación): sin sesgo (64 sesiones nulas: +0.01); con 12 ajenos no ordena el embodiment (Spearman −0.12), con 30 apenas (+0.24 [−0.03, +0.50]). El criterio de aceptación de `TAREAS.md` no se cumple por potencia.
+- IIC de la Tarea 2 (gemelo, 16 sujetos, `estudios/embodiment_gemelo.py`; EXPLORATORIO y solo verificación): sin sesgo (64 sesiones nulas: +0.01); con 12 ajenos no ordena el embodiment (Spearman −0.12), con 30 apenas (+0.24 [−0.03, +0.50]). El criterio de aceptación de `TAREAS.md` no se cumple por potencia; Luis decidió dejarlo como exploratorio. Potencia (`estudios/potencia_iic.py`): intervalo de ±0.2 con 77 ajenos; Spearman significativo con potencia de 80 % desde 29 ajenos (16 sujetos por nivel).
 
 Las tareas pendientes, en orden, están en `TAREAS.md`.

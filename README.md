@@ -75,6 +75,18 @@ Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simu
 
 Con el detector de ErrP degradado a propósito, el aprendizaje baja a menos del 10 % y se congela la mayor parte de la falla. Los congelamientos en falso son de 1 %.
 
+**Curva de robustez** (simulador, 30 sujetos, `estudios/curva_robustez.py`): cuánto aguanta el agente un detector de ErrP peor. Con BA ≥ 0.75 la recuperación ya es casi plana; por debajo se alarga rápido. El decoder estático se queda en 0.325 de error en todos los casos.
+
+| BA del detector | Error del agente, 2 min tras perturbar | Recuperación |
+|---|---|---|
+| 0.65 | 0.259 | 162 s |
+| 0.70 | 0.236 | 88 s |
+| 0.75 | 0.219 | 65 s |
+| 0.80 | 0.214 | 63 s |
+| 0.85 | 0.214 | 56 s |
+
+![Curva de robustez: error y tiempo de recuperación según la BA del detector](docs/figuras/curva_robustez.png)
+
 ## Gemelo digital del piloto
 
 `cerebro_sintetico.py` sustituye al casco (un Unicorn Hybrid Black). Escucha las señales y los pasos del orquestador y responde como una persona: desincroniza mu/beta sobre C3 al imaginar cerrar, genera una respuesta visual occipital (N1 ≈ 170 ms en PO7/Oz/PO8) ante cada movimiento de la órtesis y un ErrP fronto-central (Ne ≈ 250 ms, Pe ≈ 350 ms en Fz/Cz/Pz) cuando va al lado contrario, parpadea, mueve la cabeza de vez en cuando (el giroscopio lo registra y el EEG se ensucia), pierde muestras por Bluetooth si se le pide y, opcionalmente, se cansa. Con él se valida el camino **real** completo con verdad conocida.
@@ -207,7 +219,17 @@ En el simulador el agente sigue claramente por debajo de la sombra con caos leve
 | 12 (la demo: 120 pasos adaptativos) | +0.12 / +0.19 / +0.16 / +0.13 | 88 % | −0.12 [−0.31, +0.07] | 2 de 16 |
 | 30 (300 pasos adaptativos) | +0.12 / +0.09 / +0.19 / +0.21 | 100 % | +0.24 [−0.03, +0.50] | 4 de 16 |
 
-**El criterio de aceptación no se cumple.** El IIC ordena los niveles apenas con 30 ajenos y nada con 12. El estimador no tiene sesgo: con embodiment 0, 64 sesiones de 30 ajenos dan +0.01 (el +0.12 de la tabla es azar de esas 16; otras 48 dieron −0.02). Lo que falta es potencia. En el gemelo la N1 mide ~3.5 µV contra ~4.5 µV de ruido por época; con embodiment 0.8 el efecto verdadero es d ≈ 0.3, y con 12 ajenos el intervalo de una sola sesión mide ±0.5. **En la demo el IIC solo podrá mostrar una atenuación grande (d ≳ 0.6); con una sesión no distingue niveles cercanos de embodiment.** El error del IIC baja con la raíz del número de ajenos: con 60 sería ~0.16.
+**El criterio de aceptación no se cumple.** El IIC ordena los niveles apenas con 30 ajenos y nada con 12. El estimador no tiene sesgo: con embodiment 0, 64 sesiones de 30 ajenos dan +0.01 (el +0.12 de la tabla es azar de esas 16; otras 48 dieron −0.02). Lo que falta es potencia. En el gemelo la N1 mide ~3.5 µV contra ~4.5 µV de ruido por época; con embodiment 0.8 el efecto verdadero es d ≈ 0.3, y con 12 ajenos el intervalo de una sola sesión mide ±0.5. **En la demo el IIC solo podrá mostrar una atenuación grande (d ≳ 0.6); con una sesión no distingue niveles cercanos de embodiment.** Por eso se presenta como exploratorio, con su intervalo (decisión de Luis, 3 de octubre).
+
+**Análisis de potencia** (`estudios/potencia_iic.py`, con las 176 sesiones del gemelo ya simuladas en `estudios/datos/iic_gemelo.csv`; no genera EEG nuevo). El IIC de una sesión se comporta como su d verdadera más ruido de desviación √(1.14 / ajenos). El modelo reproduce lo medido (0.34 con 12 ajenos y 0.18 con 30) y coincide con la teoría del error de una d de Cohen. En el gemelo, d = 0.32 × embodiment (intervalo del 90 %: 0.27 a 0.37).
+
+![Potencia del IIC: ancho del intervalo y Spearman según el número de movimientos ajenos](docs/figuras/potencia_iic.png)
+
+- **Intervalo de ±0.2:** hacen falta **77 movimientos ajenos**, unos 770 pasos del lazo adaptativo con 1 ajeno de cada 10 (la demo tiene 120). Con 12 ajenos el intervalo mide ±0.55 y con 30, ±0.30.
+- **Spearman significativo** (una cola, α = 0.05; con 16 sujetos por nivel el valor crítico es 0.24): con los 12 ajenos de la demo la potencia es de 52 % y con **29 ajenos, de 80 %**. Nuestro estudio de 30 ajenos quedó justo en el borde (+0.24). Con 32 sujetos por nivel bastarían 13 ajenos.
+- **Significativo no es alto.** Un Spearman esperado de 0.5 pide unos 60 ajenos y uno de 0.8, unos 300. Un solo sujeto ordena bien los tres niveles el 27 % de las veces con 12 ajenos y el 33 % con 30 (por azar, 17 %).
+
+Todo esto vale para el gemelo: el tamaño del efecto lo programamos nosotros y en una persona se desconoce. Lo que sí se traslada es la escala: el ancho del intervalo baja con la raíz del número de ajenos.
 
 ## Probar sin hardware
 
