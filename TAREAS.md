@@ -67,7 +67,7 @@ Scripts en `estudios/`. **Reportado a Luis y corregido** (tabla de abajo).
 | Semáforo PILOTO | gemelo con fatiga 1: alfa ×2.8 a los 15 min | solo avisa; umbrales ×1.5 y ×2.5 sin validar |
 | Órtesis cierra completa | simulador, 30 sujetos: cierra 0.27 → 0.68, abre 0.41 → 0.75; error igual (0.214) | cada ensayo desde 0.5 (400 ms antes del cue, marcador `centrado`, también tras pausa); paso máx. y ganancia 0.20 → 0.30; en `agente_errp.py` solo la ganancia por defecto pasa a leerse de `config` |
 
-**Abierto:** en el gemelo con el montaje del Unicorn el agente no supera a la sombra en los 2 min tras perturbar (0.47 vs 0.47 en dos corridas); en el simulador sí (0.21 vs 0.31). Causa sin investigar.
+**Abierto:** en el gemelo con el montaje del Unicorn el agente no supera a la sombra en los 2 min tras perturbar (0.47 vs 0.47 en dos corridas); en el simulador sí (0.21 vs 0.31). Primer análisis, solo con los CSV de esas corridas (2 de octubre, noche): el agente **aprende lento**. Beta sube +0.2 a +1.2 en los 20 pasos tras perturbar, contra +1.8 a +2.0 con el montaje anterior. No se congela: fiabilidad media de 0.92 a 0.96. En 2 de 3 corridas no cambió ni una decisión respecto a la sombra en esos 57 pasos. Coincide con una BA viva del detector de 0.72–0.74 al perturbar (antes 0.86–0.87), como predice la curva de robustez, pero una corrida con 0.84 también fue lenta. Indicio, no conclusión: falta medir con varias semillas del gemelo (por ejemplo, con `--errp` más alto para ver si la recuperación se acelera).
 
 ### Orden acordado tras el commit 5 (2 de octubre, tarde)
 
