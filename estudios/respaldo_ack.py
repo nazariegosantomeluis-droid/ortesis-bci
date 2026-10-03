@@ -12,7 +12,9 @@ sesiones (metas y ruido de fondo iguales):
 Mide la BA del detector (anidada en calibracion y en vivo) y la recuperacion del agente.
 SOLO verifica: la latencia mecanica y el ErrP los programamos nosotros en el gemelo.
 
-Uso: python estudios/respaldo_ack.py [sujetos] [repeticiones]
+Uso: python estudios/respaldo_ack.py [sujetos] [repeticiones] [topes]
+     topes: 'ignorar' modela los topes del recorrido de la ortesis como el lazo de hoy (ver
+     agente_lento.TOPES); sin el, todo paso es un movimiento visible (asi se midio primero).
 """
 import pickle
 import sys
@@ -49,13 +51,16 @@ def correr(sujetos=4, reps=4, salida=print):
 def main():
     sujetos = int(sys.argv[1]) if len(sys.argv) > 1 else 4
     reps = int(sys.argv[2]) if len(sys.argv) > 2 else 4
+    al.TOPES = sys.argv[3] if len(sys.argv) > 3 else None
     filas, modelos = correr(sujetos, reps, lambda *a: print(*a, flush=True))
     al.CACHE.mkdir(parents=True, exist_ok=True)
-    (al.CACHE / 'respaldo_ack.pkl').write_bytes(pickle.dumps({'filas': filas}))
+    nombre = 'respaldo_ack.pkl' if al.TOPES is None else f'respaldo_ack_topes_{al.TOPES}.pkl'
+    (al.CACHE / nombre).write_bytes(pickle.dumps({'filas': filas}))
     n = sujetos * reps
     ref = list(ESCENARIOS)[0]
     base = al.sesiones(filas, ref)
-    print(f'\n{sujetos} sujetos del gemelo x {reps} lazos = {n} sesiones por escenario; diferencia pareada contra "{ref}"')
+    print(f'\n{sujetos} sujetos del gemelo x {reps} lazos = {n} sesiones por escenario; diferencia pareada contra "{ref}"'
+          + (f'; topes del recorrido: {al.TOPES}' if al.TOPES else '; sin topes (todo paso visible)'))
     for e, (cal, _) in ESCENARIOS.items():
         x = al.sesiones(filas, e)
         de = np.array([a['err'] - b['err'] for a, b in zip(x, base)])

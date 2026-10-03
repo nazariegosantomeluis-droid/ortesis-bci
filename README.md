@@ -24,7 +24,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 39/39 pruebas pasaron
+python pruebas.py                    # debe decir 42/42 pruebas pasaron
 ```
 
 ## Archivos
@@ -43,6 +43,8 @@ python pruebas.py                    # debe decir 39/39 pruebas pasaron
 | `estudios/` | Mediciones offline con el gemelo y el simulador que respaldan cada decisión (ver su README). |
 | `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector y piloto, que solo avisa) y el retroceso de las reconexiones. |
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
+| `repetir_sesion.py` | Plan B: repite en el tablero, y si se quiere en la órtesis, una sesión grabada (`resultados/sesion_..._estado.jsonl`). |
+| `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
 | `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
@@ -57,17 +59,18 @@ python pruebas.py                    # debe decir 39/39 pruebas pasaron
   - *Sesgo de decisiones*: es rápido, y asume metas balanceadas.
   - *Chequeo predictivo*: el agente predice cuántos ErrP debería provocar según su confianza; si aparecen más, está seguro y equivocado. Funciona aunque las metas no estén balanceadas.
 - **`ConfianzaDetector`.** Estima en vivo la sensibilidad y especificidad del detector de ErrP con posteriores Beta con olvido. El aprendizaje se escala con el índice de Youden y se congela si el detector deja de informar.
+- **Un paso que no mueve la órtesis no enseña.** Con la órtesis ya en el tope, el paso siguiente no se ve, así que no hay ErrP que leer. Ese paso cuenta como decisión en el análisis, pero el agente no aprende de él y no cuenta como detección fallida para la confianza del detector (columna `alineacion = sin_movimiento`, marcador `paso_quieto:<seq>`, interruptor `config.IGNORAR_SIN_MOVIMIENTO`). En la calibración de ErrP la órtesis vuelve al centro cuando el movimiento no cabe en el recorrido: cada época tiene un movimiento real.
 
 **Señal (`hardware.py`, `puente_lsl.py`)**
 
 - **Recentrado riemanniano no supervisado.** El decoder de MI se re-centra solo con cada ventana. En la prueba, tras mezclar canales pasa de 50 % a 98 % de exactitud sin recalibrar.
 - **Detector de ErrP de dos o tres vistas fusionadas** (temporal con LDA encogido, geométrica de Riemann y, opcional, potencia theta en Fz y Cz), con probabilidades calibradas, umbral de Neyman-Pearson (especificidad ≥ 0.90) y detector de rareza para épocas fuera de distribución. La calibración elige por validación cruzada anidada los canales (los de su papel o los 8) y las vistas, y registra la elección.
-- **Época alineada al movimiento real.** La época del ErrP se corta donde la telemetría del ESP32 dice que la órtesis empezó a moverse. Sin telemetría usa el ACK más la latencia mecánica media medida; si tampoco la hay, el ACK. La columna `alineacion` del CSV dice cuál se usó en cada paso.
-- **Detector co-adaptativo** (encendido por defecto; `--sin-coadaptativo` lo apaga). El detector se re-entrena en otro hilo cada 20 épocas del lazo, y el modelo nuevo solo reemplaza al vigente si en una prueba en sombra de 30 épocas no es peor. Ningún fallo del re-entrenamiento detiene el lazo: queda registrado en consola y en EVALUACION, y el lazo sigue con el modelo vigente; con tres fallos seguidos se apaga solo. En el gemelo sube la BA viva unos 0.02 y no cambia el error del agente (±0.01).
+- **Época alineada al movimiento real.** La época del ErrP se corta donde la telemetría del ESP32 dice que la órtesis empezó a moverse. Sin telemetría usa el ACK más la latencia mecánica media medida; si tampoco la hay, el ACK. La columna `alineacion` del CSV dice cuál se usó en cada paso. Perder la telemetría cuesta, pero el lazo sigue: en el gemelo (`python estudios/respaldo_ack.py 4 4 ignorar`, 16 sesiones por escenario, con los topes del recorrido) la BA viva del detector baja de 0.86 a 0.72 si nunca hubo telemetría y a 0.81 si se pierde en el lazo; el error del agente en los 2 min tras perturbar pasa de 0.33 a 0.40 y a 0.34, y se recuperan 10 y 12 de 16 sesiones en lugar de las 16.
+- **Detector co-adaptativo** (encendido por defecto; `--sin-coadaptativo` lo apaga). El detector se re-entrena en otro hilo cada 20 épocas del lazo, y el modelo nuevo solo reemplaza al vigente si en una prueba en sombra de 30 épocas no es peor. Ningún fallo del re-entrenamiento detiene el lazo: queda registrado en consola y en EVALUACION, y el lazo sigue con el modelo vigente; con tres fallos seguidos se apaga solo. En el gemelo (16 sesiones por detector, con los topes del recorrido) no empeora el error del agente: −0.005 ± 0.004 con el detector fuerte, −0.024 ± 0.012 con el medio y −0.008 ± 0.006 con el débil; sesión por sesión va de −0.14 a +0.05.
 - **Calibración honesta.** MI se detiene sola cuando el intervalo de confianza ya decide (mínimo 36 ensayos); el detector de ErrP usa siempre 120 épocas con el umbral elegido por validación anidada (ver el hallazgo de la maldición del ganador).
 - **Hora por contador.** La hora de cada muestra se reconstruye con el contador del casco, sin el jitter de llegada por Bluetooth; una pérdida queda como un hueco visible.
 
-Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simulador_lazo.py --semillas 30`; medidos en Windows 11 con Python 3.11 el 2 de octubre de 2026):
+Resultados en simulación (30 sujetos, perturbación de 2.4 logits, `python simulador_lazo.py --semillas 30`; medidos en Windows 11 con Python 3.11 y repetidos el 3 de octubre de 2026 con la configuración final):
 
 | Agente | Error antes | Primeros 2 min | Después |
 |---|---|---|---|
@@ -93,7 +96,7 @@ Con el detector de ErrP degradado a propósito, el aprendizaje baja a menos del 
 
 `cerebro_sintetico.py` sustituye al casco (un Unicorn Hybrid Black). Escucha las señales y los pasos del orquestador y responde como una persona: desincroniza mu/beta sobre C3 al imaginar cerrar, genera una respuesta visual occipital (N1 ≈ 170 ms en PO7/Oz/PO8) ante cada movimiento de la órtesis y un ErrP fronto-central (Ne ≈ 250 ms, Pe ≈ 350 ms en Fz/Cz/Pz) cuando va al lado contrario, parpadea, mueve la cabeza de vez en cuando (el giroscopio lo registra y el EEG se ensucia), pierde muestras por Bluetooth si se le pide y, opcionalmente, se cansa. Con él se valida el camino **real** completo con verdad conocida.
 
-Corrida completa con el montaje del Unicorn (`orquestador.py real --ortesis-sim` contra el cerebro sintético, una corrida): CP1 a CP4 en **GO** (MI BA 0.86 con 36 ensayos, ErrP BA 0.79 con 120 épocas). En los 2 min tras la perturbación el agente y la sombra empataron (0.47 contra 0.47; con el montaje anterior, 0.26 contra 0.46): en el gemelo el agente recupera más lento que en el simulador y la causa sigue abierta (sección Resiliencia).
+Corrida completa con la configuración final (`orquestador.py real --ortesis-sim` contra el cerebro sintético, una corrida, 3 de octubre): CP1 y CP2 en **GO** (MI BA 0.88 con 42 ensayos). El CP3 dio **NO GO** por especificidad (ErrP: sensibilidad 0.83, especificidad 0.87, BA 0.85 con 120 épocas; el criterio pide especificidad ≥ 0.90) y el lazo se corrió con ese detector. CP4 en **GO**: el agente recuperó en 28 pasos (50 s) y en los 2 min tras la perturbación quedó en 0.39 contra 0.54 de la sombra. 30 de los 138 pasos no movieron la órtesis. Es una sola corrida; la referencia con 16 sesiones por detector está en la sección del control negativo.
 
 ```bash
 python cerebro_sintetico.py --banco          # decoder y detector offline, en segundos
@@ -114,12 +117,13 @@ python cerebro_sintetico.py --formato unicornlsl               # publica como la
 | Secuencial: GO temprano (40 a 60 épocas) | 2 de 16 | 0.84 / 0.90 / **0.87** | 0.56 / 0.81 / **0.69** |
 | Secuencial: NO GO temprano (60 épocas) | 11 de 16 | BA 0.57 | con 120 épocas habría sido 0.72 |
 | **Corregida: 120 épocas fijas y umbral anidado** | 16 de 16 | 0.51 / 0.89 / **0.70** | 0.56 / 0.89 / **0.73** |
+| **Configuración final: además elige canales y vistas** | 16 de 16 | 0.72 / 0.91 / **0.81** | 0.72 / 0.90 / **0.81** |
 
 La parada secuencial revisaba cada 10 épocas y daba GO en cuanto el estimado salía alto: con pocos datos eso solo ocurre por suerte, y además el umbral de Neyman-Pearson se elegía sobre los mismos puntajes que se evaluaban. Es la maldición del ganador: se reporta el máximo de varios estimados ruidosos. En MI el efecto era menor (+0.02 de error con un mínimo de 24 ensayos; +0.00 con 36).
 
 **La corrección.** El detector de ErrP se calibra siempre con las 120 épocas, sin GO ni NO GO tempranos, y el umbral se elige dentro de cada pliegue (validación anidada): lo reportado queda a −0.02 ± 0.04 de lo real. MI exige al menos 36 ensayos. Además, el primer paso de cada ensayo fallaba más (0.22 contra 0.18) porque su ventana empezaba con la transición mental; esperar 1 s más tras la señal lo baja a 0.15. El resto del 0.37 era ruido: un bloque estático de 30 pasos tiene desviación de 0.08 (en vivo, con 150 pasos: BA 0.83 en calibración y 0.20 de error).
 
-**El costo honesto.** Con el montaje del Unicorn (3 electrodos fronto-centrales) y el ErrP del gemelo, la BA real del detector ronda 0.73 y el CP3 (0.75) dio GO en 1 de 16 sujetos. Antes "pasaba" por el sesgo. Son cifras del gemelo, no de una persona.
+**El costo honesto.** Con el montaje del Unicorn (3 electrodos fronto-centrales), el ErrP del gemelo y el detector fijo de 8 canales y dos vistas, la BA real rondaba 0.73 y el CP3 (0.75) daba GO en 1 de 16 sujetos. Antes "pasaba" por el sesgo. Con la configuración final (la calibración elige canales y vistas, y el gemelo produce theta tras el error) la BA real es 0.81, lo reportado coincide con lo real (+0.00 ± 0.04) y el CP3 da GO en 8 de 16. Parte de esa mejora viene de la theta, que programamos nosotros. Son cifras del gemelo, no de una persona.
 
 ## Control negativo: el agente aprende del ErrP, y por eso su velocidad depende del detector
 
@@ -136,11 +140,31 @@ La parada secuencial revisaba cada 10 épocas y daba GO en cuanto el estimado sa
 - **No era la salida calibrada.** La binaria no es más rápida, y con detector débil es peor (+0.044 ± 0.018). La calibración de Platt sí comprimía las probabilidades del detector de aquellas corridas (pendiente de calibración 1.31 contra 1.05 del actual), pero corregir eso apenas mejora (−0.016 ± 0.012).
 - **Era la evidencia.** El agente calcula la probabilidad de haberse equivocado combinando su prior de error (~0.23) con lo que dice el detector. Con ese prior, un error solo lo convence (probabilidad mayor que 0.5) si el detector es rotundo: pasa con el 65 % de los errores con el detector actual, con el 44 % con el de aquellas corridas y con el 24 % con el débil.
 - **La corrección tentadora se descartó.** Subir el prior a 0.5 cuando se detecta un cambio es la variante más rápida de la tabla, pero **falla el control negativo**: si al agente se le quita la evidencia del ErrP (recibe siempre la tasa base), se recupera igual, 16 de 16 sesiones. Lo que lo mueve ahí es el detector de sesgo, que supone metas balanceadas, y no el cerebro del piloto. En el simulador, con un detector sin información, pasa lo mismo: 30 de 30 sujetos.
-- **El agente de hoy pasa ese control.** Sin la evidencia del ErrP casi no se recupera: 4 de 16 sesiones contra 13 de 16, y su error sube +0.121 ± 0.019. Por eso no se cambió: su velocidad depende de la calidad del detector, como muestra la curva de robustez, y eso es justo lo que afirma el proyecto.
+- **El agente de hoy pasa ese control.** Sin la evidencia del ErrP casi no se recupera: 4 de 16 sesiones contra 13 de 16 con el detector débil, y su error sube +0.121 ± 0.019 (medido con todo paso visible; con los topes del recorrido, más abajo, es 1 de 16 contra 10 a 16). Por eso no se cambió: su velocidad depende de la calidad del detector, como muestra la curva de robustez, y eso es justo lo que afirma el proyecto.
 
 ![Agente lento: β tras la perturbación, control negativo, P_hat de los errores y confiabilidad del detector](docs/figuras/agente_lento.png)
 
 Son cifras del gemelo, no de una persona. Parte de la mejora del detector actual viene de la actividad theta tras el error, que programamos nosotros.
+
+### Los pasos que no mueven la órtesis (3 de octubre, tarde)
+
+**El hueco.** Cada ensayo empieza en el punto medio y da 5 pasos de hasta 0.30 del recorrido. Con un decoder seguro la órtesis llega al tope en el segundo paso y los siguientes no la mueven; tras la perturbación pasa lo mismo hacia el lado equivocado. En las sesiones contra el gemelo eso era del 14 al 28 % de los pasos. Una persona no ve nada en esos pasos y no produce ErrP, pero el gemelo reaccionaba al marcador del paso aunque la órtesis no se moviera. Por eso el estudio de arriba (y todas las corridas anteriores) eran optimistas, y el lazo tenía un defecto que el gemelo tapaba: leía esos pasos como "sin ErrP", lo que refuerza la decisión y cuenta como detección fallida.
+
+**Lo que se midió** (`estudios/paso_sin_movimiento.py`: el mismo lazo sin LSL, con los topes del recorrido y un gemelo que no reacciona a lo que no se mueve; 16 sesiones por celda). Error del agente en los 2 minutos tras perturbar y sesiones que se recuperan en ese plazo (el decoder sin aprender queda en 0.49):
+
+| Detector (BA viva) | Todo paso se ve (estudio de arriba) | Con topes, el lazo lee esos pasos (antes) | Con topes, el lazo los ignora (**hoy**) | Hoy, sin la evidencia del ErrP |
+|---|---|---|---|---|
+| Fuerte (0.83) | 0.280, 16 de 16 | 0.409, 9 de 16; congelado 21 % | **0.319, 16 de 16**; congelado 0 % | 0.463, 1 de 16 |
+| Medio (0.73) | 0.294, 15 de 16 | 0.376, 11 de 16; congelado 13 % | **0.389, 10 de 16**; congelado 5 % | 0.467, 1 de 16 |
+| Débil (0.67) | 0.316, 13 de 16 | 0.391, 7 de 16; congelado 26 % | **0.400, 11 de 16**; congelado 5 % | 0.469, 1 de 16 |
+
+- **Un tercio de los pasos no informa** (31 a 36 % tras la perturbación), y eso cuesta: con el detector fuerte la recuperación pasa de 19 a 28 pasos, y con los otros dos se recuperan 10 u 11 sesiones de 16 en lugar de 13 a 15.
+- **La corrección ayuda donde el detector es bueno.** Con el detector fuerte, leer esos pasos congelaba el aprendizaje 21 % del tiempo y solo se recuperaban 9 sesiones de 16; ignorándolos se recuperan las 16 y el error baja de 0.41 a 0.32. Con detector medio o débil el error no cambia (+0.01, dentro del error estándar de ±0.02); lo que cambia es que el aprendizaje ya casi no se congela en falso.
+- **El control negativo se sostiene, y queda más limpio:** sin la evidencia del ErrP se recupera 1 sesión de 16 con cualquiera de los tres detectores; con ella, 10 a 16 de 16.
+
+![Control negativo con la configuración final](docs/figuras/control_negativo.png)
+
+Sigue siendo el gemelo, no una persona. El simulador rápido (`simulador_lazo.py`, la curva de robustez) no modela los topes: ahí todo paso informa, y por eso recupera antes.
 
 ## Resiliencia: el lazo que no se cae
 
@@ -206,20 +230,20 @@ python orquestador.py sim --ciclo 0 --caos 1 --caos-nivel leve  # caos leve: una
 python orquestador.py real --puerto COM4 --reanudar             # continuar tras un cierre inesperado
 ```
 
-**Resultados con caos (exploratorios; simulador y gemelo, no una persona).** Error en los ~2 min tras la perturbación, sobre pasos no excluidos. "Caos leve" (`--caos-nivel leve`) es una falla cada 2 a 3 minutos; el estándar, una cada pocos segundos.
+**Resultados con caos (exploratorios; simulador y gemelo, no una persona; medidos el 3 de octubre con la configuración final).** Error en los ~2 min tras la perturbación, sobre pasos no excluidos. Los movimientos ajenos de la Tarea 2 cuentan como excluidos (`ajeno`): no son decisiones del agente. "Caos leve" (`--caos-nivel leve`) es una falla cada 2 a 3 minutos; el estándar, una cada pocos segundos.
 
 | Medición | Agente | Sombra | Excluidos y pausas |
 |---|---|---|---|
-| Simulador, 30 sujetos, sin caos | 0.235 | 0.323 | ninguno; agente por debajo en 26 de 30 sujetos |
-| Simulador, 30 sujetos, caos leve | 0.232 | 0.326 | 105 de 10 867 filas: `pausa:eeg` 39, `pausa:canal` 28, `epoca_invalida` 20, `sin_ack` 18; agente por debajo en 27 de 30 |
-| Simulador, 30 sujetos, caos estándar | 0.222 | 0.333 | 1109 de 11 425 filas: `pausa:eeg` 443, `sin_ack` 332, `pausa:canal` 181, `epoca_invalida` 152, `pausa:ortesis` 1; agente por debajo en 29 de 30 |
-| Gemelo (montaje Unicorn), sin caos | 0.47 | 0.47 | 0 de 150 filas; ninguna pausa; CP1 a CP4 en GO (MI 0.86 con 36 ensayos, ErrP 0.79 con 120 épocas); recuperación en 82 s |
-| Gemelo (montaje Unicorn), caos leve (semilla 2) | 0.47 | 0.47 | 2 de 151 filas: `pausa:eeg` 1, `epoca_invalida` 1; 1 pausa, reanudada sola; recuperación en 114 s |
-| Gemelo (montaje Unicorn), caos estándar (semilla 1) | 0.42 | 0.49 | 23 de 161 filas: `pausa:eeg` 8, `sin_ack` 6, `epoca_invalida` 6, `pausa:canal` 3; 11 pausas, todas reanudadas solas; recuperación en 156 s (CP4 NO GO) |
+| Simulador, 30 sujetos, sin caos | 0.225 | 0.296 | 900 de 10 800 filas, todas movimientos ajenos; agente por debajo en 28 de 30 sujetos |
+| Simulador, 30 sujetos, caos leve | 0.220 | 0.289 | 985 de 10 847 filas: `ajeno` 900, `pausa:eeg` 26, `epoca_invalida` 23, `pausa:canal` 21, `sin_ack` 15; agente por debajo en 28 de 30 |
+| Simulador, 30 sujetos, caos estándar | 0.223 | 0.296 | 2168 de 11 417 filas: `ajeno` 900, `pausa:eeg` 436, `epoca_invalida` 350, `sin_ack` 301, `pausa:canal` 180, `pausa:ortesis` 1; agente por debajo en 27 de 30 |
+| Gemelo (montaje Unicorn), sin caos | 0.39 | 0.54 | 12 de 150 filas, todas movimientos ajenos; ninguna pausa; CP1 y CP2 en GO, CP3 en NO GO por especificidad (0.87) y CP4 en GO: recuperación en 28 pasos = 50 s; 30 pasos sin movimiento |
+| Gemelo (montaje Unicorn), caos leve (semilla 2) | 0.23 | 0.53 | 13 de 151 filas: `ajeno` 12, `pausa:eeg` 1; 1 pausa, reanudada sola; recuperación en 22 pasos = 45 s; 38 pasos sin movimiento |
+| Gemelo (montaje Unicorn), caos estándar (semilla 1) | 0.32 | 0.49 | 38 de 160 filas: `ajeno` 12, `epoca_invalida` 11, `pausa:eeg` 7, `sin_ack` 5, `pausa:canal` 3; 10 pausas, todas reanudadas solas; recuperación en 15 pasos = 44 s; 23 pasos sin movimiento |
 
-Las tres filas del gemelo usan los mismos modelos (una sola calibración) y son **una corrida por condición**; los intervalos del 90 % de esos 2 minutos son muy anchos (por ejemplo [0.25, 0.74]). En el bloque adaptativo completo el agente quedó por debajo de la sombra en las tres: 0.44 contra 0.46, 0.29 contra 0.34 y 0.30 contra 0.40. Antes, con el montaje anterior, tres corridas con caos estándar dieron 0.44/0.49, 0.30/0.53 y 0.46/0.47 (agente/sombra).
+Las tres filas del gemelo usan los mismos modelos (una sola calibración, la del CP3 en NO GO por especificidad; por eso el lazo se corrió con `--forzar`) y son **una corrida por condición**: los intervalos del 90 % de esos 2 minutos son muy anchos (por ejemplo [0.23, 0.56]). En el bloque adaptativo completo el agente quedó por debajo de la sombra en las tres: 0.35 contra 0.41, 0.19 contra 0.38 y 0.31 contra 0.45. Por la mañana, antes de corregir los pasos sin movimiento (el gemelo reaccionaba a todos los pasos), las mismas tres condiciones dieron 0.33/0.54, 0.51/0.54 (sin recuperarse) y 0.21/0.44; la de caos leve, repetida dos veces con los mismos modelos, sí se recuperó (0.23/0.54 y 0.28/0.54). Una sola corrida dice poco.
 
-En el simulador el agente sigue claramente por debajo de la sombra con caos leve y estándar. **En el gemelo con el montaje del Unicorn, en los primeros 2 minutos tras perturbar el agente no supera a la sombra** (recupera en 82 a 156 s, más lento que en el simulador). El agente no se modificó para estas mediciones; la causa está abierta (ver `TAREAS.md`). Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
+En el simulador el agente sigue claramente por debajo de la sombra con caos leve y estándar. En el gemelo, con la configuración final, las tres corridas se recuperaron en 44 a 50 s y el agente quedó por debajo de la sombra en los 2 minutos tras perturbar. El empate con la sombra de las corridas del 2 de octubre venía del detector de entonces (8 canales y dos vistas, BA viva ~0.74; sección del control negativo). El aprendizaje del agente no se modificó. Todas las sesiones terminaron sin excepción y todas las pausas se reanudaron solas.
 
 **Lo que enseñó el caos (medido, no supuesto):**
 
@@ -266,6 +290,8 @@ python tablero.py  &  python orquestador.py sim # ver el tablero en vivo
 
 ## El día de la demo (en este orden)
 
+**El guion completo está en [docs/DOMINGO.md](docs/DOMINGO.md):** los comandos en orden, qué hacer con cada veredicto de `verificar_unicorn.py`, el árbol de decisión de cada checkpoint y el plan B. Lo de abajo es el resumen.
+
 **0. Verificar el casco (una vez, menos de 5 minutos).** El Unicorn llega el mismo día, así que hay cosas que solo se pudieron probar con el gemelo. Con el casco puesto y emparejado con **su dongle** (no con el Bluetooth de la laptop):
 
 ```bash
@@ -290,7 +316,9 @@ python orquestador.py real --puerto COM4
 Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
 
 Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`. Para que el detector no cambie durante el lazo: `--sin-coadaptativo`.
-**Plan B** (checkpoint 3 falla): `python puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv` y correr el orquestador igual.
+Si el CP3 da NO GO, `--solo-errp` repite solo la calibración de ErrP con el decoder de MI ya calibrado. Al cargar modelos guardados, el orquestador dice hace cuánto se calibraron y avisa si tienen más de 6 horas (en `modelos/` pueden quedar los del gemelo o los de otro piloto).
+
+**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite la última sesión real en el tablero, y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
 
 El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
@@ -304,10 +332,21 @@ El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 |---|---|---|---|
 | 1 | IMPEDANCIAS | Calidad de señal por canal (el Unicorn no mide impedancias) y latencia del ACK en 40 movimientos: MAD ≤ 15 ms, p95 ≤ 60 ms, ACK perdidos ≤ 10 % | Más gel / revisar firmware antes de seguir |
 | 2 | CAL_MI | Exactitud balanceada MI ≥ 0.70 (secuencial, mínimo 36 ensayos) | Cambiar piloto o mano vs pies |
-| 3 | CAL_ERRP | BA ErrP ≥ 0.75 y especificidad ≥ 0.90, con 120 épocas fijas y umbral anidado | Plan B: sesión grabada |
+| 3 | CAL_ERRP | BA ErrP ≥ 0.75 y especificidad ≥ 0.90, con 120 épocas fijas y umbral anidado | Repetir con `--solo-errp`, seguir con `--saltar-calibracion` (aprende más lento) o plan B |
 | 4 | EVALUACION | Recuperación ≤ 120 s | Congelar y usar la ruta de 24 h |
 
 `--forzar` continúa aunque un checkpoint diga NO GO (solo para pruebas).
+
+## Figuras para la presentación
+
+Están en `docs/figuras/` y cada una se regenera con su estudio. Todas son del simulador o del gemelo, no de una persona.
+
+| Figura | Qué muestra | Cómo se regenera |
+|---|---|---|
+| `control_negativo.png` | **El resultado central.** Sin la evidencia del ErrP el agente no se recupera de la perturbación (1 de 16 sesiones); con ella sí (10 a 16 de 16), con tres calidades de detector y los topes del recorrido. | `python estudios/paso_sin_movimiento.py` (unos 8 minutos; `informe` rehace la tabla y la figura con lo ya corrido) |
+| `curva_robustez.png` | Error tras perturbar y tiempo de recuperación según la BA del detector (0.65 a 0.85). Simulador rápido: no modela los topes del recorrido. | `python estudios/curva_robustez.py` |
+| `potencia_iic.png` | Cuántos movimientos ajenos pide el IIC para un intervalo de ±0.2 y para un Spearman significativo. | `python estudios/potencia_iic.py` |
+| `agente_lento.png` | Figura técnica: por qué el agente era lento y por qué se descartó la corrección del prior. | `python estudios/agente_lento.py informe` |
 
 ## Protocolo del ESP32 (para P2)
 

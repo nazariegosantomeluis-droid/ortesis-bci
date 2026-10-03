@@ -644,9 +644,9 @@ def graficar_control(datos, ruta=FIGURA_CONTROL, nota=''):
              'mismas sesiones, pero el agente recibe siempre la tasa base como salida del detector (LLR = 0);\nla compuerta '
              'de confianza sigue abierta. Perturbaci\u00f3n de 2.4 logits; franja gris: los 57 pasos (2 min) del CP4; '
              'recuperaci\u00f3n = \u03b2 al 70 % de la perturbaci\u00f3n. Barras de error: 1 error est\u00e1ndar.'
-             + (' ' + nota if nota else ''),
+             + ('\n' + nota if nota else ''),
              fontsize=8.5, color=tinta2, linespacing=1.5)
-    fig.tight_layout(rect=(0, 0.09, 1, 0.93))
+    fig.tight_layout(rect=(0, 0.12 if nota else 0.09, 1, 0.93))
     ruta.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(ruta, dpi=160, facecolor=fig.get_facecolor())
     plt.close(fig)
