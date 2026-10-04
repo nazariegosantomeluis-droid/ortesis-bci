@@ -61,7 +61,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `ia.py` | Lo común a toda la IA: llave desde `.env`, lo que puede salir hacia la API (`sanear`), preguntas con herramientas, y el esquema, la validación y las reglas deterministas de las propuestas. Nada de esto corre dentro del lazo. |
 | `copiloto.py` | Copiloto clínico: preguntas sobre una sesión respondidas con herramientas sobre su CSV, e informe entre sesiones. |
 | `narrador.py` | Narrador para el jurado: proceso aparte que escucha `Estado` y publica una frase por evento relevante en el flujo `Narracion` (Claude, con plantillas de respaldo). |
-| `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
+| `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. Con `--flechas`, un sexto panel con la contribución de cada ErrP al cambio de `beta`. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
 
@@ -325,6 +325,19 @@ python orquestador.py real --puerto COM4 --coinvestigador
 Las reglas deterministas, en orden: pocos pasos válidos (< 30) → continuar; más de 25 % de filas excluidas → pausa para revisar el casco y la órtesis; alfa occipital ≥ 1.5 veces su línea base → pausa; BA viva < 0.60 o más de la mitad del bloque congelado → recalibrar; errores con pasos chicos que pasan sin ErrP 25 puntos más que con pasos grandes → subir `paso_visible` 0.02; si no, continuar. Los umbrales están en `config.REGLAS_PROPUESTA` y **no están validados con personas**.
 
 Probado en el simulador con la API simulada (`pruebas.py`, `coinvestigador_entre_bloques`): aprobada, `paso_visible` pasa de 0.08 a 0.10 y el lazo lo usa desde el bloque siguiente; rechazada o sin decisión, nada cambia; una propuesta de `paso_max = 0.95` se descarta. **Sin probar con la API real.**
+
+## El cerebro enseñando a la máquina: flechas de ErrP (`tablero.py --flechas`)
+
+```bash
+python tablero.py --flechas           # apagado por defecto
+```
+
+Un sexto panel dibuja **una flecha por paso**: su dirección es hacia dónde movió ese paso a `beta` (arriba = hacia CERRAR, abajo = hacia RELAJAR) y su largo, cuánto. Violeta cuando el detector marcó ese paso como ErrP, gris cuando no (la ausencia de ErrP también enseña, menos). Sobre el panel, una línea cuenta el último paso en palabras. Tras la perturbación se ve la ráfaga de flechas violetas hacia el mismo lado que va corrigiendo el agente.
+
+- **Es lo que el agente hizo, no una interpretación:** la flecha es la diferencia de `beta` entre dos pasos consecutivos del flujo `Estado` (el contrato no cambia). Un paso sin época útil, o con el aprendizaje congelado, no dibuja flecha.
+- **El cambio de `beta` junta todo lo que el agente usó de ese paso** (ErrP, prior y confianza del detector); no mide la amplitud del ErrP en microvoltios.
+- **Respeta el ciego del control causal:** en una sesión `--sham` el panel queda en blanco hasta pulsar *Revelar bloques*, porque el tamaño de las flechas (grandes en el bloque real, casi nulas en el sham `nula`) delataría cuál es cuál.
+- Probado sin pantalla en `pruebas.py` (`tablero_flechas`). **Todavía no se ha visto con una sesión en vivo.**
 
 ## Narrador para el jurado (`narrador.py`)
 

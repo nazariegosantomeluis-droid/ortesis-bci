@@ -16,6 +16,12 @@ un electrodo, cual falla y por que.
 Con --copiloto, una caja de texto para preguntarle al copiloto clinico (copiloto.py) sobre la
 sesion mas reciente; responde en otro hilo, sin detener el tablero.
 
+Con --flechas, un sexto panel con la contribucion de cada ErrP al cambio de beta: una flecha por paso,
+hacia arriba si empuja a beta hacia CERRAR y hacia abajo si hacia RELAJAR, tan larga como el cambio;
+violeta si el detector marco ese paso como ErrP, gris si no. Sale de la diferencia de beta entre pasos
+consecutivos del flujo 'Estado' (no cambia el contrato). En el control causal (--sham) queda en blanco
+hasta pulsar 'Revelar bloques' (el tamano de las flechas delataria el bloque sham).
+
 Con --narrador, una franja con la ultima frase del narrador (narrador.py, flujo 'Narracion').
 
 Con orquestador.py --coinvestigador, al terminar un bloque aparece la propuesta con los botones
@@ -23,6 +29,7 @@ Aprobar y Rechazar: la decision se escribe en el registro de propuestas de la se
 
 Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
       python tablero.py --copiloto          (con la caja de preguntas)
+      python tablero.py --flechas           (con el panel de la contribucion de cada ErrP a beta)
       python tablero.py --narrador          (con la franja del narrador; correr tambien narrador.py)
       python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
 """
@@ -44,10 +51,23 @@ COLORES_SALUD = {config.VERDE: '#2ca02c', config.AMARILLO: '#e6b800', config.ROJ
                  config.CALENTANDO: '#9e9e9e'}
 SEMAFOROS = {'eeg': 'EEG', 'ortesis': 'ORTESIS', 'detector': 'DETECTOR', 'piloto': 'PILOTO'}
 VENTANA = 20     # para el error movil
+TITULO_FLECHAS = 'contribucion de cada ErrP a beta (flecha arriba = hacia CERRAR, abajo = hacia RELAJAR; violeta = ErrP detectado)'
+COLOR_ERRP, COLOR_SIN_ERRP = '#9467bd', '#9e9e9e'    # flechas: el detector marco ErrP / no lo marco
+
+
+def contribucion_beta(beta_anterior, e, e_anterior=None):
+    """Cambio de beta que dejo este paso (+ hacia CERRAR, - hacia RELAJAR); 0 si no hay con que
+    compararlo: primer paso, sesion nueva (el numero de paso retrocede) o cambio de bloque del control
+    causal (el agente se reinicia y beta vuelve a 0 sin que ningun ErrP lo mueva)."""
+    if beta_anterior is None or e_anterior is None:
+        return 0.0
+    if e['paso'] <= e_anterior['paso'] or e.get('bloque') != e_anterior.get('bloque'):
+        return 0.0
+    return float(e['beta'] - beta_anterior)
 
 
 class Tablero(QtWidgets.QWidget):
-    def __init__(self, copiloto=False, narrador=False):
+    def __init__(self, copiloto=False, narrador=False, flechas=False):
         super().__init__()
         self.setWindowTitle('ortesis-bci · Tablero')
         self.resize(1200, 900)
@@ -126,6 +146,9 @@ class Tablero(QtWidgets.QWidget):
         lay.addWidget(self.g)
         titulos = ['p cruda y umbral b', 'cierre vs meta', 'P_hat por paso',
                    f'error movil ({VENTANA} pasos)', 'beta, confianza del detector y cambios']
+        self.con_flechas = flechas
+        if flechas:
+            titulos.append(TITULO_FLECHAS)
         self.p = []
         for i, t in enumerate(titulos):
             pl = self.g.addPlot(row=i, col=0, title=t)
@@ -154,7 +177,21 @@ class Tablero(QtWidgets.QWidget):
         self.c_fi = self.p[4].plot(pen=pen('#8c564b', 1), name='fiabilidad (0 = congelado)')
 
         self.d = {k: deque(maxlen=N) for k in
-                  ('paso', 'p', 'b', 'ang', 'meta', 'ph', 'err', 'es', 'beta', 'sd', 'ev', 'fi')}
+                  ('paso', 'p', 'b', 'ang', 'meta', 'ph', 'err', 'es', 'beta', 'sd', 'ev', 'fi', 'db', 'det')}
+        self._anterior = None                                    # el paso anterior, para la contribucion a beta
+        if flechas:
+            pl = self.p[5]
+            pl.setLabel('left', 'cambio de beta')
+            pl.getAxis('left').enableAutoSIPrefix(False)
+            pl.setMinimumHeight(200)
+            pl.addLine(y=0, pen=pg.mkPen('k', width=1))
+            self.c_tallos = pg.PlotCurveItem(connect='pairs')
+            self.c_puntas = pg.ScatterPlotItem(pen=None, size=11)
+            pl.addItem(self.c_tallos)
+            pl.addItem(self.c_puntas)
+            self.lbl_flecha = QtWidgets.QLabel('')
+            self.lbl_flecha.setStyleSheet('font-size:14px; font-weight:bold; padding:2px 4px;')
+            lay.insertWidget(lay.indexOf(self.g), self.lbl_flecha)
         self.inlet, self._encontrado, self._buscando = None, None, False
         self._conectar()
         self.timer = QtCore.QTimer()
@@ -315,6 +352,10 @@ class Tablero(QtWidgets.QWidget):
             if d['paso'] and e['paso'] < d['paso'][-1]:          # nueva sesion
                 for q in d.values():
                     q.clear()
+                self._anterior = None
+            db = contribucion_beta(None if self._anterior is None else self._anterior['beta'], e, self._anterior)
+            d['db'].append(db); d['det'].append(e.get('detectado'))
+            self._anterior = e
             d['paso'].append(e['paso']); d['p'].append(e['p_crudo']); d['b'].append(e['b'])
             d['ang'].append(e['angulo']); d['meta'].append(1.0 if e['meta'] > 0 else 0.0)
             d['ph'].append(np.nan if e['P_hat'] is None else e['P_hat'])
@@ -403,6 +444,39 @@ class Tablero(QtWidgets.QWidget):
         self.c_inf.setData(x, d['beta'] - 2 * d['sd'])
         self.c_ev.setData(x, d['ev'])
         self.c_fi.setData(x, d['fi'])
+        if self.con_flechas:
+            self._dibujar_flechas(x, d)
+
+    def _flechas_visibles(self):
+        """En el control causal ciego, el tamano de las flechas delataria el bloque sham."""
+        return self.sham_bloque is None or self.btn_sham.isChecked()
+
+    def _dibujar_flechas(self, x, d):
+        pl = self.p[5]
+        if not self._flechas_visibles():
+            self.c_tallos.setData([], [])
+            self.c_puntas.setData([], [])
+            pl.setTitle(TITULO_FLECHAS + ' (oculto: control causal ciego)')
+            self.lbl_flecha.setText('')
+            return
+        pl.setTitle(TITULO_FLECHAS)
+        db = d['db']
+        hay = np.abs(db) > 1e-9
+        xs, ys = x[hay], db[hay]
+        tallo_x, tallo_y = np.repeat(xs, 2), np.column_stack([np.zeros(len(ys)), ys]).ravel()
+        self.c_tallos.setData(tallo_x, tallo_y, pen=pg.mkPen('#555555', width=2))
+        det = np.array([bool(v) for v in d['det']], dtype=bool)[hay] if len(d['det']) else np.zeros(0, bool)
+        self.c_puntas.setData(
+            xs, ys, symbol=['t1' if v > 0 else 't' for v in ys],
+            brush=[pg.mkBrush(COLOR_ERRP if v else COLOR_SIN_ERRP) for v in det])
+        tope = max(0.2, 1.2 * float(np.abs(db).max())) if len(db) else 0.2
+        pl.setYRange(-tope, tope, padding=0)
+        if len(x) and hay[-1] and self._anterior is not None:
+            v = float(db[-1])
+            origen = 'el ErrP detectado' if self.d['det'][-1] else 'la ausencia de ErrP'
+            self.lbl_flecha.setText(f"Paso {int(x[-1])}: {origen} mueve beta {v:+.2f} hacia {'CERRAR' if v > 0 else 'RELAJAR'}")
+        elif len(x):
+            self.lbl_flecha.setText(f'Paso {int(x[-1])}: este paso no cambio beta (sin epoca util o aprendizaje congelado)')
 
 
 def main():
@@ -410,10 +484,11 @@ def main():
     ap.add_argument('--captura', help='guarda una imagen del tablero y sale')
     ap.add_argument('--segundos', type=float, default=15)
     ap.add_argument('--copiloto', action='store_true', help='caja de preguntas al copiloto clinico')
+    ap.add_argument('--flechas', action='store_true', help='panel con la contribucion de cada ErrP al cambio de beta')
     ap.add_argument('--narrador', action='store_true', help='franja con las frases de narrador.py')
     a = ap.parse_args()
     app = QtWidgets.QApplication(sys.argv)
-    t = Tablero(copiloto=a.copiloto, narrador=a.narrador)
+    t = Tablero(copiloto=a.copiloto, narrador=a.narrador, flechas=a.flechas)
     t.show()
     if a.captura:
         def salir():
