@@ -1377,9 +1377,8 @@ def modelos_hardware():
     lo, hi = hw.intervalo_ba(Y, det.pred_cv)
     assert lo <= det.ba <= hi
     o = hw.OrtesisSimulada()
-    for k in range(10):
-        o.mover(0.3 + 0.04 * k)
-    media, sd = o.jitter()
+    lat = np.array([o.mover(0.3 + 0.04 * k)[2] for k in range(10)])     # latencia del ACK en ms (tercer valor)
+    media, sd = float(lat.mean()), float(lat.std())
     assert 3 < media < 20
     return (f'recentrado: {acc:.0%} tras mezclar canales; ErrP BA {det.ba:.2f}, rareza ok; '
             f'ACK {media:.1f}+-{sd:.1f} ms')
