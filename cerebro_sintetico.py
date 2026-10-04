@@ -125,6 +125,13 @@ class Cerebro:
         self.rosa = np.zeros(n)
         # conduccion de volumen: mezcla leve entre electrodos
         self.mezcla = np.eye(n) + 0.08 * np.abs(self.rng.normal(size=(n, n)))
+        # banco offline, sesion > 0: otra sesion del MISMO piloto. Misma anatomia (mezcla), otro ruido
+        # y el casco recolocado (ganancia por electrodo entre 0.8 y 1.25). Ese cambio lo programamos
+        # nosotros: sirve para probar la memoria entre sesiones, no para decir cuanto cambia una persona
+        self.ganancia = np.ones(n)
+        if getattr(a, 'sesion', 0):
+            self.ganancia = np.random.default_rng([a.semilla, 31, a.sesion]).uniform(0.8, 1.25, n)
+            self.rng = np.random.default_rng([a.semilla, 32, a.sesion])
         self.fase60 = 0.0
         # respuesta visual, cabeza, IMU y Bluetooth: generador aparte, para que el resto del EEG
         # sea la misma realizacion con o sin ellos (comparaciones limpias en el banco)
@@ -260,7 +267,7 @@ class Cerebro:
             if ts[-1] - t0p < 0.3:
                 activos.append(t0p)
         self.parpadeos_vivos = activos
-        y = self.mezcla @ x
+        y = self.ganancia[:, None] * (self.mezcla @ x)
         y += self._cabeza_e_imu(ts)                          # el movimiento de cabeza ensucia el EEG
         # caos: un canal se despega (plano, o ruido grande con mucha red electrica)
         canal = caos.activo('canal', t_caos) if caos else None

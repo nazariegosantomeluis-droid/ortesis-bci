@@ -91,6 +91,31 @@ El sistema aprende en tres escalas de tiempo:
 4. **Regla nueva:** `git fetch` antes de empezar y antes de cada push; solo Luis aprueba merges a `main`.
 5. **Primera llamada real a la API:** Luis dijo que pegó la llave en `.env`, pero el archivo no existía en la carpeta del proyecto cuando se buscó. **Sigue pendiente.**
 
+### Domingo 4 de octubre: estado del sistema y memoria entre sesiones (rama `claude/estado-sistema-memoria`, por PR)
+
+Pedido por Luis: (1) `estado_sistema.py` con revisión previa y franja en vivo en el tablero; (2) memoria entre sesiones (`--desde-sesion`), midiendo con los datos reales del domingo cuántos ensayos ahorra. Todo detrás de banderas apagadas por defecto; nada de esto se probó con el casco, la órtesis ni la API real. Detalle y cifras en el README.
+
+**Pendiente de Luis**
+
+1. **La medición con los datos reales del domingo no se hizo: no había datos.** A las 12:40 del domingo lo más nuevo en `resultados/` y `modelos/` era del gemelo, del sábado a las 21:07. El estudio está listo (`python estudios/memoria_sesiones.py reales <mi_previa.npz> <mi_nueva.npz> [<errp_previa.npz> <errp_nueva.npz>]`; `lista` muestra las calibraciones con su hora) y necesita **dos calibraciones del mismo piloto**. Con una sola no hay sesión previa de la que acordarse.
+2. **`.env` ya tiene llave** (desde el sábado a las 20:38) y `pruebas.py` la usaba: `tablero_salud` le preguntaba al copiloto por la API real. Se corrió dos veces así antes de notarlo. La prueba falló porque la respuesta no era la plantilla, así que **casi seguro la API real ya respondió dos preguntas del copiloto** (no se confirmó en la consola de la cuenta). Ahora `pruebas.py` no lee el `.env`. La llamada mínima de `python estado_sistema.py` no se ha corrido: la primera vez que se corra sin `--sin-api` hará una llamada real.
+3. **Para usar la memoria en la final** hay que armar la del domingo con `python memoria.py` antes de que otra calibración pise `modelos/`.
+4. **Si se enciende `--desde-sesion`, el CP2 y el CP3 se deciden con 12 ensayos y 40 épocas.** Los umbrales no cambian, pero el intervalo del 90 % es ancho (en una corrida contra el gemelo, CP2 con 12 ensayos: BA 0.83 [0.67, 1.00]; CP3 con 40 épocas: 0.73 [0.60, 0.85]). Si eso no es aceptable para la final, `--memoria-mi` y `--memoria-errp` los suben.
+
+**Decisiones tomadas sin preguntar (se pueden revertir)**
+
+- *Estado del sistema.* La batería y la validez no van en el flujo `EEG` del puente: `puente_lsl.py --estado` las escribe en un archivo (`config.ESTADO_PUENTE_JSON`) en lugar de abrir un flujo LSL nuevo en el contrato. Las pérdidas se cuentan por los huecos de la hora de cada muestra, igual con las dos fuentes. Los procesos se listan con PowerShell (sin `psutil`, que sería otra dependencia). La revisión previa no mueve la órtesis salvo con `--puerto`. Sin llave, la IA es un aviso y no una falla. No revisa la edad de los modelos de `modelos/` (ya lo dice el orquestador al cargarlos).
+- *Memoria.* Largos de la calibración corta (12 ensayos, 40 épocas) y peso de los ensayos de hoy (3) fijados antes de medir. No se ofrece arrancar con **cero** ensayos de hoy, aunque en PhysioNet rinde igual que 12 desde cero: saltarse la calibración deja al CP2 sin estimado, y eso lo decide Luis. Del agente se hereda solo la `beta` de antes de la perturbación; en una sesión `--sham` (dos perturbaciones) no se hereda ninguna. La memoria se encadena: la de la sesión nueva lleva los ensayos de las dos.
+- *Gemelo.* `sesion=1` en el banco offline da «otra sesión del mismo sujeto» (otro ruido y otra ganancia por electrodo). Sin ese argumento el gemelo es idéntico al de antes.
+
+**Hallazgos**
+
+- PhysioNet (40 personas reales, corridas del mismo día): la memoria sin ensayos de hoy rinde lo que 12 ensayos desde cero (0.689 contra 0.689); con 12, +0.026 ± 0.015. Ahorra al menos 12 ensayos, que es lo más que esos datos dejan medir.
+- Gemelo: el CP3 con memoria no infla (reportaría 0.80 contra 0.80 real con 40 épocas). Las cifras del gemelo se midieron dos veces, antes y después de traer el arreglo de los parpadeos de `main` (PR #6): cambian en el segundo decimal (ErrP con 40 épocas, memoria 0.82 → 0.80) y las del README son las de después.
+- **Los PR #3 (limpieza) y #6 (parpadeos del gemelo) los fusionó juan-ML22 en `main`** el domingo a las 12:41 y 13:35, no Luis. Se trajeron a esta rama, como pide la regla de la sesión, con dos conflictos resueltos conservando los dos lados (los parpadeos nuevos más la ganancia por sesión en el gemelo; las pruebas de los dos en `pruebas.py`).
+- Heredar la `beta` no aporta nada medible en el gemelo (es ruido de ±0.15 logits), y heredar la `beta` final sería dañino.
+- Una memoria que no es del mismo piloto estorba (CP3 0.58 en una corrida contra el gemelo con épocas ajenas), y el CP3 lo detecta porque se mide solo con las épocas de hoy.
+
 ### Decisiones de implementación y hallazgos (se anotan aquí conforme salen)
 
 **1. Sham (3 de octubre, noche; cifras del gemelo, `estudios/sham_gemelo.py`, 16 sesiones).**

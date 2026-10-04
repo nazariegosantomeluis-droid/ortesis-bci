@@ -4,6 +4,7 @@ Uso
   python puente_lsl.py --placa unicorn                          casco real (g.tec Unicorn Hybrid Black)
   python puente_lsl.py --placa unicorn --serie UN-2023.01.01    si hay varios cascos cerca
   python puente_lsl.py --placa unicorn --grabar resultados/sesion.csv
+  python puente_lsl.py --placa unicorn --estado                 deja bateria y validez para estado_sistema.py
   python puente_lsl.py                                          placa sintetica (sin casco)
   python puente_lsl.py --placa playback --archivo resultados/sesion.csv   (plan B)
   python puente_lsl.py --placa cyton --puerto COM3 [--impedancias]        (hardware anterior)
@@ -88,6 +89,12 @@ def plan_placa(placa, serie=None, puerto=None, archivo=None, maestra='unicorn'):
             'modulo': None if real == 'unicorn' else 256}
 
 
+def estado_puente(placa, bateria, muestras, invalidas):
+    """Lo que el flujo 'EEG' no lleva (--estado), para estado_sistema.py. invalidas: None si la
+    placa no trae indicador de validez."""
+    return {'t': time.time(), 'placa': placa, 'bateria': bateria, 'muestras': muestras, 'invalidas': invalidas}
+
+
 def medir_impedancias(board, eeg, fs, simulada=False):
     """kOhm por canal. Formula del lead-off del ADS1299: Z = sqrt(2)*Vrms/6nA - 2.2 kOhm (serie)."""
     res = {}
@@ -123,6 +130,8 @@ def main():
                     help='placa con la que se grabo el archivo de playback')
     ap.add_argument('--grabar', help='ademas guarda los datos crudos en este archivo (para playback)')
     ap.add_argument('--impedancias', action='store_true', help='mide impedancias antes de transmitir (solo Cyton)')
+    ap.add_argument('--estado', action='store_true',
+                    help='cada 5 s deja bateria y validez del casco en resultados/estado_puente.json (estado_sistema.py)')
     a = ap.parse_args()
 
     BoardShim.disable_board_logger()
@@ -182,6 +191,12 @@ def main():
                       + (f' | bateria {bateria:.0f} %' if bateria is not None else '')
                       + (f' | {invalidas} muestras no validas' if invalidas else ''), flush=True)
             if time.time() - t_ini > 5:
+                if a.estado:                    # un fallo al escribirlo nunca detiene el puente
+                    try:
+                        config.ESTADO_PUENTE_JSON.write_text(json.dumps(estado_puente(
+                            plan['placa'], bateria, huecos.muestras, invalidas if plan['validez'] is not None else None)))
+                    except OSError:
+                        pass
                 print(f'  {n_total / (time.time() - t_ini):.0f} muestras/s')
                 n_total, t_ini = 0, time.time()
             time.sleep(0.01)
