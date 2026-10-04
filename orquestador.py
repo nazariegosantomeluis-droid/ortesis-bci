@@ -594,7 +594,7 @@ class BackendReal:
                   f"abrir sens {pd['abrir']['sens']:.2f} espec {pd['abrir']['espec']:.2f} | dif de espec {pd['dif_espec']:.2f}"
                   + (f" (> {config.ESPEC_DIF_MAX}: aviso, no NO GO; con ~40 aciertos por direccion el azar solo da ~0.06)"
                      if pd['avisa'] else ''))
-            fisher = self.hw.errp_por_direccion(y, self.detector.pred_cv, dirs)
+            fisher = self.hw.fisher_por_direccion(y, self.detector.pred_cv, dirs)
             aviso(f"    falsas alarmas iguales en las dos direcciones (prueba exacta de Fisher): p = {fisher['p']:.2f}"
                   + (' -> AVISO: el detector se equivoca mas hacia un lado' if fisher['avisa'] else ''))
         if self.detector is None:
@@ -644,30 +644,17 @@ class BackendReal:
                 'umbral': self.detector.umbral}
 
     # ---------------- control de reposo ----------------
-    def control_reposo(self, orq, n=config.REPOSO_MOVIMIENTOS):
-        """Idea de jusren: con el piloto sin imaginar nada, la ortesis se mueve sola desde el punto
-        medio (la mitad de las veces a cerrar) y p(t) del decoder no debe seguirla. La ventana de MI
-        termina REPOSO_DESPUES_S tras cada movimiento, como la de un paso del lazo alcanza al
-        movimiento anterior. No recentra el decoder ni cambia el estado; solo avisa."""
-        aviso(f'Control de reposo ({n} movimientos): NO imagines nada. Mira la ortesis con la mente en blanco.')
+    def control_reposo(self, orq):
+        """El bloque sham de jusren (bloque_sham.py: con el piloto sin imaginar nada la ortesis se mueve
+        sola y p(t) del decoder no debe seguirla), corrido aqui tras calibrar, sin parar y volver a
+        arrancar la sesion. No recentra el decoder ni cambia el estado; solo avisa."""
+        import bloque_sham
+        aviso(f'Control de reposo ({config.SHAM_PASOS} movimientos): NO imagines nada. Mira la ortesis con la mente en blanco.')
         orq.salidas.marcador(config.CONTROL_REPOSO)
-        dirs = np.random.default_rng().permutation(np.arange(n) % 2)
-        p = []
-        for d in dirs:
-            self.ortesis.mover(config.PUNTO_MEDIO, config.CENTRADO_DURACION_MS)
-            time.sleep(self.a.espera)
-            _, t_ack, _ = self.ortesis.mover(config.PUNTO_MEDIO + (config.PASO_AJENO if d else -config.PASO_AJENO))
-            time.sleep(config.REPOSO_DESPUES_S)
-            v = self._ventana_mi() if t_ack is not None else None
-            fin = self.eeg.ultimo_t()
-            phi = None
-            if v is not None and not self._cabeza_movida(fin - config.VENTANA_MI, fin):
-                phi = self.decoder.phi(v, actualizar_centro=False)
-            p.append(float('nan') if phi is None else float(sigmoide(self.decoder.w0 @ phi + self.decoder.c0)))
-        r = self.hw.evaluar_reposo(p, dirs)
+        filas, r = bloque_sham.correr(self.eeg, self.ortesis, self.decoder, salida=aviso)
         aviso('  ' + r['texto'])
-        orq.salidas.estado(tipo='control_reposo', **r)
-        self.reposo = dict(r, p=p, direccion=[int(d) for d in dirs])
+        orq.salidas.estado(tipo='control_reposo', **{k: v for k, v in r.items() if k != 'ic'}, ic=list(r['ic']))
+        self.reposo = dict(r, filas=filas)
         return r
 
     # ---------------- detector co-adaptativo ----------------
@@ -1460,7 +1447,7 @@ def argumentos(argv=None):
                     help='pasos de cada bloque del control causal')
     ap.add_argument('--sham-orden', dest='sham_orden', choices=['real-sham', 'sham-real'], default=None,
                     help='fija el orden de los bloques (por defecto, al azar)')
-    ap.add_argument('--sham-fuente', dest='sham_fuente', choices=config.SHAM_ERRP_FUENTES,
+    ap.add_argument('--sham-fuente', dest='sham_fuente', choices=config.SHAM_ERRP_FUENTES_LAZO,
                     default=config.SHAM_ERRP_FUENTE, help='que recibe el agente en el bloque sham (ver config)')
     # sim
     ap.add_argument('--embodiment', type=float, default=0.5,

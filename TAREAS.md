@@ -83,6 +83,14 @@ El sistema aprende en tres escalas de tiempo:
 - Pre-entrenar «mano derecha imaginada contra reposo» con los 8 canales del Unicorn remuestreados a 250 Hz, adaptar con recentrado riemanniano y medir cuántos ensayos de calibración ahorra.
 - Si funciona, que la calibración pueda arrancar desde el modelo pre-entrenado.
 
+### Decisiones de Luis del 3 de octubre, 20:30 (tras el primer reporte)
+
+1. **Sham ciego:** probar un sham que saque los `p_errp` de la distribución de calibración, a la tasa de calibración, sin relación con el lazo; si da cerca de 0 de 16 queda por defecto, si no, queda «sin evidencia». **Medido: 7 de 16 con el detector actual (5 y 2 de 16 con los otros). No pasa: el sham por defecto sigue siendo `nula`.** El ciego queda en `estudios/sham_gemelo.py` y fuera del orquestador. El README explica por qué un sham que conserva la tasa de ErrP filtra la información.
+2. **`--sham-pasos 80` para la final:** `config.SHAM_ERRP_PASOS = 80`.
+3. **Controles de jusren:** se queda su implementación, más la prueba de Fisher y `--control-reposo`; la duplicada se borró (`evaluar_reposo`, `sesion_reposo`, la parte repetida de `errp_por_direccion`). `--control-reposo` ahora llama a `bloque_sham.correr`.
+4. **Regla nueva:** `git fetch` antes de empezar y antes de cada push; solo Luis aprueba merges a `main`.
+5. **Primera llamada real a la API:** Luis dijo que pegó la llave en `.env`, pero el archivo no existía en la carpeta del proyecto cuando se buscó. **Sigue pendiente.**
+
 ### Decisiones de implementación y hallazgos (se anotan aquí conforme salen)
 
 **1. Sham (3 de octubre, noche; cifras del gemelo, `estudios/sham_gemelo.py`, 16 sesiones).**

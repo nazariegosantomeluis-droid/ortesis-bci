@@ -653,6 +653,10 @@ def senal_sham():
     assert len(set(dados)) == len(dados) and set(dados) | set(senal.guardados) == set(entra)
     assert all(d != p for d, p in zip(sale, entra)), 'nunca entrega el p_errp del propio paso'
     assert np.mean([abs(entra.index(d) - k) for k, d in enumerate(sale) if not np.isnan(d)]) < 20   # son recientes
+    # 'calibracion' (sham ciego, solo en el estudio): permutaciones sucesivas de los p_errp de la calibracion
+    ciego = SenalSham('calibracion', semilla=2, reserva=[0.1, 0.2, 0.9])
+    tres = [ciego(0.5, cfg)[0] for _ in range(6)]
+    assert sorted(tres[:3]) == sorted(tres[3:]) == [0.1, 0.2, 0.9] and 'calibracion' not in config.SHAM_ERRP_FUENTES_LAZO
     copia = SenalSham('recientes').desde_dict(senal.a_dict())
     assert [copia(0.5, cfg)[0] for _ in range(5)] == [senal(0.5, cfg)[0] for _ in range(5)]
     try:
@@ -695,8 +699,9 @@ def orquestador_sham():
     for nombre, ini in (('sham', 20), ('real', 20 + n)):
         b = orq.sham['bloques'][nombre]
         assert b['inicio'] == ini and b['t_perturbacion'] == ini + en and abs(b['beta_pre']) < 1.0, (nombre, b)
-        # arranca reiniciado: la primera fila del bloque tiene la varianza inicial (o menos, si ya aprendio)
-        assert float(filas[ini]['varianza_beta']) <= orq.agente.cfg.varianza_inicial + 1e-9
+        # arranca reiniciado: tras su primer paso la varianza es, como mucho, la inicial mas el ruido de un paso
+        c = orq.agente.cfg
+        assert float(filas[ini]['varianza_beta']) <= c.varianza_inicial + c.ruido_proceso + 1e-4
     sham = [f for f in filas if f['bloque'] == 'sham']
     assert {f['estado'] for f in sham} <= {'LAZO_ADAPTATIVO', 'PERTURBACION'}          # nunca congelado
     assert {f['fiabilidad'] for f in sham} == {'1.0'}
@@ -730,7 +735,7 @@ def orquestador_sham():
 def reanudar_sham():
     """Una sesion --sham interrumpida a mitad del segundo bloque se reanuda identica (misma senal sham)."""
     import orquestador
-    for fuente in config.SHAM_ERRP_FUENTES:
+    for fuente in config.SHAM_ERRP_FUENTES_LAZO:
         ref, _ = _sesion_sham(7, 'real-sham', fuente)
         referencia = list(csv.DictReader(open(ref.ruta_csv)))
         a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '7', '--pasos_estatico', '20', '--sham',
@@ -759,11 +764,11 @@ def reanudar_sham():
 
 @prueba
 def controles_especificidad():
-    """Los dos controles que propuso jusren. ErrP por direccion: avisa cuando las falsas alarmas se
-    cargan a una direccion y casi nunca cuando no. Control de reposo: en el gemelo, p(t) no sigue a la
-    ortesis con el piloto en reposo y si la sigue cuando el piloto imagina lo que hace la ortesis."""
+    """Lo que se le agrego a los dos controles de jusren. Fisher por direccion: avisa cuando las falsas
+    alarmas se cargan a una direccion y casi nunca cuando no. --control-reposo: su bloque sham corre
+    dentro del orquestador real, tras calibrar, con el EEG y la ortesis de la sesion."""
     import types
-    import cerebro_sintetico as cs
+    import bloque_sham
     import hardware as hw
     import orquestador
     rng = np.random.default_rng(0)
@@ -772,55 +777,33 @@ def controles_especificidad():
         y, d = (rng.random(120) < 0.3).astype(int), rng.integers(0, 2, 120)
         for caso, fa in (('igual', (0.10, 0.10)), ('cargado', (0.02, 0.30))):       # falsas alarmas abrir, cerrar
             pred = np.where(y == 1, rng.random(120) < 0.7, rng.random(120) < np.where(d == 1, fa[1], fa[0])).astype(int)
-            avisos[caso] += hw.errp_por_direccion(y, pred, d)['avisa']
+            avisos[caso] += hw.fisher_por_direccion(y, pred, d)['avisa']
     assert avisos['igual'] <= 16 and avisos['cargado'] >= 170, avisos
-    r = hw.errp_por_direccion([0, 0, 0, 0, 1, 1], [0, 1, 0, 0, 1, 0], [1, 1, 0, 0, 1, 0])
-    assert r['cerrar'] == {'n': 3, 'sens': 1.0, 'espec': 0.5} and r['abrir']['espec'] == 1.0 and 'cerrar sens' in r['texto']
-    # control de reposo: criterio
-    assert hw.evaluar_reposo([0.5] * 10, [1] * 5 + [0] * 5)['pasa'] is None            # faltan datos
-    d = np.arange(40) % 2
-    assert not hw.evaluar_reposo(0.3 + 0.4 * d + rng.normal(0, 0.1, 40), d)['pasa']
-    r = hw.evaluar_reposo(np.r_[rng.random(38), np.nan, np.nan], d)
-    assert r['n'] == 38 and 0 <= r['auc'] <= 1
-    falsas = sum(not hw.evaluar_reposo(rng.random(40), d)['pasa'] for _ in range(300))
-    assert falsas <= 30, falsas                                                    # ~5 % con p independiente
-    # control de reposo: gemelo, sin LSL
-    pasa = {False: 0, True: 0}
-    aucs = {False: [], True: []}
-    for s in range(6):
-        Xc, yc = cs.sesion_mi(60, semilla=s)
-        dec = hw.DecoderIM().ajustar(Xc, yc, config.candidatos('decoder'))
-        for sigue in (False, True):
-            X, dirs = cs.sesion_reposo(config.REPOSO_MOVIMIENTOS, sigue=sigue, semilla=100 + s)
-            p = [float(dec.w0 @ dec.phi(x, actualizar_centro=False) + dec.c0) for x in X]
-            r = hw.evaluar_reposo(p, dirs)
-            pasa[sigue] += r['pasa']
-            aucs[sigue].append(r['auc'])
-    assert pasa[False] >= 5 and pasa[True] <= 1, (pasa, aucs)
-    # el bloque del orquestador real, con EEG y ortesis de mentira: 40 movimientos desde el punto medio
-    class B(orquestador.BackendReal):
-        def __init__(self):
-            self.hw, self.a, self.movs = hw, types.SimpleNamespace(espera=0.0), []
-            self.decoder = types.SimpleNamespace(w0=np.array([1.0]), c0=0.0, phi=lambda v, actualizar_centro: np.array([v]))
-            self.eeg = types.SimpleNamespace(ultimo_t=lambda: 0.0)
-            self.ortesis = types.SimpleNamespace(mover=lambda f, ms=0: (self.movs.append(f), (len(self.movs), 1.0, 5.0))[1])
-        _ventana_mi = lambda self: 2.0 * (self.movs[-1] - 0.5) / config.PASO_AJENO + rng.normal(0, 0.3)   # sigue a la ortesis
-        _cabeza_movida = lambda self, t0, t1: False
+    assert hw.fisher_por_direccion([0, 0, 0, 0, 1, 1], [0, 1, 0, 0, 1, 0], [1, 1, 0, 0, 1, 0])['p'] == 1.0
+    # --control-reposo: el orquestador real corre bloque_sham.correr con lo suyo y publica el resultado
+    class EEG:
+        fs = 250
+        ventana = lambda self, seg, pm=0.0, hm=None: (rng.normal(0, 5, (8, int(seg * 250))), None)
+        ultimo_t = lambda self: 0.0
+        movimiento = lambda self, t0, t1: None
+    Xmi = rng.normal(0, 5, (40, 8, 500))
+    dec = hw.DecoderIM().ajustar(Xmi, np.arange(40) % 2)
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.hw, b.eeg, b.decoder, b.ortesis = hw, EEG(), dec, hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0)
     eventos, marcas = [], []
     orq = types.SimpleNamespace(salidas=types.SimpleNamespace(marcador=marcas.append, estado=lambda **d: eventos.append(d)))
-    b, dormir = B(), orquestador.time.sleep
-    orquestador.time.sleep = lambda s: None
+    dormir = bloque_sham.time.sleep
+    bloque_sham.time.sleep = lambda s: None
     try:
         r = b.control_reposo(orq)
     finally:
-        orquestador.time.sleep = dormir
-    assert marcas == [config.CONTROL_REPOSO] and eventos[0]['tipo'] == 'control_reposo'
-    assert len(b.movs) == 80 and b.movs[::2] == [config.PUNTO_MEDIO] * 40 and sum(m > 0.5 for m in b.movs) == 20
-    assert r['pasa'] is False and r['auc'] > 0.9, r
+        bloque_sham.time.sleep = dormir
+        b.ortesis.cerrar()
+    assert marcas == [config.CONTROL_REPOSO] and eventos[0]['tipo'] == 'control_reposo' and eventos[0]['n'] == config.SHAM_PASOS
+    assert r['pasa'] in (True, False) and len(b.reposo['filas']) == config.SHAM_PASOS and b.ortesis.seq >= 2 * config.SHAM_PASOS
     assert orquestador.argumentos(['real', '--control-reposo']).control_reposo
-    return (f"ErrP por direccion: avisa {avisos['cargado']}/200 con sesgo y {avisos['igual']}/200 sin el; reposo en el gemelo: "
-            f"pasa {pasa[False]}/6 en reposo (AUC {min(aucs[False]):.2f} a {max(aucs[False]):.2f}) y {pasa[True]}/6 "
-            f"si el piloto sigue a la ortesis (AUC {min(aucs[True]):.2f} a {max(aucs[True]):.2f})")
+    return (f"Fisher por direccion: avisa {avisos['cargado']}/200 con sesgo y {avisos['igual']}/200 sin el; --control-reposo corre "
+            f"el bloque sham de jusren dentro del orquestador ({config.SHAM_PASOS} movimientos, AUC {r['auc']:.2f})")
 
 
 # ------------------------------------------------------------ IA: API simulada
@@ -1186,7 +1169,7 @@ def tablero_salud():
         assert 'sin estimar' in t.lbl_iic.text()
         # control causal: ciego hasta que el operador pulsa 'Revelar bloques'
         assert t.btn_sham.isHidden() and t.lbl_sham.text() == ''
-        t._procesar({'tipo': 'bloque_sham', 'letra': 'A', 'nombre': 'sham', 'pasos': 60, 'fuente': 'nula'})
+        t._procesar({'tipo': 'bloque_sham', 'letra': 'A', 'nombre': 'sham', 'pasos': 80, 'fuente': 'nula'})
         assert 'bloque A' in t.lbl_sham.text() and 'SHAM' not in t.lbl_sham.text() and not t.btn_sham.isHidden()
         b = lambda err, pasos: {'agente': err, 'sombra': 0.5, 'ic_agente': [err - 0.1, err + 0.1],
                                 'ic_sombra': [0.4, 0.6], 'pasos': pasos, 'seg': pasos and pasos * 2.1}

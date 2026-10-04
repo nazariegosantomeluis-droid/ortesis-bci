@@ -318,18 +318,24 @@ class SenalSham:
     """Control causal con sham: lo que recibe el agente en lugar del p_errp de cada paso.
 
     Fuentes (config.SHAM_ERRP_FUENTES):
-      nula       sin evidencia del ErrP: la tasa base de la calibracion, con sens = espec = 0.5,
-                 asi el LLR es 0 con las dos salidas del detector y P_hat queda en el prior.
-      recientes  los p_errp del propio bloque permutados entre los pasos recientes: guarda los
-                 ultimos `memoria`, en cada paso entrega al azar uno de los guardados y guarda el de
-                 ahora (cada valor se entrega una sola vez). Mientras junta los primeros devuelve
-                 nan: ese paso no ensena.
+      nula         sin evidencia del ErrP: la tasa base de la calibracion, con sens = espec = 0.5,
+                   asi el LLR es 0 con las dos salidas del detector y P_hat queda en el prior.
+      recientes    los p_errp del propio bloque permutados entre los pasos recientes: guarda los
+                   ultimos `memoria`, en cada paso entrega al azar uno de los guardados y guarda el
+                   de ahora (cada valor se entrega una sola vez). Mientras junta los primeros
+                   devuelve nan: ese paso no ensena.
+      calibracion  "sham ciego": los p_errp de la calibracion (`reserva`), en permutaciones sucesivas.
+                   Tienen la distribucion y la tasa de error de la calibracion y ninguna relacion
+                   con lo que pasa en el lazo.
     """
 
-    def __init__(self, fuente=config.SHAM_ERRP_FUENTE, semilla=0, memoria=config.SHAM_ERRP_MEMORIA):
+    def __init__(self, fuente=config.SHAM_ERRP_FUENTE, semilla=0, memoria=config.SHAM_ERRP_MEMORIA, reserva=None):
         if fuente not in config.SHAM_ERRP_FUENTES:
             raise ValueError(f'fuente debe ser una de {config.SHAM_ERRP_FUENTES}')
+        if fuente == 'calibracion' and (reserva is None or len(reserva) == 0):
+            raise ValueError("la fuente 'calibracion' necesita los p_errp de la calibracion (reserva)")
         self.fuente, self.memoria, self.guardados = fuente, memoria, []
+        self.reserva = None if reserva is None else [float(v) for v in reserva]
         self.rng = np.random.default_rng([abs(int(semilla)), 404])
 
     def __call__(self, p_errp, cfg: ConfigAgente):
@@ -337,6 +343,10 @@ class SenalSham:
         AgenteErrP.actualizar; se llama una vez por paso valido."""
         if self.fuente == 'nula':
             return cfg.p_error_calibracion, 0.5, 0.5
+        if self.fuente == 'calibracion':
+            if not self.guardados:
+                self.guardados = [self.reserva[i] for i in self.rng.permutation(len(self.reserva))]
+            return self.guardados.pop(), cfg.sens, cfg.espec
         sale = float('nan')
         if len(self.guardados) >= self.memoria:
             sale = self.guardados.pop(int(self.rng.integers(len(self.guardados))))

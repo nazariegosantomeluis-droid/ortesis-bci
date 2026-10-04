@@ -11,6 +11,8 @@ de una senal que no dice nada del error de cada paso. Se comparan las dos fuente
 
   nula         sin evidencia del ErrP: la tasa base de la calibracion (LLR = 0)
   recientes    los p_errp del mismo bloque, permutados entre los pasos recientes (lo que pidio Luis)
+  calibracion  "sham ciego": p_errp sacados al azar de los de la calibracion (su distribucion y su tasa
+               de error), sin relacion con el lazo actual
 
 Una tercera, descartada: los p_errp del bloque estatico de la misma sesion, permutados. Quedaba en
 medio (el sham se recuperaba en 3 a 8 de 16): cualquier senal con detecciones empuja a beta cuando
@@ -47,6 +49,19 @@ REGIMENES = ('actual', 'ayer', 'debil')
 META_BETA = 0.7 * config.PERTURBACION_LOGITS
 
 
+def p_cal(mod):
+    """Los p_errp de las epocas de calibracion, cada uno de un modelo que no vio esa epoca: lo que
+    guarda DetectorErrP.ajustar en p_cv (los sujetos ya guardados en cache no lo traen)."""
+    if 'p_cv' not in mod:
+        from sklearn.model_selection import StratifiedKFold, cross_val_predict
+        det = mod['det']
+        mod['p_cv'] = getattr(det, 'p_cv', None)
+        if mod['p_cv'] is None:
+            cv = StratifiedKFold(4, shuffle=True, random_state=0)
+            mod['p_cv'] = cross_val_predict(det._pipe(), mod['X_cal'], mod['y_cal'], method='predict_proba', cv=cv)[:, 1]
+    return mod['p_cv']
+
+
 def sesion(mod, semilla, pasos=config.SHAM_ERRP_PASOS, fuente='recientes', perturbar_en=config.SHAM_ERRP_PERTURBAR_EN):
     """Una sesion con --sham. Devuelve una fila por paso de los dos bloques adaptativos."""
     dec, det = copy.deepcopy(mod['dec']), mod['det']
@@ -63,7 +78,7 @@ def sesion(mod, semilla, pasos=config.SHAM_ERRP_PASOS, fuente='recientes', pertu
         despl, orden, beta_pre = 0.0, [], None
         if bloque != 'estatico':
             ag.reiniciar()
-            senal = SenalSham(fuente, semilla)
+            senal = SenalSham(fuente, semilla, reserva=p_cal(mod) if fuente == 'calibracion' else None)
         for t in range(n):
             if t % config.PASOS_ENSAYO == 0:
                 if not orden:

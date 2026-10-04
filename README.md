@@ -186,32 +186,52 @@ Sigue siendo el gemelo, no una persona. El simulador rápido (`simulador_lazo.py
 
 El control negativo de arriba se midió fuera de línea. `--sham` lo lleva a la sesión, frente al jurado. En lugar del bloque adaptativo corren **dos bloques del mismo largo, uno real y uno sham, en orden al azar**:
 
-- Cada bloque arranca con el agente reiniciado (beta, varianza y prior) y sin perturbación, y recibe la suya (2.4 logits) en el mismo paso (el 10, tras dos ensayos).
+- Cada bloque (80 pasos) arranca con el agente reiniciado (beta, varianza y prior) y sin perturbación, y recibe la suya (2.4 logits) en el mismo paso (el 10, tras dos ensayos).
 - En el bloque sham el agente aprende igual de rápido (fiabilidad fija en la calibrada, sin congelar), pero **no recibe la evidencia del ErrP**: recibe la tasa base de la calibración, que no dice nada del paso. El `ConfianzaDetector` sigue midiendo al detector, así que la BA viva se puede comparar entre bloques.
 - **Ciego simple:** el piloto no sabe cuál bloque es cuál. La consola y el tablero dicen «A» y «B»; el tablero muestra cuál es el real solo cuando el operador pulsa *Revelar bloques*.
 - El orden queda en el CSV (columna `bloque`) y en los marcadores `bloque:real` y `bloque:sham`. `EVALUACION` y el tablero comparan los bloques lado a lado: error tras perturbar con intervalo del 90 %, tiempo de recuperación y si se recuperó. El CP4 es el del bloque real.
 
 ```bash
-python orquestador.py real --puerto COM4 --sham      # 60 pasos por bloque: unos 4 minutos los dos
+python orquestador.py real --puerto COM4 --sham      # 80 pasos por bloque: unos 5.6 minutos los dos
 python estudios/sham_gemelo.py                       # el criterio de aceptación en el gemelo (~2 min)
 ```
 
-Medido en el gemelo sin LSL y con los topes del recorrido (`estudios/sham_gemelo.py`; 4 sujetos × 4 sesiones, 60 pasos por bloque, con los tres detectores del control negativo). **Es el gemelo, no una persona.**
+### Qué recibe el agente en el sham: tres candidatos, uno sirve
+
+Medido en el gemelo sin LSL y con los topes del recorrido (`estudios/sham_gemelo.py`; 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10, con los tres detectores del control negativo). **Es el gemelo, no una persona.**
 
 | Detector | Qué recibe el agente en el sham | Real se recupera | Sham se recupera | Error tras perturbar, real / sham | Sham − real (IC 90 %) |
 |---|---|---|---|---|---|
-| actual | **sin evidencia del ErrP** (por defecto) | **16/16** (mediana 26 pasos) | **0/16** | 0.342 / 0.479 | **+0.136 [+0.111, +0.161]** |
-| actual | `p_errp` permutados | 16/16 | 11/16 | 0.349 / 0.422 | +0.074 [+0.038, +0.106] |
-| de ayer | sin evidencia del ErrP | 14/16 | 0/16 | 0.366 / 0.476 | +0.110 [+0.085, +0.136] |
-| de ayer | `p_errp` permutados | 15/16 | 9/16 | 0.367 / 0.425 | +0.058 [+0.030, +0.084] |
-| débil | sin evidencia del ErrP | 7/16 | 2/16 | 0.449 / 0.466 | +0.017 [−0.003, +0.036] |
-| débil | `p_errp` permutados | 8/16 | 6/16 | 0.425 / 0.453 | +0.027 [−0.001, +0.057] |
+| actual | **sin evidencia del ErrP** (`nula`, por defecto) | **16/16** | **1/16** | 0.296 / 0.471 | **+0.175 [+0.154, +0.196]** |
+| actual | `p_errp` del bloque, permutados (`recientes`) | 16/16 | 15/16 | 0.306 / 0.356 | +0.050 [+0.029, +0.072] |
+| actual | «sham ciego»: `p_errp` de la calibración (`calibracion`) | 16/16 | 7/16 | 0.300 / 0.426 | +0.126 [+0.095, +0.156] |
+| de ayer | sin evidencia del ErrP | 15/16 | 0/16 | 0.333 / 0.458 | +0.125 [+0.092, +0.160] |
+| de ayer | permutados | 15/16 | 12/16 | 0.322 / 0.347 | +0.025 [−0.017, +0.068] |
+| de ayer | sham ciego | 16/16 | 5/16 | 0.318 / 0.426 | +0.108 [+0.062, +0.153] |
+| débil | sin evidencia del ErrP | 11/16 | 1/16 | 0.393 / 0.454 | +0.062 [+0.030, +0.093] |
+| débil | permutados | 10/16 | 10/16 | 0.385 / 0.389 | +0.004 [−0.033, +0.046] |
+| débil | sham ciego | 11/16 | 2/16 | 0.385 / 0.429 | +0.044 [+0.008, +0.080] |
 
-El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer; no con el detector débil**, con el que el propio bloque real se recupera solo 7 veces de 16.
+El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer**. Con el detector débil el propio bloque real se queda en 11 de 16. Con bloques de 60 pasos las cifras eran casi las mismas (real 16/16, sham 0/16, +0.136 [+0.111, +0.161] con el detector actual).
 
-**Hallazgo: permutar los `p_errp` no sirve de sham para este agente.** El diseño original era darle al agente los `p_errp` del mismo bloque permutados entre los pasos recientes: misma distribución, sin relación con el error de cada paso. Así el sham se recupera en 11 de 16 sesiones. La razón: tras la perturbación casi todas las decisiones van hacia el mismo lado, y entonces la sola **tasa** de ErrP ya dice hacia dónde corregir, caiga cada ErrP en el paso que caiga. La permutación conserva la tasa, así que conserva la información. Lo que el agente usa del ErrP es, sobre todo, cuántos hay; la alineación paso a paso aporta menos (0.07 de error). Por eso el sham por defecto quita la evidencia en lugar de barajarla; el otro queda disponible con `--sham-fuente recientes`.
+### Hallazgo: un sham que conserva la tasa de ErrP no es un sham
 
-**Lo que una sola sesión puede mostrar.** Tras la perturbación quedan 50 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.2 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 0 de 12 en el sham (`pruebas.py`, `orquestador_sham`).
+El primer diseño era el más elegante: darle al agente los `p_errp` del mismo bloque **permutados** entre los pasos recientes. Misma distribución, ninguna relación con el error de cada paso. Con él, el bloque sham se recupera en 15 de 16 sesiones. No es un fallo de la permutación: es que **la permutación no quita la información que el agente usa**.
+
+1. **El agente corrige una sola cosa:** `beta`, el sesgo del decoder. En cada paso mueve `beta` según `g = q − p'`, donde `p'` es lo seguro que estaba de «cerrar» y `q` lo que cree tras el ErrP. Si decidió «abrir» y el ErrP dice «error», `q` sube y `beta` va hacia «cerrar»; si decidió «cerrar» y hay ErrP, al revés.
+2. **Con decisiones repartidas entre los dos lados, el orden importa.** Un ErrP asignado al paso equivocado empuja al lado equivocado la mitad de las veces, y permutar los `p_errp` los cancela entre sí.
+3. **Tras la perturbación las decisiones no están repartidas.** El decoder perturbado dice «abrir» casi siempre, con mucha seguridad. Entonces *todos* los ErrP, caigan en el paso que caigan, empujan a `beta` hacia el mismo lado: el correcto. Permutarlos no cambia la suma.
+4. **Lo que queda es la tasa.** Con las metas balanceadas, la mitad de esos «abrir» son errores: la tasa de ErrP sube de ~20 % a ~50 %. Un agente bayesiano lee eso bien: «estoy muy seguro y me equivoco la mitad de las veces; mi sesgo está mal». Esa lectura no necesita saber *en qué paso* estuvo cada error.
+
+Por eso lo que el agente aprende del ErrP es, sobre todo, **cuántos hay**; la alineación paso a paso aporta menos (0.05 de error entre el bloque real y el permutado). Y por eso un sham que conserve la tasa de ErrP del lazo deja pasar la información.
+
+El **«sham ciego»** lo confirma por el otro lado. Recibe `p_errp` sacados al azar de los de la calibración: su distribución, a su tasa de error (30 %), sin ninguna relación con el lazo actual. No sabe nada de la perturbación y aun así se recupera en 7 de 16 (5 y 2 de 16 con los otros detectores): con las decisiones cargadas a un lado, **cualquier** flujo de detecciones empuja a `beta` hacia el otro, y uno con la tasa de un 30 % de errores empuja bastante. Solo el sham **sin evidencia** (LLR = 0: `P_hat` se queda en el prior) deja al agente quieto, con 0 a 1 de 16.
+
+La conclusión para el control: el contraste limpio no es «ErrP ordenados contra desordenados», sino **«con la evidencia del ErrP contra sin ella»**. El sham permutado sigue disponible para mostrarlo (`--sham-fuente recientes`); el ciego se descartó para el lazo y queda en el estudio.
+
+### Lo que una sola sesión puede mostrar
+
+Tras la perturbación quedan 70 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.3 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 2 de 12 en el sham (`pruebas.py`, `orquestador_sham`).
 
 **En vivo contra el gemelo, por LSL (4 sesiones reales completas con `--ortesis-sim`; pocas, y una sola calibración sirvió para tres de ellas).** El sham no se recuperó en ninguna. El bloque real se recuperó en 3 de 4:
 
@@ -222,30 +242,9 @@ El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia
 | 3 | 80 | el de la sesión 2 | se recuperó en 46 pasos (69 s) | no se recuperó |
 | 4 | 80 | el de la sesión 2 | se recuperó en 35 pasos (50 s) | no se recuperó |
 
-En la sesión 1 solo 15 de los 50 pasos tras perturbar tuvieron una época útil: 27 no movieron la órtesis (con un decoder muy seguro llega al tope en dos pasos) y 8 fueron artefacto. **Con 60 pasos por bloque el margen en vivo es justo** (la recuperación de la sesión 3, a los 46 pasos, habría entrado por cuatro pasos); con `--sham-pasos 80` quedan 70 pasos tras perturbar y los dos bloques duran unos 5.6 minutos a 2.1 s por paso. El valor por defecto sigue en 60: alargarlo lo decide Luis.
+En la sesión 1 solo 15 de los 50 pasos tras perturbar tuvieron una época útil: 27 no movieron la órtesis (con un decoder muy seguro llega al tope en dos pasos) y 8 fueron artefacto. Con 60 pasos por bloque el margen en vivo era justo (la recuperación de la sesión 3, a los 46 pasos, habría entrado por cuatro pasos). **Por eso el valor por defecto es ahora 80 pasos por bloque** (decisión de Luis para la final): quedan 70 pasos tras perturbar y los dos bloques duran unos 5.6 minutos a 2.1 s por paso.
 
-**Crédito.** La idea de un bloque sham dentro de la sesión es de jusren (rama `b1-b2-sham-errp`). Su sham (`bloque_sham.py`) es otro control: con el piloto en reposo la órtesis se mueve sola y `p(t)` del decoder no debe seguirla. La implementación de `--sham` es distinta y propia. **Ojo con los nombres:** `bloque_sham.py` es el control de reposo de jusren; `orquestador.py --sham` es este control causal.
-
-## Dos controles de especificidad (ideas de jusren)
-
-jusren propuso en su rama `b1-b2-sham-errp` dos controles que faltaban; el crédito de las ideas es suyo. **Hoy hay dos implementaciones de cada uno en `main`**: la de jusren (su rama se fusionó el 3 de octubre; ver «Bloque sham y especificidad por dirección (B1 y B2)» más abajo: `bloque_sham.py`, `hardware.evaluar_sham` y `hardware.metricas_por_direccion`) y la de esta sección, escrita aparte el mismo día sin saber que la suya ya estaba fusionada. Conviven sin estorbarse; falta decidir con cuál se queda el proyecto. En qué difieren:
-
-| | jusren | Esta sección |
-|---|---|---|
-| ErrP por dirección | Avisa si la diferencia de especificidad pasa de 0.05 | Prueba exacta de Fisher sobre las falsas alarmas (p < 0.05) |
-| Órtesis sola con el piloto en reposo | Script aparte (`bloque_sham.py`), entre dos arranques del orquestador; AUC con intervalo bootstrap; ventana hasta 1.5 s tras el movimiento | Dentro del orquestador (`--control-reposo`), sin reiniciar; Mann-Whitney; ventana hasta 0.9 s, como en el lazo |
-
-Al calibrar, la consola imprime las dos líneas por dirección (la de jusren y la de Fisher).
-
-**ErrP por dirección (siempre, al calibrar).** Si el detector da más falsas alarmas cuando la órtesis cierra que cuando abre, el agente corregiría hacia un lado sin que el piloto haya visto un error. Tras la BA, la calibración imprime la sensibilidad y la especificidad de cada dirección (`hardware.errp_por_direccion`, sobre las predicciones de la validación anidada) y la prueba exacta de Fisher de que las falsas alarmas no dependen de la dirección. Solo avisa (p < 0.05), no da NO GO. Se decide con la prueba y no con un umbral sobre la diferencia porque, con unos 40 aciertos por dirección, una diferencia de especificidad de 0.05 es puro azar. Con datos sintéticos (`pruebas.py`): avisa en 191 de 200 calibraciones cuando las falsas alarmas son 30 % a un lado y 2 % al otro, y en 10 de 200 cuando son iguales.
-
-**Control de reposo (`--control-reposo`, unos 2 minutos tras calibrar).** El piloto no imagina nada y la órtesis se mueve sola 40 veces desde el punto medio, la mitad a cerrar. La salida `p(t)` del decoder de imaginación motora no debe seguir a la órtesis: si la sigue, está leyendo los servos, los cables o la respuesta visual al movimiento, y el lazo «funcionaría» por el motivo equivocado. La ventana de MI termina 0.9 s después de cada movimiento, que es lo que ocurre en el lazo (la ventana de un paso alcanza al movimiento del paso anterior). `hardware.evaluar_reposo` da la AUC de `p` contra la dirección y la prueba de Mann-Whitney; solo avisa.
-
-```bash
-python orquestador.py real --puerto COM4 --control-reposo      # también con --saltar-calibracion
-```
-
-Medido en el gemelo sin LSL (EXPLORATORIO; `pruebas.py`, prueba `controles_especificidad`, 6 sujetos): con el piloto en reposo pasa en 6 de 6 (AUC 0.34 a 0.64); si el piloto imagina lo que hace la órtesis, se detecta en 6 de 6 (AUC 0.84 a 0.96). Con `p` independiente de la dirección da falsa alarma en ~5 % de las veces, como corresponde. **Falta probarlo con el casco: el gemelo no tiene ruido de servos, que es justo lo que este control busca.**
+**Crédito.** La idea de un bloque sham dentro de la sesión es de jusren. Su sham (`bloque_sham.py`, más abajo) es otro control: con el piloto en reposo la órtesis se mueve sola y `p(t)` del decoder no debe seguirla. La implementación de `--sham` es distinta y propia.
 
 ## Copiloto clínico (`copiloto.py`)
 
@@ -477,6 +476,13 @@ python bloque_sham.py --puerto COM4        # o --ortesis-sim; sale con código 1
 Medido en el gemelo (EXPLORATORIO; `pruebas.py`, prueba `bloque_sham`): piloto en reposo, AUC 0.34 a 0.65 en 12 sesiones, ninguna con falsa alarma; piloto que imagina lo que hace la órtesis, AUC 0.73 a 0.95 en 6 de 6, todas detectadas. Con etiquetas independientes del EEG, el criterio da falsa alarma en 5.5 % de 600 simulaciones, como corresponde a un intervalo al 95 %. Falta probarlo con el casco: el gemelo no tiene ruido de servos.
 
 **Especificidad por dirección.** `calibrar_errp` pasa la dirección en que se movió la órtesis a `DetectorErrP.ajustar(direccion=...)`, que desglosa las predicciones de su validación anidada en `detector.por_direccion` (sensibilidad, especificidad y BA de cerrar y de abrir, y `dif_espec`). La consola la imprime tras la BA. Si la diferencia de especificidad pasa de `config.ESPEC_DIF_MAX` (0.05) **solo avisa**, no da NO GO: con 120 épocas quedan ~40 aciertos por dirección y el azar solo produce una diferencia de ~0.06. El umbral sigue siendo uno solo para las dos direcciones; umbrales por dirección en el agente quedan como decisión pendiente.
+
+**Lo que se les agregó (4 de octubre).** Dos cosas, sin duplicar lo de jusren:
+
+- *Prueba de Fisher por dirección.* Tras la línea de arriba, la calibración imprime el p-valor de la prueba exacta de Fisher de que las falsas alarmas no dependen de la dirección (`hardware.fisher_por_direccion`); avisa si p < 0.05. Con unos 40 aciertos por dirección una diferencia de 0.05 es azar, y la prueba dice si lo visto es más que eso. Con datos sintéticos avisa en 191 de 200 calibraciones cuando las falsas alarmas son 30 % a un lado y 2 % al otro, y en 10 de 200 cuando son iguales (`pruebas.py`, `controles_especificidad`).
+- *El bloque sham dentro del orquestador.* `python orquestador.py real --puerto COM4 --control-reposo` corre `bloque_sham.correr` tras calibrar (también con `--saltar-calibracion`), con el EEG y la órtesis de la sesión, sin detener y volver a arrancar el orquestador.
+
+**Ojo con los nombres:** `bloque_sham.py` y `--control-reposo` son este control (la órtesis sola con el piloto en reposo); `orquestador.py --sham` es el control causal del agente, real contra sham.
 
 ## Probar sin hardware
 

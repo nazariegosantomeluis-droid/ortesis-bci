@@ -187,33 +187,28 @@ PERTURBACION_LOGITS = 2.4
 # senal que no dice nada del error de cada paso (agente_errp.SenalSham). La idea de un bloque sham
 # dentro de la sesion es de jusren (rama b1-b2-sham-errp); esta implementacion es otra.
 BLOQUES_SHAM = ('real', 'sham')         # columna 'bloque' del CSV y marcadores bloque:real / bloque:sham
-SHAM_ERRP_PASOS = 60                    # por bloque: los dos caben en ~4 min a CICLO_S
+SHAM_ERRP_PASOS = 80                    # por bloque (los dos: ~5.6 min a CICLO_S). Con 60 el margen en vivo era justo
 SHAM_ERRP_PERTURBAR_EN = 10             # paso del bloque en que entra su perturbacion (tras 2 ensayos)
 # Que recibe el agente en el bloque sham (medido en estudios/sham_gemelo.py):
 #   nula       sin evidencia del ErrP: la tasa base de la calibracion (LLR = 0)
 #   recientes  los p_errp del mismo bloque, permutados entre los ultimos SHAM_ERRP_MEMORIA pasos.
 #              OJO: conserva la TASA de ErrP, y con las decisiones cargadas a un lado tras la
 #              perturbacion la tasa sola ya dice hacia donde corregir (gemelo: se recupera 11 de 16)
-SHAM_ERRP_FUENTES = ('nula', 'recientes')
+#   calibracion  "sham ciego": p_errp sacados al azar de los de la calibracion (su distribucion, a su tasa
+#              de error), sin relacion con el lazo actual. Tampoco sirve: trae detecciones a la tasa
+#              de un 30 % de errores y se recupera 7 de 16 (gemelo). Descartado para el lazo.
+SHAM_ERRP_FUENTES = ('nula', 'recientes', 'calibracion')
+SHAM_ERRP_FUENTES_LAZO = ('nula', 'recientes')    # 'calibracion' se midio y se descarto: solo en el estudio
 SHAM_ERRP_FUENTE = 'nula'
 SHAM_ERRP_MEMORIA = 8
 
-# ============================ Controles de especificidad (ideas de jusren) ============================
-# Dos controles que propuso jusren en la rama b1-b2-sham-errp; aqui con implementacion propia.
-# 1. ErrP por direccion (siempre, al calibrar): si el detector da mas falsas alarmas cuando la
-#    ortesis cierra que cuando abre (o al reves), el agente corregiria hacia un lado sin que el
-#    piloto haya visto un error. Se decide con la prueba exacta de Fisher; solo avisa.
+# ============================ Controles de especificidad de jusren: lo que se les agrego ============================
+# ErrP por direccion (hardware.metricas_por_direccion, de jusren): ademas de su aviso por diferencia de
+# especificidad, la prueba exacta de Fisher de que las falsas alarmas no dependen de la direccion.
 ERRP_DIRECCION_ALFA = 0.05
-# 2. Control de reposo (--control-reposo): el piloto no imagina nada y la ortesis se mueve sola;
-#    p(t) del decoder no debe seguirla (si la sigue, lee los servos, los cables o la respuesta
-#    visual, no la intencion). Prueba de Mann-Whitney de p contra la direccion; solo avisa.
+# Su bloque sham (bloque_sham.py: la ortesis se mueve sola con el piloto en reposo) tambien se puede
+# correr dentro del orquestador, tras calibrar, con --control-reposo: sin parar y volver a arrancar.
 CONTROL_REPOSO = 'control_reposo'       # marcador del inicio del control
-REPOSO_MOVIMIENTOS = 40                 # mitad a cerrar, mitad a abrir
-# la ventana de MI termina este tiempo despues del movimiento: lo que pasa en el lazo, donde la
-# ventana de un paso alcanza al movimiento del paso anterior (mediana medida entre pasos: 0.87 s)
-REPOSO_DESPUES_S = 0.9
-REPOSO_ALFA = 0.05
-REPOSO_MIN_POR_DIRECCION = 8            # con menos movimientos validos por direccion no se decide
 
 # ============================ Ortesis (USB serial) ============================
 PUERTO_ORTESIS = 'COM4'
