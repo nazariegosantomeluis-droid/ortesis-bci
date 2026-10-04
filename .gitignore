@@ -7,3 +7,4 @@ modelos/*.pkl
 .superpowers/
 modelos/*.npz
 .env
+modelos/_anteriores/
