@@ -396,6 +396,26 @@ def sesion_errp(n=100, p_error=0.3, **k):
     return np.array(X), np.array(y)
 
 
+def sesion_reposo(n=40, sigue=False, despues=config.REPOSO_DESPUES_S, **k):
+    """Control de reposo offline: el piloto no imagina nada (meta 0) y la ortesis se mueve sola n
+    veces, la mitad a cerrar. Devuelve las ventanas de MI que veria el decoder (n, canales, 2 s; cada
+    una termina `despues` s tras su movimiento) y la direccion (1 = cerrar). sigue=True es el control
+    positivo: el piloto imagina lo que hace la ortesis, y entonces p(t) si debe seguirla."""
+    import hardware as hw
+    cer = Cerebro(_args(**k))
+    dirs = np.random.default_rng([cer.a.semilla, 6]).permutation(np.arange(n) % 2)
+    t, X = 0.0, []
+    for d in dirs:
+        cer.meta = (1 if d else -1) if sigue else 0
+        antes, t = _bloque(cer, t, config.VENTANA_MI + 1.0 - despues)
+        cer.movimiento(t + 1 / FS, False, propio=False)      # nadie lo decidio: sin ErrP, con respuesta visual
+        luego, t = _bloque(cer, t, despues)
+        X.append(hw.filtrar(np.hstack([antes, luego]), config.BANDA_MI, FS)[:, -int(config.VENTANA_MI * FS):])
+        cer.meta = 0
+        _, t = _bloque(cer, t, 1.0)
+    return np.array(X), dirs
+
+
 def sesion_embodiment(n=300, p_error=0.2, **k):
     """Epocas (n, canales, 1 s) de los movimientos de un lazo con movimientos ajenos (Tarea 2):
     uno de cada config.AJENOS_CADA, anunciado y hacia la meta. Devuelve (X, ajeno, correcto)."""

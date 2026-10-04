@@ -524,7 +524,7 @@ class BackendReal:
             b = [(obj, i < n_err) for obj in (0, 1) for i in range(10)]
             return [b[i] for i in rng.permutation(len(b))]
 
-        plan, X, y, n = [], [], [], 0
+        plan, X, y, dirs, n = [], [], [], [], 0      # dirs: hacia donde se movio la ortesis (1 = cerrar)
         theta = [0.5]
         self.ortesis.mover(theta[0])
         while n < self.a.ensayos_errp:
@@ -565,6 +565,7 @@ class BackendReal:
             if e is not None:
                 X.append(e)
                 y.append(int(err))
+                dirs.append(obj if not err else 1 - obj)
         # Todas las epocas pedidas, sin GO ni NO GO tempranos: con 40 a 60 epocas la parada
         # secuencial elegia estimados inflados por suerte (en el gemelo: 0.87 reportado contra
         # 0.69 real). El umbral se elige con validacion anidada (DetectorErrP.ajustar).
@@ -575,10 +576,12 @@ class BackendReal:
                   + f' -> {self.detector.eleccion}')
             lo, hi = self.hw.intervalo_ba(np.array(y), self.detector.pred_cv)
             aviso(f'    [{len(y)} epocas] BA {self.detector.ba:.2f}  IC90 [{lo:.2f}, {hi:.2f}]')
+            aviso('    ' + self.hw.errp_por_direccion(y, self.detector.pred_cv, dirs)['texto'])
         if self.detector is None:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
             return False
-        np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
+        np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y),
+                 direccion=np.array(dirs))
         config.MODELOS.mkdir(exist_ok=True)
         np.savez(config.MODELOS / 'detector_errp_datos.npz', X=np.array(X), y=np.array(y))   # para co-adaptar
         self.hw.guardar(self.detector, 'detector_errp.pkl')
@@ -611,12 +614,41 @@ class BackendReal:
             orq.fsm.ir_a('CAL_ERRP')
             if not self.calibrar_errp(orq):
                 return None
+        if getattr(self.a, 'control_reposo', False):
+            self.control_reposo(orq)
         self.preparar_coadaptacion(orq)
         sens = float(np.clip(self.detector.sens, 0.51, 0.99))
         espec = float(np.clip(self.detector.espec, 0.51, 0.99))
         return {'w0': self.decoder.w0, 'c0': self.decoder.c0, 'sens': sens, 'espec': espec,
                 'salida': 'calibrada', 'p_error_cal': self.detector.p_error_cal,
                 'umbral': self.detector.umbral}
+
+    # ---------------- control de reposo ----------------
+    def control_reposo(self, orq, n=config.REPOSO_MOVIMIENTOS):
+        """Idea de jusren: con el piloto sin imaginar nada, la ortesis se mueve sola desde el punto
+        medio (la mitad de las veces a cerrar) y p(t) del decoder no debe seguirla. La ventana de MI
+        termina REPOSO_DESPUES_S tras cada movimiento, como la de un paso del lazo alcanza al
+        movimiento anterior. No recentra el decoder ni cambia el estado; solo avisa."""
+        aviso(f'Control de reposo ({n} movimientos): NO imagines nada. Mira la ortesis con la mente en blanco.')
+        orq.salidas.marcador(config.CONTROL_REPOSO)
+        dirs = np.random.default_rng().permutation(np.arange(n) % 2)
+        p = []
+        for d in dirs:
+            self.ortesis.mover(config.PUNTO_MEDIO, config.CENTRADO_DURACION_MS)
+            time.sleep(self.a.espera)
+            _, t_ack, _ = self.ortesis.mover(config.PUNTO_MEDIO + (config.PASO_AJENO if d else -config.PASO_AJENO))
+            time.sleep(config.REPOSO_DESPUES_S)
+            v = self._ventana_mi() if t_ack is not None else None
+            fin = self.eeg.ultimo_t()
+            phi = None
+            if v is not None and not self._cabeza_movida(fin - config.VENTANA_MI, fin):
+                phi = self.decoder.phi(v, actualizar_centro=False)
+            p.append(float('nan') if phi is None else float(sigmoide(self.decoder.w0 @ phi + self.decoder.c0)))
+        r = self.hw.evaluar_reposo(p, dirs)
+        aviso('  ' + r['texto'])
+        orq.salidas.estado(tipo='control_reposo', **r)
+        self.reposo = dict(r, p=p, direccion=[int(d) for d in dirs])
+        return r
 
     # ---------------- detector co-adaptativo ----------------
     def preparar_coadaptacion(self, orq):
@@ -1334,6 +1366,8 @@ def argumentos(argv=None):
                     help='usa los modelos guardados (decoder y detector) de la ultima calibracion')
     ap.add_argument('--solo-errp', dest='solo_errp', action='store_true',
                     help='usa el decoder de MI guardado y repite solo la calibracion de ErrP (tras un CP3 NO GO)')
+    ap.add_argument('--control-reposo', dest='control_reposo', action='store_true',
+                    help='tras calibrar, la ortesis se mueve sola con el piloto en reposo: p(t) no debe seguirla (~2 min)')
     ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
                     help='el detector de ErrP no se re-entrena en el lazo (por defecto si lo hace)')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')

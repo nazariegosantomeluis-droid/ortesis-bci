@@ -192,6 +192,23 @@ SHAM_ERRP_FUENTES = ('nula', 'recientes')
 SHAM_ERRP_FUENTE = 'nula'
 SHAM_ERRP_MEMORIA = 8
 
+# ============================ Controles de especificidad (ideas de jusren) ============================
+# Dos controles que propuso jusren en la rama b1-b2-sham-errp; aqui con implementacion propia.
+# 1. ErrP por direccion (siempre, al calibrar): si el detector da mas falsas alarmas cuando la
+#    ortesis cierra que cuando abre (o al reves), el agente corregiria hacia un lado sin que el
+#    piloto haya visto un error. Se decide con la prueba exacta de Fisher; solo avisa.
+ERRP_DIRECCION_ALFA = 0.05
+# 2. Control de reposo (--control-reposo): el piloto no imagina nada y la ortesis se mueve sola;
+#    p(t) del decoder no debe seguirla (si la sigue, lee los servos, los cables o la respuesta
+#    visual, no la intencion). Prueba de Mann-Whitney de p contra la direccion; solo avisa.
+CONTROL_REPOSO = 'control_reposo'       # marcador del inicio del control
+REPOSO_MOVIMIENTOS = 40                 # mitad a cerrar, mitad a abrir
+# la ventana de MI termina este tiempo despues del movimiento: lo que pasa en el lazo, donde la
+# ventana de un paso alcanza al movimiento del paso anterior (mediana medida entre pasos: 0.87 s)
+REPOSO_DESPUES_S = 0.9
+REPOSO_ALFA = 0.05
+REPOSO_MIN_POR_DIRECCION = 8            # con menos movimientos validos por direccion no se decide
+
 # ============================ Ortesis (USB serial) ============================
 PUERTO_ORTESIS = 'COM4'
 BAUDIOS        = 115200

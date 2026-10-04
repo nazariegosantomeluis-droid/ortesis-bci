@@ -757,6 +757,72 @@ def reanudar_sham():
     return 'interrumpida en el paso 33 del bloque sham y reanudada: CSV identico con las dos fuentes'
 
 
+@prueba
+def controles_especificidad():
+    """Los dos controles que propuso jusren. ErrP por direccion: avisa cuando las falsas alarmas se
+    cargan a una direccion y casi nunca cuando no. Control de reposo: en el gemelo, p(t) no sigue a la
+    ortesis con el piloto en reposo y si la sigue cuando el piloto imagina lo que hace la ortesis."""
+    import types
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import orquestador
+    rng = np.random.default_rng(0)
+    avisos = {'igual': 0, 'cargado': 0}
+    for _ in range(200):
+        y, d = (rng.random(120) < 0.3).astype(int), rng.integers(0, 2, 120)
+        for caso, fa in (('igual', (0.10, 0.10)), ('cargado', (0.02, 0.30))):       # falsas alarmas abrir, cerrar
+            pred = np.where(y == 1, rng.random(120) < 0.7, rng.random(120) < np.where(d == 1, fa[1], fa[0])).astype(int)
+            avisos[caso] += hw.errp_por_direccion(y, pred, d)['avisa']
+    assert avisos['igual'] <= 16 and avisos['cargado'] >= 170, avisos
+    r = hw.errp_por_direccion([0, 0, 0, 0, 1, 1], [0, 1, 0, 0, 1, 0], [1, 1, 0, 0, 1, 0])
+    assert r['cerrar'] == {'n': 3, 'sens': 1.0, 'espec': 0.5} and r['abrir']['espec'] == 1.0 and 'cerrar sens' in r['texto']
+    # control de reposo: criterio
+    assert hw.evaluar_reposo([0.5] * 10, [1] * 5 + [0] * 5)['pasa'] is None            # faltan datos
+    d = np.arange(40) % 2
+    assert not hw.evaluar_reposo(0.3 + 0.4 * d + rng.normal(0, 0.1, 40), d)['pasa']
+    r = hw.evaluar_reposo(np.r_[rng.random(38), np.nan, np.nan], d)
+    assert r['n'] == 38 and 0 <= r['auc'] <= 1
+    falsas = sum(not hw.evaluar_reposo(rng.random(40), d)['pasa'] for _ in range(300))
+    assert falsas <= 30, falsas                                                    # ~5 % con p independiente
+    # control de reposo: gemelo, sin LSL
+    pasa = {False: 0, True: 0}
+    aucs = {False: [], True: []}
+    for s in range(6):
+        Xc, yc = cs.sesion_mi(60, semilla=s)
+        dec = hw.DecoderIM().ajustar(Xc, yc, config.candidatos('decoder'))
+        for sigue in (False, True):
+            X, dirs = cs.sesion_reposo(config.REPOSO_MOVIMIENTOS, sigue=sigue, semilla=100 + s)
+            p = [float(dec.w0 @ dec.phi(x, actualizar_centro=False) + dec.c0) for x in X]
+            r = hw.evaluar_reposo(p, dirs)
+            pasa[sigue] += r['pasa']
+            aucs[sigue].append(r['auc'])
+    assert pasa[False] >= 5 and pasa[True] <= 1, (pasa, aucs)
+    # el bloque del orquestador real, con EEG y ortesis de mentira: 40 movimientos desde el punto medio
+    class B(orquestador.BackendReal):
+        def __init__(self):
+            self.hw, self.a, self.movs = hw, types.SimpleNamespace(espera=0.0), []
+            self.decoder = types.SimpleNamespace(w0=np.array([1.0]), c0=0.0, phi=lambda v, actualizar_centro: np.array([v]))
+            self.eeg = types.SimpleNamespace(ultimo_t=lambda: 0.0)
+            self.ortesis = types.SimpleNamespace(mover=lambda f, ms=0: (self.movs.append(f), (len(self.movs), 1.0, 5.0))[1])
+        _ventana_mi = lambda self: 2.0 * (self.movs[-1] - 0.5) / config.PASO_AJENO + rng.normal(0, 0.3)   # sigue a la ortesis
+        _cabeza_movida = lambda self, t0, t1: False
+    eventos, marcas = [], []
+    orq = types.SimpleNamespace(salidas=types.SimpleNamespace(marcador=marcas.append, estado=lambda **d: eventos.append(d)))
+    b, dormir = B(), orquestador.time.sleep
+    orquestador.time.sleep = lambda s: None
+    try:
+        r = b.control_reposo(orq)
+    finally:
+        orquestador.time.sleep = dormir
+    assert marcas == [config.CONTROL_REPOSO] and eventos[0]['tipo'] == 'control_reposo'
+    assert len(b.movs) == 80 and b.movs[::2] == [config.PUNTO_MEDIO] * 40 and sum(m > 0.5 for m in b.movs) == 20
+    assert r['pasa'] is False and r['auc'] > 0.9, r
+    assert orquestador.argumentos(['real', '--control-reposo']).control_reposo
+    return (f"ErrP por direccion: avisa {avisos['cargado']}/200 con sesgo y {avisos['igual']}/200 sin el; reposo en el gemelo: "
+            f"pasa {pasa[False]}/6 en reposo (AUC {min(aucs[False]):.2f} a {max(aucs[False]):.2f}) y {pasa[True]}/6 "
+            f"si el piloto sigue a la ortesis (AUC {min(aucs[True]):.2f} a {max(aucs[True]):.2f})")
+
+
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
@@ -2244,7 +2310,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

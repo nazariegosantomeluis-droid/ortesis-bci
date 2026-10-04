@@ -1097,6 +1097,51 @@ def intervalo_ba(y, pred, nivel=0.90, n_boot=1000, semilla=0):
     return float(np.quantile(bas, q)), float(np.quantile(bas, 1 - q))
 
 
+def errp_por_direccion(y, pred, direccion, alfa=config.ERRP_DIRECCION_ALFA):
+    """Idea de jusren: el detector de ErrP por direccion del movimiento (1 = cerrar, 0 = abrir).
+    y: 1 = el movimiento fue un error; pred: 1 = el detector dijo error. Devuelve sens y espec de
+    cada direccion y el p-valor de la prueba exacta de Fisher de que las falsas alarmas no dependen
+    de la direccion; 'avisa' si p < alfa. Se decide con la prueba y no con un umbral sobre la
+    diferencia: con ~40 aciertos por direccion, 0.05 de diferencia de especificidad es azar."""
+    from scipy.stats import fisher_exact
+    y, pred, d = (np.asarray(v).astype(int) for v in (y, pred, direccion))
+    r, tabla = {}, []
+    for nombre, v in (('cerrar', 1), ('abrir', 0)):
+        err, ok = (d == v) & (y == 1), (d == v) & (y == 0)
+        r[nombre] = {'n': int((d == v).sum()),
+                     'sens': float(pred[err].mean()) if err.any() else float('nan'),
+                     'espec': float(1 - pred[ok].mean()) if ok.any() else float('nan')}
+        tabla.append([int(pred[ok].sum()), int(ok.sum() - pred[ok].sum())])
+    r['p'] = float(fisher_exact(tabla)[1])
+    r['avisa'] = bool(r['p'] < alfa)
+    r['texto'] = ('por direccion: ' + ' | '.join(f"{n} sens {r[n]['sens']:.2f} espec {r[n]['espec']:.2f}"
+                                                 for n in ('cerrar', 'abrir'))
+                  + f" | falsas alarmas iguales en las dos: p = {r['p']:.2f}"
+                  + (' -> AVISO: el detector se equivoca mas hacia un lado' if r['avisa'] else ''))
+    return r
+
+
+def evaluar_reposo(p, direccion, alfa=config.REPOSO_ALFA):
+    """Idea de jusren: control de reposo. Con el piloto sin imaginar nada y la ortesis moviendose
+    sola, p (la salida del decoder de MI en la ventana que alcanza a cada movimiento) no debe
+    depender de la direccion del movimiento (1 = cerrar). Devuelve la AUC de p contra la direccion
+    y el p-valor de Mann-Whitney; 'pasa' = no hay evidencia de que p siga a la ortesis (p >= alfa),
+    o None si quedaron menos de REPOSO_MIN_POR_DIRECCION movimientos validos por direccion."""
+    from scipy.stats import mannwhitneyu
+    p, d = np.asarray(p, dtype=float), np.asarray(direccion, dtype=int)
+    p, d = p[np.isfinite(p)], d[np.isfinite(p)]
+    n1, n0 = int(d.sum()), int((1 - d).sum())
+    if min(n1, n0) < config.REPOSO_MIN_POR_DIRECCION:
+        return {'n': len(d), 'auc': float('nan'), 'p': float('nan'), 'pasa': None,
+                'texto': f'control de reposo: datos insuficientes ({n1} a cerrar y {n0} a abrir)'}
+    u, pv = mannwhitneyu(p[d == 1], p[d == 0], alternative='two-sided')
+    auc, pasa = float(u / (n1 * n0)), bool(pv >= alfa)
+    return {'n': len(d), 'auc': auc, 'p': float(pv), 'pasa': pasa,
+            'texto': (f'control de reposo: AUC de p contra la direccion {auc:.2f} (p = {pv:.3f}, {len(d)} movimientos) -> '
+                      + ('p(t) no sigue a la ortesis' if pasa
+                         else 'AVISO: p(t) sigue a la ortesis; revisar servos, cables y referencia'))}
+
+
 def guardar(obj, nombre):
     config.MODELOS.mkdir(exist_ok=True)
     with open(config.MODELOS / nombre, 'wb') as f:

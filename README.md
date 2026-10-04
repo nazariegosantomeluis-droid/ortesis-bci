@@ -24,7 +24,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 46/46 pruebas pasaron
+python pruebas.py                    # debe decir 47/47 pruebas pasaron
 ```
 
 ## Archivos
@@ -198,6 +198,20 @@ El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia
 **Lo que una sola sesión puede mostrar.** Tras la perturbación quedan 50 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.2 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 0 de 12 en el sham (`pruebas.py`, `orquestador_sham`).
 
 **Crédito.** La idea de un bloque sham dentro de la sesión es de jusren (rama `b1-b2-sham-errp`). Su sham es otro control: con el piloto en reposo la órtesis se mueve sola y `p(t)` del decoder no debe seguirla. La implementación de `--sham` es distinta y propia.
+
+## Dos controles de especificidad (ideas de jusren)
+
+jusren propuso en su rama `b1-b2-sham-errp` dos controles que faltaban. Los dos están en `main` con implementación propia; el crédito de las ideas es suyo.
+
+**ErrP por dirección (siempre, al calibrar).** Si el detector da más falsas alarmas cuando la órtesis cierra que cuando abre, el agente corregiría hacia un lado sin que el piloto haya visto un error. Tras la BA, la calibración imprime la sensibilidad y la especificidad de cada dirección (`hardware.errp_por_direccion`, sobre las predicciones de la validación anidada) y la prueba exacta de Fisher de que las falsas alarmas no dependen de la dirección. Solo avisa (p < 0.05), no da NO GO. Se decide con la prueba y no con un umbral sobre la diferencia porque, con unos 40 aciertos por dirección, una diferencia de especificidad de 0.05 es puro azar. Con datos sintéticos (`pruebas.py`): avisa en 191 de 200 calibraciones cuando las falsas alarmas son 30 % a un lado y 2 % al otro, y en 10 de 200 cuando son iguales.
+
+**Control de reposo (`--control-reposo`, unos 2 minutos tras calibrar).** El piloto no imagina nada y la órtesis se mueve sola 40 veces desde el punto medio, la mitad a cerrar. La salida `p(t)` del decoder de imaginación motora no debe seguir a la órtesis: si la sigue, está leyendo los servos, los cables o la respuesta visual al movimiento, y el lazo «funcionaría» por el motivo equivocado. La ventana de MI termina 0.9 s después de cada movimiento, que es lo que ocurre en el lazo (la ventana de un paso alcanza al movimiento del paso anterior). `hardware.evaluar_reposo` da la AUC de `p` contra la dirección y la prueba de Mann-Whitney; solo avisa.
+
+```bash
+python orquestador.py real --puerto COM4 --control-reposo      # también con --saltar-calibracion
+```
+
+Medido en el gemelo sin LSL (EXPLORATORIO; `pruebas.py`, prueba `controles_especificidad`, 6 sujetos): con el piloto en reposo pasa en 6 de 6 (AUC 0.34 a 0.64); si el piloto imagina lo que hace la órtesis, se detecta en 6 de 6 (AUC 0.84 a 0.96). Con `p` independiente de la dirección da falsa alarma en ~5 % de las veces, como corresponde. **Falta probarlo con el casco: el gemelo no tiene ruido de servos, que es justo lo que este control busca.**
 
 ## Resiliencia: el lazo que no se cae
 
