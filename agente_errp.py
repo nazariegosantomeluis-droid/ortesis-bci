@@ -87,6 +87,8 @@ class ConfigAgente:
     # prior de error
     prior_error: float = 0.2
     alfa_prior: float = 0.03
+    prior_por_paso: bool = config.PRIOR_POR_PASO     # prior de cada paso = error predicho por el agente (experimental)
+    piso_prior: float | None = config.PISO_PRIOR_PASO  # su piso; None = la tasa global (self.prior)
     # seguridad
     max_delta_beta: float = 0.6
     beta_max: float = 6.0
@@ -96,6 +98,8 @@ class ConfigAgente:
             raise ValueError("modo debe ser 'bayes', 'fijo' o 'estatico'")
         if self.salida_detector not in ('binaria', 'calibrada'):
             raise ValueError("salida_detector debe ser 'binaria' o 'calibrada'")
+        if self.piso_prior is not None and not 0 <= self.piso_prior < 0.5:
+            raise ValueError('piso_prior debe estar en [0, 0.5) o ser None (tasa global)')
         if not 0 < self.paso_visible <= self.paso_max <= 1:
             raise ValueError('se requiere 0 < paso_visible <= paso_max <= 1')
 
@@ -149,10 +153,21 @@ class AgenteErrP:
         return dec
 
     # ------------------------------------------------------------ percepcion del ErrP
-    def prob_error(self, p_errp, sens=None, espec=None, fiabilidad=1.0):
+    def prior_del_paso(self, dec=None):
+        """Prior de error del paso pendiente. Por defecto, el global (self.prior). Con `prior_por_paso`,
+        el error que el agente predice para ESTE paso, 1 - max(p', 1 - p'), con el piso `piso_prior`
+        (None: la tasa global), de modo que un agente muy seguro no promedia el prior global."""
+        c = self.cfg
+        if not c.prior_por_paso or dec is None:
+            return self.prior
+        p = dec.p_prima
+        piso = self.prior if c.piso_prior is None else c.piso_prior
+        return max(1 - max(p, 1 - p), piso)
+
+    def prob_error(self, p_errp, sens=None, espec=None, fiabilidad=1.0, dec=None):
         """P_hat: posterior de que el paso fue erroneo."""
         c = self.cfg
-        a_priori = logit(self.prior)
+        a_priori = logit(self.prior_del_paso(dec))
         if c.salida_detector == 'calibrada':
             llr = logit(p_errp) - logit(c.p_error_calibracion)   # corrige el cambio de prior
             return float(sigmoide(a_priori + fiabilidad * llr))
@@ -176,7 +191,7 @@ class AgenteErrP:
         if p_errp is None or not np.isfinite(p_errp) or artefacto:
             return info
 
-        P_hat = self.prob_error(p_errp, sens, espec, float(np.clip(fiabilidad, 0, 1)))
+        P_hat = self.prob_error(p_errp, sens, espec, float(np.clip(fiabilidad, 0, 1)), dec)
         fiab = float(np.clip(fiabilidad if peso is None else peso, 0, 1))   # de aqui en adelante: cuanto aprender
         info['P_hat'] = P_hat
         q = (1 - P_hat) if dec.direccion > 0 else P_hat     # P(la intencion era cerrar)
