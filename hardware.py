@@ -5,7 +5,9 @@ simulacion y en vivo.
 """
 from __future__ import annotations
 
+import json
 import pickle
+import socket
 import threading
 import time
 from collections import deque
@@ -426,6 +428,24 @@ def inicio_por_telemetria(tele, t_us_ack, umbral=config.UMBRAL_INICIO_ANGULO):
     return None
 
 
+def inicio_por_rampa(tele, t_us_ack, vel_unidades_s, umbral=config.UMBRAL_INICIO_ANGULO):
+    """Como inicio_por_telemetria, para telemetria lenta (10 Hz por Wi-Fi) de un servo que se mueve a
+    velocidad constante: la primera muestra tras el ACK en que el angulo se aleja del previo mas que
+    `umbral` esta a `|cambio| / velocidad` del inicio, asi que el inicio se extrapola hacia atras (la
+    interpolacion lineal desde la muestra anterior lo adelantaria hasta un periodo de telemetria).
+    Nunca antes de la muestra anterior (si el servo fue mas lento que `vel_unidades_s`)."""
+    tele = np.asarray(tele, dtype=float).reshape(-1, 2)
+    antes = tele[tele[:, 0] <= t_us_ack]
+    if not len(antes) or vel_unidades_s <= 0:
+        return None
+    base, previo = antes[-1, 1], antes[-1]
+    for t, a in tele[tele[:, 0] > t_us_ack]:
+        if abs(a - base) > umbral:
+            return float(max(previo[0], t - abs(a - base) / vel_unidades_s * 1e6))
+        previo = (t, a)
+    return None
+
+
 class RelojEsp32:
     """Convierte el t_us del ESP32 al reloj de la PC con los pares (t_us del ACK, hora local de
     llegada del ACK): ajuste lineal, que absorbe la deriva entre los dos relojes."""
@@ -484,6 +504,9 @@ class _OrtesisBase:
     def _a_firmware(fraccion):
         return int(round(np.clip(fraccion, 0.0, 1.0) * 1000))
 
+    def _inicio_telemetria(self, tele, t_us_ack):
+        return inicio_por_telemetria(tele, t_us_ack)
+
     def inicio_movimiento(self, seq, t_ack, espera_s=0.4):
         """(hora local del inicio real del movimiento, como se obtuvo). Con telemetria: el
         primer cambio del angulo tras el ACK. Si no hay telemetria o no se ve el inicio: el ACK
@@ -493,7 +516,7 @@ class _OrtesisBase:
             t_fin = time.time() + espera_s        # que llegue telemetria de despues del inicio
             while time.time() < t_fin and not (self._tele and self._tele[-1][0] > t_us_ack + 300_000):
                 time.sleep(0.01)
-            t_us0 = inicio_por_telemetria(list(self._tele), t_us_ack) if self._tele else None
+            t_us0 = self._inicio_telemetria(list(self._tele), t_us_ack) if self._tele else None
             if t_us0 is not None:
                 t0 = self._reloj_esp.a_local(t_us0)
                 if t0 is not None and 0.0 <= t0 - t_ack <= 0.5:
@@ -599,6 +622,215 @@ class OrtesisSerial(_OrtesisBase):
         self._vivo = False
         try:
             self.ser.close()
+        except Exception:
+            pass
+
+
+class RelojEsp32Wifi:
+    """Convierte la hora de la ESP32 por Wi-Fi (firmware 1.2: milisegundos en el ACK y la telemetria)
+    al reloj de la PC. Cada ACK da un par: la hora de la ESP32 y el punto medio entre el envio y la
+    llegada (asi la ida y la vuelta se reparten por igual). El desfase sale de la mediana de los
+    pares de menor ida y vuelta de los ultimos ~20 s: los pares con RTT alto son los que el Wi-Fi
+    retraso de forma asimetrica, y la ventana corta sigue la deriva de los dos relojes."""
+
+    def __init__(self, n=config.UDP_MUESTRAS_RELOJ, fraccion=0.25):
+        self.muestras, self.fraccion = deque(maxlen=n), fraccion      # (rtt_s, desfase_s)
+        self._cv = threading.Lock()
+
+    def agregar(self, t_envio, t_llegada, t_esp_us):
+        rtt = t_llegada - t_envio
+        with self._cv:
+            self.muestras.append((rtt, t_esp_us / 1e6 - (t_envio + rtt / 2)))
+
+    def desfase(self):
+        """Hora de la ESP32 menos hora de la PC (s), o None sin ningun ACK todavia."""
+        with self._cv:
+            m = sorted(self.muestras)
+        if not m:
+            return None
+        k = max(1, int(len(m) * self.fraccion))
+        return float(np.median([d for _, d in m[:k]]))
+
+    def a_local(self, t_us):
+        d = self.desfase()
+        return None if d is None else t_us / 1e6 - d
+
+
+class OrtesisUDP(_OrtesisBase):
+    """Ortesis Adaptrode (ESP32, firmware 1.2) por Wi-Fi: JSON por UDP, protocolo en config.py.
+
+    Misma interfaz que OrtesisSerial. Diferencias:
+      - Latido: un hilo reenvia el estado cada config.UDP_LATIDO_S (el firmware abre la mano si pasan
+        0.5 s sin ordenes y la PC solo mueve la ortesis cada ~2 s). Los latidos numeran aparte
+        (desde config.UDP_SEQ_LATIDO) para que el seq de los pasos siga de uno en uno; su ACK sirve
+        para sincronizar los relojes.
+      - mover() devuelve (seq, t_ack, rtt_ms): t_ack es la hora en que la ESP32 APLICO la orden
+        (su reloj convertido al de la PC, RelojEsp32Wifi), en el reloj `reloj` (por defecto el de
+        LSL, pylsl.local_clock: el mismo que estampa el EEG); rtt_ms es la ida y vuelta del ACK.
+        Si el ACK no llega: (seq, None, nan), como por USB.
+      - Un solo grado de libertad: fraccion va a `cierre` (dedos) y a `pulgar`. `dur_ms` se ignora:
+        la velocidad la limita el firmware (90 grados/s).
+      - La telemetria llega a 10 Hz (la serial, a 50 Hz): el inicio real del movimiento
+        (inicio_movimiento) se estima con menos resolucion.
+      - lecturas() agrega 'paro' y 'bloqueo' del firmware; el Vigilante pasa el paro a ROJO.
+    """
+
+    def __init__(self, ip=config.IP_ORTESIS_UDP, puerto=config.PUERTO_ORTESIS_UDP, reloj=None,
+                 latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S, esperar_telemetria_s=2.0,
+                 errp_latidos=config.UDP_ERRP_LATIDOS):
+        super().__init__()
+        if reloj is None:
+            from pylsl import local_clock as reloj
+        self._clock = reloj
+        self.dest, self.latido_s, self.espera_ack_s = (ip, int(puerto)), latido_s, espera_ack_s
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s.settimeout(0.05)
+        self.estado = {'cierre': 0.0, 'pulgar': 0.0, 'p': 0.5}
+        self._reloj_esp = RelojEsp32Wifi()
+        self._enviados, self._acks = {}, {}
+        self._seq_latido = config.UDP_SEQ_LATIDO
+        self.errp_latidos = errp_latidos         # cuantos latidos siguientes repiten el destello (0 = un solo datagrama)
+        self._errp_pendientes = 0
+        self.t_tel, self.ultima_tel, self.paro, self.bloqueo = None, None, False, False
+        self.metodo = ''                          # como salio el t_ack del ultimo mover: 'ack' o 'respaldo'
+        self._cv = threading.Condition()
+        self._vivo = True
+        threading.Thread(target=self._escuchar, daemon=True).start()
+        threading.Thread(target=self._latir, daemon=True).start()
+        t_fin = time.time() + esperar_telemetria_s
+        while time.time() < t_fin and not self.conectada():
+            time.sleep(0.02)
+
+    # ---------------- envio y recepcion ----------------
+    def _enviar(self, seq, extra=None):
+        """Manda el estado con ese seq y devuelve la hora de envio (reloj de la PC)."""
+        mensaje = dict(self.estado, seq=seq, **(extra or {}))
+        t = self._clock()
+        with self._cv:
+            self._enviados[seq] = t
+            if len(self._enviados) > 600:
+                for k in sorted(self._enviados)[:200]:
+                    self._enviados.pop(k, None)
+                    self._acks.pop(k, None)
+                    self._acks_us.pop(k, None)
+        try:
+            self.s.sendto(json.dumps(mensaje).encode(), self.dest)
+        except OSError:
+            pass
+        return t
+
+    def _seq_aparte(self):
+        with self._cv:
+            self._seq_latido += 1
+            return self._seq_latido
+
+    def _latir(self):
+        while self._vivo:
+            with self._cv:
+                repite = self._errp_pendientes > 0
+                self._errp_pendientes -= repite
+            self._enviar(self._seq_aparte(), {'errp': 1} if repite else None)
+            time.sleep(self.latido_s)
+
+    def _escuchar(self):
+        while self._vivo:
+            try:
+                datos, _ = self.s.recvfrom(2048)
+            except socket.timeout:
+                continue
+            except OSError:
+                if not self._vivo:
+                    break
+                continue
+            t = self._clock()
+            try:
+                m = json.loads(datos)
+                if 'ack' in m:
+                    self._ack(int(m['ack']), t, int(m['t_ms']))
+                elif 't_ms' in m:
+                    self._telemetria_udp(m, t)
+            except (ValueError, KeyError, TypeError):
+                continue                          # datagrama corrupto: se ignora
+
+    def _ack(self, seq, t, t_ms):
+        with self._cv:
+            te = self._enviados.get(seq)
+            if te is None:
+                return
+            self._reloj_esp.agregar(te, t, t_ms * 1000.0)
+            if seq < config.UDP_SEQ_LATIDO:       # el ACK de un paso lo espera mover()
+                self._acks[seq] = (t, t_ms)
+                self._acks_us[seq] = t_ms * 1000
+                self._cv.notify_all()
+
+    def _telemetria_udp(self, m, t):
+        self.t_tel, self.ultima_tel = t, m
+        self.paro, self.bloqueo = bool(m.get('paro')), bool(m.get('bloqueo'))
+        angulo = int(round(float(m['cierre']) * 1000))
+        self.telemetria = {'angulo': angulo, 'fsr': int(round(float(m.get('fuerza', 0.0)) * 1000)),
+                           'i_ma': m.get('i_ma'), 'paro': self.paro, 'bloqueo': self.bloqueo,
+                           'vigilancia': bool(m.get('vigilancia')), 'msg': m.get('msg', '')}
+        self._tele.append((int(m['t_ms']) * 1000, angulo))
+
+    # ---------------- interfaz ----------------
+    def conectada(self, max_edad_s=config.UDP_TELEMETRIA_VIVA_S):
+        return self.t_tel is not None and self._clock() - self.t_tel < max_edad_s
+
+    def lecturas(self):
+        self.puerto_ok = self.conectada()
+        return dict(super().lecturas(), paro=self.paro, bloqueo=self.bloqueo)
+
+    def _inicio_telemetria(self, tele, t_us_ack):
+        """El firmware mueve el servo a vel_max (config.UDP_VEL_MAX_GRADOS_S) y su telemetria es de
+        10 Hz: el inicio se extrapola con esa velocidad. En unidades de 0-1000 del recorrido de los
+        dedos, que la propia telemetria informa en 'ang' (abierta, cerrada) en grados."""
+        ang = (self.ultima_tel or {}).get('ang', {}).get('dedos')
+        recorrido = abs(float(ang[1]) - float(ang[0])) if ang else config.UDP_RECORRIDO_DEDOS_GRADOS
+        return inicio_por_rampa(tele, t_us_ack, 1000.0 * config.UDP_VEL_MAX_GRADOS_S / max(recorrido, 1.0))
+
+    def set_p(self, p):
+        """Nivel del nervio de luz (0 a 1); viaja en el siguiente latido."""
+        self.estado['p'] = float(np.clip(p, 0.0, 1.0))
+
+    def errp(self):
+        """Destello rojo del nervio de luz: el detector marco un ErrP. Sin esperar ACK. UDP pierde datagramas
+        (el Wi-Fi del evento), asi que ademas del envio inmediato, `errp` viaja en los siguientes
+        `errp_latidos` latidos (el firmware solo reinicia su destello de 300 ms con cada uno: dura hasta
+        ~0.3 s mas por cada repeticion). Un segundo ErrP antes de que acaben reinicia la cuenta."""
+        with self._cv:
+            self._errp_pendientes = self.errp_latidos
+        self._enviar(self._seq_aparte(), {'errp': 1})
+
+    def mover(self, fraccion, dur_ms=config.DURACION_PASO_MS):
+        self.seq += 1
+        seq = self.seq
+        f = float(np.clip(fraccion, 0.0, 1.0))
+        self.estado['cierre'] = self.estado['pulgar'] = f
+        t_envio = self._enviar(seq)
+        with self._cv:
+            self._cv.wait_for(lambda: seq in self._acks, timeout=self.espera_ack_s)
+            ack = self._acks.pop(seq, None)
+        if ack is None:
+            return self._sin_ack(seq)
+        t_llega, t_ms = ack
+        rtt_ms = (t_llega - t_envio) * 1000
+        t_apl = self._reloj_esp.a_local(t_ms * 1000.0)
+        # la orden solo pudo aplicarse entre el envio y la llegada del ACK; fuera de ahi (reloj mal
+        # sincronizado) se usa el punto medio y queda dicho
+        margen = 0.005
+        if t_apl is None or not t_envio - margen <= t_apl <= t_llega + margen:
+            t_apl, self.metodo = t_envio + (t_llega - t_envio) / 2, 'respaldo'
+        else:
+            self.metodo = 'ack'
+        self.acks_perdidos, self.ultima_latencia = 0, rtt_ms
+        return seq, t_apl, rtt_ms
+
+    def cerrar(self):
+        self.mover(0.0)
+        self._vivo = False
+        time.sleep(0.1)
+        try:
+            self.s.close()
         except Exception:
             pass
 

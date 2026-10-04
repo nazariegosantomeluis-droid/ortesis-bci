@@ -83,12 +83,12 @@ def revisar_codigo(git=_git):
     return out
 
 
-def revisar_dependencias(plan, ortesis_sim, sin_tablero, importar=importlib.import_module):
+def revisar_dependencias(plan, ortesis_sim, sin_tablero, importar=importlib.import_module, ortesis_udp=None):
     """Importa de verdad lo que hace falta (pylsl carga liblsl; brainflow, su biblioteca nativa)."""
     requeridas = ['numpy', 'scipy', 'sklearn', 'pylsl', 'pyriemann']
     if plan == 'casco':
         requeridas.append('brainflow')
-    if not ortesis_sim:
+    if not ortesis_sim and not ortesis_udp:         # por Wi-Fi no hace falta pyserial
         requeridas.append('serial')
     if not sin_tablero:
         requeridas.append('pyqtgraph')
@@ -175,9 +175,23 @@ def _puertos():
     return [p.device for p in list_ports.comports()]
 
 
-def revisar_puerto(puerto, ortesis_sim, listar=_puertos):
+def es_local(ip):
+    """La ip de esta laptop: ahi la ortesis es el firmware simulado (ortesis_udp_sim.py)."""
+    return bool(ip) and (ip == 'localhost' or ip.startswith('127.'))
+
+
+def revisar_puerto(puerto, ortesis_sim, listar=_puertos, ortesis_udp=None, udp_puerto=config.PUERTO_ORTESIS_UDP, plan=None):
     if ortesis_sim:
         return [rev('puerto', OK, 'ortesis simulada: no hace falta puerto')]
+    if ortesis_udp:
+        # UDP no confirma nada hasta que la ESP32 contesta una orden: el orquestador espera su telemetria 2 s al crear la ortesis
+        if es_local(ortesis_udp) and plan == 'gemelo':
+            return [rev('puerto', OK, f'ortesis UDP en {ortesis_udp}:{udp_puerto}: demo.py lanzara ortesis_udp_sim.py (firmware simulado)')]
+        if es_local(ortesis_udp):
+            return [rev('puerto', AVISO, f'ortesis UDP en {ortesis_udp}:{udp_puerto} (la de esta laptop)',
+                        'Tiene que estar corriendo python ortesis_udp_sim.py (firmware simulado) en otra terminal.')]
+        return [rev('puerto', AVISO, f'ortesis por Wi-Fi en {ortesis_udp}:{udp_puerto}: UDP no se puede comprobar sin mandarle una orden',
+                    f'La laptop debe estar en la red «Adaptrode» (clave en el firmware); si no llega telemetria el CP1 y la salud lo dicen.')]
     try:
         hay = listar()
     except Exception as e:
@@ -195,7 +209,7 @@ def _leer_json(ruta):
         return None
 
 
-def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time):
+def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time, ortesis_udp=None):
     """Lo que dejaron verificar_unicorn.py y verificar_ortesis.py hoy (no los corre: son guiados)."""
     resultados = Path(resultados or config.RESULTADOS)
     out = []
@@ -219,7 +233,10 @@ def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time):
                                'No calibres con esa fuente (docs/DOMINGO.md, seccion 2).'))
             else:
                 out.append(rev('verif_casco', OK, f'la verificacion de hoy aprueba la fuente {fuente}'))
-    if not ortesis_sim:
+    if ortesis_udp and not ortesis_sim:
+        out.append(rev('verif_ortesis', AVISO, 'por Wi-Fi no hay verificacion guiada de la ortesis (verificar_ortesis.py es solo USB)',
+                       'El CP1 mide la latencia del ACK al empezar; prueba antes con python probar_esp32.py.'))
+    elif not ortesis_sim:
         d = _leer_json(resultados / 'verificacion_ortesis.json')
         if d is None or d.get('simulada'):
             out.append(rev('verif_ortesis', AVISO, 'no hay verificacion de la ortesis real',
@@ -270,11 +287,11 @@ def revisar_disco(ruta=None, uso=shutil.disk_usage):
 def preflight(a):
     """Todas las comprobaciones, en el orden en que importan. Devuelve la lista de revisiones."""
     out = revisar_codigo()
-    out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero)
+    out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero, ortesis_udp=a.ortesis_udp)
     out += revisar_modelos()
     out += revisar_flujos(a.plan)
-    out += revisar_puerto(a.puerto, a.ortesis_sim)
-    out += revisar_verificaciones(a.plan, a.ortesis_sim)
+    out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto, plan=a.plan)
+    out += revisar_verificaciones(a.plan, a.ortesis_sim, ortesis_udp=a.ortesis_udp)
     out += revisar_llave()
     out += revisar_plan_b()
     out += revisar_disco()
@@ -313,12 +330,19 @@ def comandos(plan, a, extras=(), ahora=time.time):
         cmd['fuente'] = ('puente_lsl.py', puente)
     elif plan == 'gemelo':
         cmd['fuente'] = ('cerebro_sintetico.py', [])
+    if plan == 'gemelo' and a.ortesis_udp and not a.ortesis_sim and es_local(a.ortesis_udp):
+        cmd['firmware'] = ('ortesis_udp_sim.py', ['--ip', a.ortesis_udp, '--puerto', str(a.udp_puerto)])   # la ESP32 simulada
     if not a.sin_tablero:
         t = (['--copiloto'] if a.copiloto else []) + (['--narrador'] if a.narrador else []) + (['--flechas'] if a.flechas else [])
         cmd['tablero'] = ('tablero.py', t)
     if a.narrador:
         cmd['narrador'] = ('narrador.py', ['--idioma', a.idioma])
-    orq = ['real'] + (['--ortesis-sim'] if a.ortesis_sim else ['--puerto', a.puerto])
+    if a.ortesis_sim:
+        orq = ['real', '--ortesis-sim']
+    elif a.ortesis_udp:
+        orq = ['real', '--ortesis-udp', a.ortesis_udp, '--udp-puerto', str(a.udp_puerto)]
+    else:
+        orq = ['real', '--puerto', a.puerto]
     if plan == 'unicornlsl':
         orq += ['--fuente', 'unicornlsl'] + (['--eeg-nombre', a.eeg_nombre] if a.eeg_nombre else [])
     cmd['orquestador'] = ('orquestador.py', orq + list(extras))
@@ -431,13 +455,14 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
     Los argumentos con valor por omision existen para probarlo sin red, sin hardware y sin esperar."""
     t0 = time.time()
     resultados = Path(resultados or config.RESULTADOS)
-    salida(f'Modo demo: plan {a.plan}, ' + ('ortesis simulada' if a.ortesis_sim else f'ortesis en {a.puerto}'))
+    salida(f'Modo demo: plan {a.plan}, ' + ('ortesis simulada' if a.ortesis_sim else
+                                         f'ortesis por Wi-Fi en {a.ortesis_udp}:{a.udp_puerto}' if a.ortesis_udp else f'ortesis en {a.puerto}'))
     if a.limpiar_modelos:
         destino, movidos = limpiar_modelos()
         salida(f'  modelos viejos movidos a {destino}: {", ".join(movidos)}' if movidos else '  no habia modelos que mover')
     revs = (hacer_preflight or preflight)(a)
     sin_fallas = imprimir_revisiones(revs, salida)
-    bitacora = {'inicio': t0, 'plan': a.plan, 'puerto': None if a.ortesis_sim else a.puerto, 'extras_orquestador': list(extras),
+    bitacora = {'inicio': t0, 'plan': a.plan, 'puerto': None if a.ortesis_sim else a.puerto, 'ortesis_udp': None if a.ortesis_sim else a.ortesis_udp, 'extras_orquestador': list(extras),
                 'preflight': revs, 'ignoro_fallas': bool(a.ignorar_fallas and not sin_fallas)}
     if not sin_fallas and not a.ignorar_fallas:
         salida('Hay fallas: arreglalas y repite, o usa --ignorar-fallas bajo tu responsabilidad (queda en la bitacora).')
@@ -456,6 +481,13 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
     antes = set(listar_resultados(resultados))
     codigo, cierre = 1, {}
     try:
+        if 'firmware' in cmd:                        # antes que el orquestador: este espera su telemetria al crear la ortesis
+            salida(f"  lanzando {cmd['firmware'][0]} (la ESP32 simulada en {a.ortesis_udp}:{a.udp_puerto})")
+            procesos.lanzar('firmware', *cmd['firmware'])
+            dormir(1.0)
+            if not procesos.vivo('firmware'):
+                raise ErrorDemo(f'ortesis_udp_sim.py se cerro al arrancar (¿otro ya escucha en {a.ortesis_udp}:{a.udp_puerto}?). '
+                                'Ultimas lineas:\n' + procesos.cola('firmware'))
         if 'fuente' in cmd:
             nombre, args = cmd['fuente']
             salida(f'  lanzando {nombre} (log en {procesos.carpeta})')
@@ -509,7 +541,9 @@ def planb(a, salida=print, resultados=None, dormir=time.sleep, correr_foreground
     try:
         procesos.lanzar('tablero', 'tablero.py', [])
         dormir(2.0)
-        args = ['--ultima', '--velocidad', str(a.velocidad)] + ([] if a.ortesis_sim else ['--puerto', a.puerto])
+        args = ['--ultima', '--velocidad', str(a.velocidad)] + (
+            [] if a.ortesis_sim else ['--ortesis-udp', a.ortesis_udp, '--udp-puerto', str(a.udp_puerto)] if a.ortesis_udp
+            else ['--puerto', a.puerto])
         salida('Repitiendo la ultima sesion real en el tablero. Es una repeticion: nada se decide en vivo, y hay que decirlo.')
         codigo = (correr_foreground or _correr_en_primer_plano)(argv_de('repetir_sesion.py', args))
     except KeyboardInterrupt:
@@ -530,6 +564,9 @@ def argumentos(argv=None):
                        help='casco: puente de BrainFlow; unicornlsl: app UnicornLSL; gemelo: sin casco')
         p.add_argument('--puerto', default=config.PUERTO_ORTESIS)
         p.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true', help='ortesis simulada')
+        p.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP',
+                       help=f'ortesis por Wi-Fi (firmware 1.2 de la ESP32), como en orquestador.py; sin valor, {config.IP_ORTESIS_UDP}')
+        p.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
         p.add_argument('--serie', default='', help='numero de serie del Unicorn (solo con varios cascos cerca)')
         p.add_argument('--eeg-nombre', dest='eeg_nombre', default='', help='nombre del flujo de la app UnicornLSL')
         p.add_argument('--sin-tablero', dest='sin_tablero', action='store_true')
@@ -548,9 +585,13 @@ def argumentos(argv=None):
     p.add_argument('--velocidad', type=float, default=2.0)
     p.add_argument('--puerto', default=config.PUERTO_ORTESIS)
     p.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true')
+    p.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP')
+    p.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
     p = sub.add_parser('hijo', help='uso interno: corre un script del proyecto con cierre limpio')
     p.add_argument('resto', nargs=argparse.REMAINDER)
     a, resto = ap.parse_known_args(argv)
+    if getattr(a, 'ortesis_sim', False) and getattr(a, 'ortesis_udp', None):
+        ap.error('--ortesis-sim y --ortesis-udp son excluyentes')
     if a.orden == 'lanzar':
         a.extras = [x for x in resto if x != '--']
     elif resto:

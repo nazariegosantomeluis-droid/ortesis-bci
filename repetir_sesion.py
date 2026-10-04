@@ -92,12 +92,19 @@ def main():
     ap.add_argument('--velocidad', type=float, default=1.0, help='1 = ritmo original; 2 = al doble; 0 = sin esperas')
     ap.add_argument('--completa', action='store_true', help='tambien la calibracion (por defecto, desde el lazo)')
     ap.add_argument('--puerto', help='mueve la ortesis a los angulos grabados (por ejemplo COM4)')
+    ap.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP',
+                    help='lo mismo, con la ortesis por Wi-Fi (firmware 1.2 de la ESP32)')
+    ap.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
     a = ap.parse_args()
     ruta = ultima(a.backend) if a.ultima else a.archivo
     if not ruta or not Path(ruta).exists():
         raise SystemExit('No hay sesion grabada que repetir. Da un archivo _estado.jsonl o usa --ultima.')
     ortesis = None
-    if a.puerto:
+    if a.ortesis_udp:
+        import hardware as hw
+        from pylsl import local_clock
+        ortesis = hw.OrtesisUDP(a.ortesis_udp, a.udp_puerto, reloj=local_clock)
+    elif a.puerto:
         import hardware as hw
         ortesis = hw.OrtesisSerial(a.puerto)
     try:

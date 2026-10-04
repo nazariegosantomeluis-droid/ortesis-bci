@@ -2194,6 +2194,213 @@ class _ESP32Falso:
 
 
 @prueba
+def ortesis_udp():
+    """OrtesisUDP (Wi-Fi) contra el firmware simulado en localhost, sin placa: el t_ack queda en el reloj
+    de LSL (pylsl.local_clock) aunque la ESP32 tenga otro origen y deriva, los latidos no tocan el seq de
+    los pasos, un ACK perdido no bloquea, y el paro de emergencia pone la ortesis en ROJO."""
+    import argparse
+    import math
+    import numpy as np
+    from pylsl import local_clock
+    import hardware
+    import orquestador
+    import ortesis_udp_sim as sim
+    from salud import Vigilante
+    # el estimador de inicio por rampa, con telemetria a 10 Hz y un servo a 692 unidades/s
+    vel, inicio = 692.0, 1_000_000 + 37_000
+    tele = [(1_000_000 + 100_000 * k, 500.0 + max(0.0, (1_000_000 + 100_000 * k - inicio) / 1e6) * vel) for k in range(-1, 4)]
+    est = hardware.inicio_por_rampa(tele, 1_000_000, vel)
+    assert abs(est - inicio) < 1.0, (est, inicio)                       # exacto con rampa constante
+    assert abs(hardware.inicio_por_telemetria(tele, 1_000_000) - inicio) > 20_000      # la interpolacion lineal lo adelanta
+    assert hardware.inicio_por_rampa(tele[:2], 1_000_000, vel) is None   # sin movimiento visible
+    fw = sim.FirmwareSimulado(puerto=0, origen_ms=7_654_321).iniciar()     # su reloj en ms no se parece al de LSL
+    try:
+        # el backend crea la ortesis de Wi-Fi con el reloj de LSL, no con time.monotonic
+        por_defecto = hardware.OrtesisUDP('127.0.0.1', fw.puerto)
+        assert por_defecto._clock is local_clock                                          # tambien por defecto
+        por_defecto.cerrar()
+        a = argparse.Namespace(ortesis_sim=False, ortesis_udp='127.0.0.1', udp_puerto=fw.puerto, puerto='COMX')
+        o = orquestador.crear_ortesis(hardware, a)
+        assert isinstance(o, hardware.OrtesisUDP) and o._clock is local_clock and o._clock is not time.monotonic
+        assert o.conectada()
+        time.sleep(1.0)                                                                    # varios latidos: reloj sincronizado
+        desvios, rtts = [], []
+        for k in range(8):
+            antes = local_clock()
+            seq, t_ack, rtt = o.mover(0.3 if k % 2 else 0.6)
+            despues = local_clock()
+            assert seq == k + 1, seq                                                       # los latidos numeran aparte
+            assert antes - 0.005 <= t_ack <= despues + 0.005, (k, antes, t_ack, despues)    # en el reloj de LSL
+            assert o.metodo == 'ack', o.metodo
+            assert 0 <= rtt < 100 and abs(rtt - (despues - antes) * 1000) < 5
+            desvios.append(t_ack - (antes + despues) / 2); rtts.append(rtt)
+            time.sleep(0.3)
+        assert fw.vigilancia is False and sum(1 for s_, _ in fw.recibidos if s_ and s_ > config.UDP_SEQ_LATIDO) > 10
+        assert max(abs(d) for d in desvios) < 0.025, desvios         # ACK en el ciclo de 20 ms de la ESP32
+        # inicio del movimiento por telemetria: cerca del que aplico el firmware (su ciclo es de 20 ms); con el
+        # servo quieto (en el lazo los pasos van a ~2 s, y a 90 grados/s un paso de 0.3 dura 0.4 s)
+        time.sleep(1.5)
+        seq, t_ack, _ = o.mover(0.9)
+        t0, como = o.inicio_movimiento(seq, t_ack)
+        lat = hardware.latencia_mecanica_simulada(seq, 0)
+        assert como in ("telemetria", "ack+latencia") and t_ack <= t0 <= t_ack + 0.5, (como, t0 - t_ack)
+        if como == 'telemetria':
+            assert abs(t0 - (t_ack + lat)) < 0.06, (t0 - t_ack, lat)
+        # el mismo cliente con OTRO reloj (el de LSL mas 5000 s): el t_ack sale en ese reloj
+        otro = lambda: local_clock() + 5000.0
+        fw2 = sim.FirmwareSimulado(puerto=0, origen_ms=42).iniciar()
+        try:
+            o2 = hardware.OrtesisUDP('127.0.0.1', fw2.puerto, reloj=otro)
+            time.sleep(0.8)
+            antes = otro(); seq2, t2, _ = o2.mover(0.5); despues = otro()
+            assert antes - 0.005 <= t2 <= despues + 0.005, (antes, t2, despues)
+            o2.cerrar()
+        finally:
+            fw2.detener()
+        # ACK perdido: sin ACK, no se cuelga y el siguiente paso funciona
+        fw.perder_acks.add(o.seq + 1)
+        t = time.time(); seq3, t_ack3, rtt3 = o.mover(0.4)
+        assert t_ack3 is None and math.isnan(rtt3) and o.acks_perdidos == 1 and time.time() - t < 0.5
+        assert o.mover(0.5)[1] is not None and o.acks_perdidos == 0 and o.seq == seq3 + 1
+        # paro de emergencia: el Vigilante lo pone en ROJO con su motivo
+        v = Vigilante()
+        bien = {'edad_s': 0.02, 'tasa_hz': 250.0, 'canales': {}}
+        v.actualizar(0.0, eeg=bien, ortesis=o.lecturas(), reloj_ms=0.0)
+        assert v.colores['ortesis'] == config.VERDE, v.detalle
+        fw.paro = True
+        time.sleep(0.4)
+        v.actualizar(1.0, eeg=bien, ortesis=o.lecturas(), reloj_ms=0.0)
+        assert o.lecturas()['paro'] and v.colores['ortesis'] == config.ROJO and 'paro' in v.detalle['ortesis']
+        fw.paro = False
+        v2 = Vigilante()
+        v2.actualizar(0.0, eeg=bien, ortesis=dict(o.lecturas(), paro=False, bloqueo=True), reloj_ms=0.0)
+        assert v2.colores['ortesis'] == config.AMARILLO and 'bloqueo' in v2.detalle['ortesis']
+        o.cerrar()
+    finally:
+        fw.detener()
+    # sin placa: no se cuelga; sin telemetria la ortesis cuenta como desconectada
+    muerto = hardware.OrtesisUDP('127.0.0.1', 9, esperar_telemetria_s=0.2)
+    t = time.time(); seq, t_ack, _ = muerto.mover(0.5)
+    assert t_ack is None and not muerto.conectada() and muerto.lecturas()['puerto_ok'] is False and time.time() - t < 0.5
+    muerto.cerrar()
+    return (f'reloj de LSL (desvio del ACK {max(abs(d) for d in desvios) * 1000:.0f} ms, RTT {np.median(rtts):.0f} ms); '
+            f'seq de pasos sin saltos; ACK perdido sin bloqueo; paro en ROJO; sin placa no se cuelga')
+
+
+@prueba
+def ortesis_udp_nervio():
+    """Cada paso manda p = p' del agente (set_p) y, si el detector marca un ErrP en una epoca sin artefacto,
+    un destello rojo (errp): sesion simulada del orquestador con la ortesis UDP contra el firmware simulado."""
+    import hardware
+    import orquestador
+    import ortesis_udp_sim as sim
+    fw = sim.FirmwareSimulado(puerto=0).iniciar()
+    try:
+        o = hardware.OrtesisUDP('127.0.0.1', fw.puerto)
+        # a mano: set_p viaja con la siguiente orden, y tambien en el latido sin mover nada
+        o.set_p(0.83)
+        time.sleep(0.4)
+        assert fw.p == 0.83 and not fw.destellos
+        o.errp()
+        time.sleep(0.6)
+        assert len(fw.destellos) == 1 + config.UDP_ERRP_LATIDOS       # el inmediato y los latidos siguientes
+        # sin ortesis con nervio (USB, simulada) el backend no hace nada
+        assert not hasattr(hardware.OrtesisSimulada(), 'set_p')
+        orquestador.BackendReal.nervio(type('B', (), {'ortesis': hardware.OrtesisSimulada()})(), 0.5)
+        orquestador.BackendReal.destello(type('B', (), {'ortesis': hardware.OrtesisSimulada()})())
+
+        class ConNervio(orquestador.BackendSim):
+            """El simulador del lazo, con el nervio de luz de la ortesis UDP."""
+            def nervio(self, p):
+                self.p_enviadas.append(p)
+                o.set_p(p)
+
+            def destello(self):
+                self.n_destellos += 1
+                self.t_destellos.append(time.monotonic())
+                o.errp()
+
+            def mover(self, fraccion):
+                time.sleep(0.12)                 # lo que tarda un paso real: el latido y la orden llegan al firmware
+                return super().mover(fraccion)
+        a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '4', '--pasos_estatico', '10', '--pasos_adaptativo', '40',
+                                    '--sin_perturbacion', '--ajenos-cada', '0'])
+        b = ConNervio(a)
+        b.p_enviadas, b.n_destellos, b.t_destellos = [], 0, []
+        orq = orquestador.Orquestador(b, a)
+        eventos = []
+        estado = orq.salidas.estado
+        orq.salidas.estado = lambda **d: (eventos.append(d), estado(**d))[1]
+        orquestador.correr(orq, a)
+        time.sleep(0.3)
+        pasos = [e for e in eventos if e['tipo'] == 'paso']
+        # p' de cada paso del lazo (no la posicion segura ni otros movimientos) llego a la ortesis
+        assert len(b.p_enviadas) == len(pasos) > 30 and np.allclose(b.p_enviadas, [e['p_prima'] for e in pasos])
+        assert 0.0 <= min(b.p_enviadas) and max(b.p_enviadas) <= 1.0 and np.std(b.p_enviadas) > 0.05
+        assert fw.p == o.estado['p'] == b.p_enviadas[-1] or abs(fw.p - b.p_enviadas[-1]) < 1e-9
+        # un destello por ErrP detectado en una epoca SIN artefacto (la fila del CSV dice si lo tuvo)
+        por_paso = {e['paso']: e for e in pasos}
+        marcados = sum(1 for i, f in enumerate(orq.filas, 1) if por_paso[i]['detectado'] and not int(f['artefacto']))
+        con_art = sum(1 for i, f in enumerate(orq.filas, 1) if por_paso[i]['detectado'] and int(f['artefacto']))
+        assert marcados > 3 and con_art >= 1 and b.n_destellos == marcados, (marcados, con_art, b.n_destellos)
+        for t_e in b.t_destellos:                                       # y cada uno llego (localhost), en cuanto se mando
+            assert any(t_e - 0.01 <= d <= t_e + 0.25 for d in fw.destellos), t_e
+        o.cerrar()
+    finally:
+        fw.detener()
+    return f'{len(pasos)} pasos: p\' llego en cada uno; {marcados} destellos rojos, uno por ErrP detectado sin artefacto ({con_art} con artefacto, sin destello)'
+
+
+@prueba
+def destello_errp_con_perdidas():
+    """El destello de ErrP es un datagrama y el Wi-Fi del evento pierde: errp tambien viaja en los latidos
+    siguientes. Firmware simulado que descarta datagramas (en rafaga y al azar), con y sin la repeticion."""
+    import hardware
+    import ortesis_udp_sim as sim
+
+    def llegadas(errp_latidos, descartar, eventos, cada=0.5):
+        """Cuantos de `eventos` ErrP llegaron al firmware: hubo un mensaje con errp en los 0.45 s siguientes."""
+        fw = sim.FirmwareSimulado(puerto=0).iniciar()
+        try:
+            o = hardware.OrtesisUDP('127.0.0.1', fw.puerto, errp_latidos=errp_latidos)
+            time.sleep(0.4)
+            fw.descartar = descartar
+            t_ev = []
+            for _ in range(eventos):
+                t_ev.append(time.monotonic())
+                o.errp()
+                time.sleep(cada)
+            time.sleep(0.2)
+            n = sum(1 for t in t_ev if any(t - 0.01 <= d <= t + 0.45 for d in fw.destellos))
+            o.cerrar()
+            return n
+        finally:
+            fw.detener()
+    # rafaga: se pierden el envio inmediato y los dos primeros latidos de cada ErrP; el tercero llega
+    def rafaga():
+        estado = {'t': -1.0, 'n': 0}
+
+        def descartar(m):
+            if not m.get('errp'):
+                return False
+            ahora = time.monotonic()
+            estado['n'] = 0 if ahora - estado['t'] > 0.3 else estado['n'] + 1        # n-esimo mensaje del mismo ErrP
+            estado['t'] = ahora
+            return estado['n'] < 3
+        return descartar
+    assert llegadas(0, rafaga(), 4) == 0                                   # un solo datagrama: se pierden todos
+    assert llegadas(config.UDP_ERRP_LATIDOS, rafaga(), 4) == 4             # con latidos, llegan todos
+    # al azar: cada datagrama se pierde con probabilidad 0.5 (con 3 repeticiones, 1 - 0.5^4 = 94 % de los ErrP llegan)
+    def azar(semilla):
+        rng = np.random.default_rng(semilla)
+        return lambda m: bool(rng.random() < 0.5)
+    sin = llegadas(0, azar(1), 12)
+    con = llegadas(config.UDP_ERRP_LATIDOS, azar(1), 12)
+    assert con >= 9 and con > sin, (con, sin)
+    return f'perdiendo el 50 % de los datagramas llegan {con} de 12 ErrP con repeticion contra {sin} sin ella; en rafaga de 3, 4 de 4 contra 0 de 4'
+
+
+@prueba
 def ortesis_serial_reconecta():
     """OrtesisSerial contra un ESP32 de mentira: lineas corruptas, ACK perdido, puerto caido y reapertura."""
     import hardware as hw
@@ -3276,6 +3483,100 @@ def demo_comandos():
 
 
 @prueba
+def demo_ortesis_udp():
+    """demo.py --ortesis-udp se comporta como el orquestador: la misma IP y puerto llegan a orquestador.py (y a
+    repetir_sesion.py en el plan B), sin pyserial ni verificacion USB, excluyente con --ortesis-sim."""
+    import demo
+    import orquestador
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-udp', '127.0.0.1', '--udp-puerto', '9000'])
+    cmd = demo.comandos('gemelo', a)
+    assert cmd['orquestador'] == ('orquestador.py', ['real', '--ortesis-udp', '127.0.0.1', '--udp-puerto', '9000'])
+    o = orquestador.argumentos(cmd['orquestador'][1])                       # el orquestador entiende lo que demo.py le manda
+    assert o.ortesis_udp == '127.0.0.1' and o.udp_puerto == 9000 and not o.ortesis_sim
+    # sin valor: la IP de fabrica de la ESP32 en su red
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-udp'])
+    assert a.ortesis_udp == config.IP_ORTESIS_UDP and a.udp_puerto == config.PUERTO_ORTESIS_UDP
+    assert orquestador.argumentos(demo.comandos('gemelo', a)['orquestador'][1]).ortesis_udp == config.IP_ORTESIS_UDP
+    # lo de tras `--` sigue llegando al orquestador
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-udp', '--', '--sham'])
+    assert demo.comandos('gemelo', a, a.extras)['orquestador'][1][-1] == '--sham'
+    # excluyente con la ortesis simulada, y por defecto nada cambia
+    for orden in ('lanzar', 'preflight'):
+        try:
+            demo.argumentos([orden, '--ortesis-sim', '--ortesis-udp'])
+            raise AssertionError('debia fallar')
+        except SystemExit:
+            pass
+    assert demo.comandos('gemelo', demo.argumentos(['lanzar', '--puerto', 'COM7']))['orquestador'][1] == ['real', '--puerto', 'COM7']
+    # preflight: sin pyserial, sin verificacion USB, y el aviso dice a donde apunta
+    vistos = []
+    demo.revisar_dependencias('gemelo', False, True, vistos.append, ortesis_udp='192.168.4.1')
+    assert 'serial' not in vistos
+    vistos.clear()
+    demo.revisar_dependencias('gemelo', False, True, vistos.append)
+    assert 'serial' in vistos
+    r = demo.revisar_puerto('COM4', False, ortesis_udp='127.0.0.1', udp_puerto=8888)[0]
+    assert r['estado'] == 'AVISO' and 'ortesis_udp_sim.py' in r['que_hacer']
+    r = demo.revisar_puerto('COM4', False, ortesis_udp='192.168.4.1')[0]
+    assert r['estado'] == 'AVISO' and '192.168.4.1:8888' in r['texto'] and 'Adaptrode' in r['que_hacer']
+    assert demo.revisar_puerto('COM4', True, ortesis_udp='192.168.4.1')[0]['estado'] == 'OK'          # la simulada manda
+    r = demo.revisar_verificaciones('gemelo', False, ortesis_udp='192.168.4.1')[0]
+    assert r['clave'] == 'verif_ortesis' and r['estado'] == 'AVISO' and 'Wi-Fi' in r['texto']
+    # la bandera existe en los scripts a los que demo.py se la pasa
+    for script in ('orquestador.py', 'repetir_sesion.py'):
+        texto = (config.RAIZ / script).read_text(encoding='utf-8')
+        assert "'--ortesis-udp'" in texto and "'--udp-puerto'" in texto, script
+    # el plan B: la ortesis repite por Wi-Fi
+    visto = {}
+    a = demo.argumentos(['planb', '--ortesis-udp', '10.0.0.5'])
+    assert a.ortesis_udp == '10.0.0.5'
+    return 'las banderas y el preflight de la ortesis UDP coinciden con las del orquestador'
+
+
+@prueba
+def demo_firmware_simulado():
+    """demo.py con el plan gemelo y --ortesis-udp en esta laptop lanza tambien ortesis_udp_sim.py (antes que el
+    orquestador); con la ESP32 real, otro plan o la ortesis simulada, no."""
+    import tempfile
+    from pathlib import Path
+
+    import demo
+    cmd = demo.comandos('gemelo', demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-udp', '127.0.0.1', '--udp-puerto', '9000']))
+    assert cmd['firmware'] == ('ortesis_udp_sim.py', ['--ip', '127.0.0.1', '--puerto', '9000'])
+    assert demo.comandos('gemelo', demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-udp', 'localhost']))['firmware'][1][:2] == ['--ip', 'localhost']
+    for argv, plan in ((['--plan', 'gemelo', '--ortesis-udp', '192.168.4.1'], 'gemelo'),     # la ESP32 real
+                       (['--plan', 'casco', '--ortesis-udp', '127.0.0.1'], 'casco'),           # sin el gemelo no es una demo de mentira
+                       (['--plan', 'gemelo', '--ortesis-sim'], 'gemelo'),
+                       (['--plan', 'gemelo', '--puerto', 'COM7'], 'gemelo')):
+        assert 'firmware' not in demo.comandos(plan, demo.argumentos(['lanzar', *argv])), argv
+    # el script existe y acepta lo que demo.py le pasa
+    texto = (config.RAIZ / 'ortesis_udp_sim.py').read_text(encoding='utf-8')
+    assert "'--ip'" in texto and "'--puerto'" in texto
+    # el preflight lo sabe: con el gemelo es OK; con otro plan, el aviso de siempre
+    assert demo.revisar_puerto('COM4', False, ortesis_udp='127.0.0.1', plan='gemelo')[0]['estado'] == 'OK'
+    assert demo.revisar_puerto('COM4', False, ortesis_udp='127.0.0.1', plan='casco')[0]['estado'] == 'AVISO'
+    # lanzar: firmware, fuente y orquestador en ese orden; si el firmware se cierra al arrancar, error claro y nada mas
+    eeg = lambda: [{'name': 'EEG', 'type': 'EEG', 'host': 'h'}]
+    bien = [demo.rev('x', demo.OK, 'bien')]
+    with tempfile.TemporaryDirectory() as d:
+        res, lineas, foreground = Path(d), [], []
+
+        def lanzar(procesos):
+            a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-udp', '127.0.0.1', '--sin-tablero'])
+            foreground.clear()
+            codigo = demo.lanzar(a, [], salida=lineas.append, procesos=procesos, resolver=eeg, hacer_preflight=lambda a: bien,
+                                 resultados=res, dormir=lambda s: None, correr_foreground=lambda argv: foreground.append(argv) or 0)
+            return codigo
+        p = _ProcesosFalsos(res / 'logs')
+        assert lanzar(p) == 0 and [n for n, _, _ in p.pedidos] == ['firmware', 'fuente'] and p.cerrado
+        assert foreground[0][2:5] == ['hijo', 'orquestador.py', 'real'] and '--ortesis-udp' in foreground[0] and '127.0.0.1' in foreground[0]
+        p = _ProcesosFalsos(res / 'logs2', mueren=['firmware'])
+        assert lanzar(p) == 3 and not foreground and p.cerrado and any('ortesis_udp_sim.py se cerro' in l and 'cola de firmware' in l for l in lineas)
+        assert [n for n, _, _ in p.pedidos] == ['firmware']
+    return 'el firmware simulado se lanza con el gemelo y 127.0.0.1, antes que la fuente; no con la ESP32 real'
+
+
+@prueba
 def demo_revisiones():
     """Cada comprobacion del preflight, con git, importaciones, red y archivos falsos."""
     import json
@@ -3598,9 +3899,9 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
-           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
+           'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

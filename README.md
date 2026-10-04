@@ -57,6 +57,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector y piloto, que solo avisa) y el retroceso de las reconexiones. |
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
 | `repetir_sesion.py` | Plan B: repite en el tablero, y si se quiere en la órtesis, una sesión grabada (`resultados/sesion_..._estado.jsonl`). |
+| `ortesis_udp_sim.py` | Firmware 1.2 de la ESP32 simulado en la laptop (UDP): prueba `OrtesisUDP` y el orquestador sin la placa. |
 | `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
 | `ia.py` | Lo común a toda la IA: llave desde `.env`, lo que puede salir hacia la API (`sanear`), preguntas con herramientas, y el esquema, la validación y las reglas deterministas de las propuestas. Nada de esto corre dentro del lazo. |
 | `copiloto.py` | Copiloto clínico: preguntas sobre una sesión respondidas con herramientas sobre su CSV, e informe entre sesiones. |
@@ -705,5 +706,26 @@ ESP32 -> PC   A,<seq>,<t_us>\n     ACK al aplicar el primer pulso (marca el inic
 ESP32 -> PC   T,<t_us>,<angulo>,<fsr>\n     telemetría a 50 Hz
 ```
 USB serial a 115200 baudios. El orquestador espera el ACK máximo 300 ms por paso y mide la latencia de cada uno. Si el ACK no llega, el paso queda excluido y el lazo sigue; con tres seguidos entra en `PAUSA_SEGURA`. El ESP32 solo debe devolver el `seq` que recibió: tras reiniciarse no necesita recordar nada.
+
+### Por Wi-Fi: `--ortesis-udp` (firmware 1.2 de la ESP32)
+
+```bash
+python orquestador.py real --ortesis-udp                 # la ESP32 en su red «Adaptrode» (192.168.4.1:8888), en lugar de --puerto
+python ortesis_udp_sim.py                                # SIN placa: el firmware simulado en la laptop (127.0.0.1:8888)
+python demo.py lanzar --plan gemelo --ortesis-udp 127.0.0.1   #   o todo junto: demo.py lanza también el firmware simulado
+python orquestador.py real --ortesis-udp 127.0.0.1       #   y el orquestador contra él
+```
+
+`hardware.OrtesisUDP` tiene la misma interfaz que `OrtesisSerial` (protocolo JSON en `config.py`, sección *Ortesis por Wi-Fi*). Lo que cambia:
+
+- **Reloj de LSL.** El cliente se crea con `reloj = pylsl.local_clock` (`orquestador.crear_ortesis`), el mismo reloj que estampa el EEG; `time.monotonic` no lo es y en Windows resuelve ~15 ms. `mover()` devuelve como `t_ack` la hora en que la ESP32 **aplicó** la orden: su `t_ms` convertido a ese reloj (`RelojEsp32Wifi`: mediana del desfase de los ACK de menor ida y vuelta de los últimos ~20 s, así sigue la deriva). Si la conversión cae fuera del intervalo envío–llegada del ACK, usa el punto medio. Prueba `ortesis_udp`.
+- **Latido.** La ESP32 abre la mano si pasan 0.5 s sin órdenes y el orquestador solo mueve cada ~2 s: un hilo reenvía el estado cada 100 ms. Los latidos numeran aparte (desde 10⁹) para que el `seq` de los pasos siga de uno en uno; sus ACK alimentan el reloj.
+- **Sin ACK** en 0.3 s (como por USB): `(seq, None, nan)`, el paso queda excluido y el lazo sigue.
+- **Telemetría a 10 Hz** (por USB, 50 Hz). El inicio real del movimiento se extrapola con la velocidad del servo (90 °/s, `config.UDP_VEL_MAX_GRADOS_S`): la interpolación lineal de la telemetría lenta lo adelantaba 30–60 ms. En el firmware simulado el error queda en ~−15 ± 10 ms. **La telemetría del firmware 1.2 es la posición ordenada (`frac`), no la medida:** el retraso físico del servo no se ve.
+- **El cerebro enseñando, en la mano.** En cada paso el orquestador manda `p = p'` del agente (`set_p()`, viaja con la orden y en los latidos) y el nervio de luz sube con ella; cuando el detector marca un ErrP (`p_errp` sobre el umbral) en una época **sin artefacto**, manda `errp()` y la órtesis destella en rojo. Una época con artefacto no cuenta como ErrP para el agente y tampoco destella. UDP pierde datagramas (el Wi-Fi del evento), así que `errp` viaja también en los 3 latidos siguientes (`config.UDP_ERRP_LATIDOS`): con la mitad de los datagramas perdidos en el firmware simulado llegan 12 de 12 ErrP contra 6 de 12 con un solo datagrama (prueba `destello_errp_con_perdidas`). Costo: el firmware reinicia su destello de 300 ms con cada mensaje, así que dura hasta ~0.6 s en lugar de 0.3 s. Por USB y con la órtesis simulada no pasa nada (no la tienen). Prueba `ortesis_udp_nervio`. En una sesión `--sham` el nervio y el destello son iguales en los dos bloques (`p'` y la detección reales), así que no delatan cuál es cuál.
+- **Paro de emergencia y bloqueo.** El `Vigilante` pasa la órtesis a ROJO (`PAUSA_SEGURA`) con el paro oprimido y a AMARILLO con el bloqueo por corriente.
+- **El firmware limita la velocidad:** `dur_ms` se ignora, y un paso de 0.30 del rango tarda ~430 ms (90 °/s sobre 130 °), no los 250 ms del protocolo USB. Un solo grado de libertad: la fracción va a `cierre` y a `pulgar`. 
+- **`ortesis_udp_sim.py` no es el firmware:** modela ACK, relojes con otro origen y deriva, vigilancia, velocidad del servo, paro y bloqueo; no mide corriente ni fuerza. Cada cambio de meta empieza a moverse `latencia_mecanica_simulada(seq)` tras el ACK, para que el gemelo (`cerebro_sintetico.py`) siga alineado. **Sin probar con la ESP32 ni por Wi-Fi real.**
+- Con la red «Adaptrode» la laptop se queda sin internet (la IA cae a plantillas): usar un segundo adaptador.
 
 **Cierre completo.** Antes la órtesis casi nunca cerraba del todo: cada ensayo seguía desde donde quedó el anterior y los pasos eran de 0.20 como máximo. Ahora cada ensayo empieza en el punto medio (antes del cue llega `M,<seq>,500,400`, con el marcador `centrado`; no es un paso y no lleva época de ErrP, y también se hace al retomar un ensayo tras una pausa) y un paso mueve hasta 0.30 del rango en 250 ms. En el simulador (30 sujetos, `estudios/cierre_completo.py`) la órtesis termina cerrada del todo en el 68 % de los ensayos de cerrar (antes 27 %) y abierta del todo en el 75 % de los de relajar (antes 41 %), con el mismo error del agente. Para P2: el paso más rápido es ahora 0.30 del rango en 250 ms.
