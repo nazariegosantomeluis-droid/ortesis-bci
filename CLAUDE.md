@@ -99,6 +99,8 @@ python demo.py planb --ortesis-sim    # plan B: tablero + repeticion de la ultim
 
 ## Resultados de referencia (para no retroceder)
 
+**Aviso (4 de octubre):** desde que `config.PRIOR_POR_PASO = True` (ε = 0.10) el agente usa como prior de cada paso el error que predice, no el prior global. Lo de abajo se midió antes y **no se repitió** con el defecto nuevo; las cifras vigentes del control causal, con velocidad de recuperación, están en el README.
+
 Medidos el 3 de octubre de 2026 con la configuración final (la de la etiqueta `v-demo`) en la máquina de Luis (Windows 11, Python 3.11, numpy 2.5.3, scikit-learn 1.9.1). En otra plataforma o con otras versiones pueden variar en el tercer decimal. Todo es del simulador o del gemelo, no de una persona.
 
 - Simulador (`python simulador_lazo.py --semillas 30`), perturbación de 2.4 logits — error en los primeros 2 min tras perturbar: estático 0.325, eta fijo 0.246, **bayes 0.214**. Antes de perturbar: 0.165 / 0.170 / 0.169; después de los 2 min: 0.316 / 0.178 / 0.175.
