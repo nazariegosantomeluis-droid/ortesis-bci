@@ -15,6 +15,7 @@ FLUJOS = {
     'Paso':       ('Control', 3, 0,   'float32', 'agente-01', 'orquestador'),
     'Error':      ('Control', 3, 0,   'float32', 'errp-01',   'detector ErrP (B2)'),
     'Estado':     ('Markers', 1, 0,   'string',  'estado-01', 'orquestador (JSON por paso, para el tablero)'),
+    'Narracion':  ('Markers', 1, 0,   'string',  'narrador-01', 'narrador.py (JSON: una frase por evento, para el tablero)'),
 }
 # Montaje del g.tec Unicorn Hybrid Black, en el orden en que lo entrega el casco (BrainFlow
 # UNICORN_BOARD y la API de g.tec): 8 EEG a 250 Hz por Bluetooth, mas IMU, bateria,
@@ -330,6 +331,11 @@ PARAMETROS_PROPUESTA = {
     'pausa_s':      (30, 300),          # solo para la accion 'pausa': descanso con la ortesis abierta
 }
 PROPUESTA_MAX_JUSTIFICACION = 600
+# narrador para el jurado (narrador.py): proceso aparte que escucha Estado y publica Narracion
+NARRADOR_API_S = 6.0                    # lo mas que se espera a la API por frase; despues, plantilla
+NARRADOR_VIGENCIA_S = 8.0               # un evento mas viejo que esto ya no se le pregunta a la API
+NARRADOR_MAX_CARACTERES = 220
+NARRADOR_MAX_TOKENS = 2000
 # co-investigador entre bloques (orquestador.py --coinvestigador)
 COINVESTIGADOR_API_S = 20.0             # lo mas que se espera a la API antes de usar las reglas
 COINVESTIGADOR_ESPERA_S = 60.0          # lo mas que se espera la decision del operador; sin decision, nada cambia

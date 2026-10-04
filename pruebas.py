@@ -1082,6 +1082,58 @@ def coinvestigador_entre_bloques():
             'descartada; recalibrar termina en orden; en el control causal se mantiene el ciego')
 
 
+@prueba
+def narrador_jurado():
+    """El narrador saca de los eventos de una sesion lo que vale la pena contar (checkpoints,
+    perturbacion, recuperacion, congelamiento, pausas, control causal), en espanol o ingles. Con la
+    API simulada usa su frase si es corta y no trae cifras ajenas al evento; si la API falla, tarda o
+    inventa un numero, plantilla. Durante el control causal no cuenta nada que delate el bloque real."""
+    import json
+    import narrador as nr
+    orq, _ = _sesion_copiloto()                                   # caos + falla del detector: de todo un poco
+    registro = orq.ruta_csv.with_name(orq.ruta_csv.stem + config.SUFIJO_ESTADO)
+    eventos = [json.loads(l)['evento'] for l in registro.read_text(encoding='utf-8').splitlines() if '"evento"' in l]
+    n = nr.Narrador('es')
+    hechos = [h for e in eventos for h in n.observar(e)]
+    tipos = [h['evento'] for h in hechos]
+    assert tipos.count('perturbacion') == 1 and tipos.count('pausa') == tipos.count('reanudado') >= 3, tipos
+    assert 'congelamiento' in tipos and 'checkpoint' in tipos, tipos
+    contados = {t: tipos.count(t) for t in sorted(set(tipos))}
+    pert = next(h for h in hechos if h['evento'] == 'perturbacion')
+    assert pert['paso'] == orq.t_perturbacion + 1
+    if orq.error_post['pasos'] is not None:                       # misma recuperacion que EVALUACION (en filas, con pausas)
+        rec = next(h for h in hechos if h['evento'] == 'recuperacion')
+        assert rec['pasos'] >= orq.error_post['pasos']
+    frases = {idioma: [nr.Narrador(idioma).plantilla(h) for h in hechos] for idioma in ('es', 'en')}
+    assert all(f and len(f) <= config.NARRADOR_MAX_CARACTERES and '{' not in f for fs in frases.values() for f in fs)
+    assert any('Pausa segura' in f for f in frases['es']) and any('Safe pause' in f for f in frases['en'])
+    assert all(nr.frase_valida(f, h) for fs in frases.values() for f, h in zip(fs, hechos)), 'una plantilla trae cifras ajenas'
+    # API simulada: frase buena -> se usa; con un numero inventado, larga, vacia, rechazo o error -> plantilla
+    h = {'evento': 'recuperacion', 'paso': 60, 'pasos': 26, 'segundos': 55}
+    api = ApiSimulada(_resp('El agente volvio a acertar en 26 pasos, unos 55 segundos, leyendo el cerebro del piloto.'),
+                      _resp('El agente se recupero en 12 pasos.'), _resp('x' * 400), _resp(''), _resp('frase', fin='refusal'),
+                      TimeoutError('lenta'))
+    n = nr.Narrador('es', api)
+    assert n.frase(h) == ('El agente volvio a acertar en 26 pasos, unos 55 segundos, leyendo el cerebro del piloto.', 'api')
+    for _ in range(5):
+        assert n.frase(h) == (n.plantilla(h), 'plantilla')
+    p = api.peticiones[0]
+    assert p['model'] == config.IA_MODELO and json.loads(p['messages'][0]['content']) == h and 'espanol' in p['system']
+    assert p['output_config'] == {'effort': 'low'}
+    assert n.frase(h, nacio=time.time() - 60) == (n.plantilla(h), 'plantilla') and len(api.peticiones) == 6   # evento viejo: ni pregunta
+    assert nr.frase_valida('Fiabilidad del 70 %.', {'f': 0.7}) and not nr.frase_valida('En 3 pasos.', {'pasos': 26})
+    # control causal: los pasos traen la letra del bloque; el narrador no dice cual se recupero hasta el final
+    o, ev = _sesion_sham(3, 'real-sham')
+    n = nr.Narrador('en')
+    hechos = [x for e in ev for x in n.observar(e)]
+    tipos = [x['evento'] for x in hechos]
+    assert tipos.count('perturbacion') == 2 and 'recuperacion' not in tipos and 'congelamiento' not in tipos, tipos
+    assert 'sham' in tipos
+    assert 'Causal control' in n.plantilla(next(x for x in hechos if x['evento'] == 'sham'))
+    assert config.FLUJOS['Narracion'][0] == 'Markers'
+    return f"sesion con caos y falla del detector: {contados}; en el control causal no delata el bloque real"
+
+
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
@@ -1147,6 +1199,9 @@ def tablero_salud():
         txt = t.lbl_sham.text()
         assert 'Bloque A = SHAM' in txt and 'Bloque B = REAL' in txt and 'sham - real +0.14' in txt, txt
         assert not hasattr(t, 'caja')                             # la caja del copiloto solo con --copiloto
+        assert t.lbl_narrador.isHidden()                          # la franja del narrador solo con --narrador
+        t._frase({'texto': 'El agente se recuperó en 26 pasos.', 'evento': 'recuperacion', 'origen': 'plantilla'})
+        assert '26 pasos' in t.lbl_narrador.text()
         # co-investigador: la propuesta con Aprobar y Rechazar; el boton escribe la decision en el registro
         import copiloto
         csv_prueba = config.RESULTADOS / 'sesion_sim_prueba_tablero.csv'
@@ -2599,7 +2654,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

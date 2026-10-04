@@ -120,6 +120,15 @@ El sistema aprende en tres escalas de tiempo:
 - Las reglas deterministas y sus umbrales (`config.REGLAS_PROPUESTA`) son de criterio propio, sin validar con personas.
 - Sin decisión en 60 s (`--coinvestigador-espera`), nada cambia y queda registrado como `sin_decision`. Durante esa espera el orquestador no revisa la salud; la órtesis queda donde estaba.
 
+**4. Narrador para el jurado (3 de octubre, noche).**
+
+- Flujo LSL nuevo en el contrato: `Narracion` (una frase por evento, en JSON). El tablero lo muestra con `--narrador`.
+- Guardia contra cifras inventadas: toda cifra de la frase de la API debe estar en el evento (tal cual, redondeada o en porcentaje); si no, plantilla. Puede descartar frases correctas que mencionen otro número (por ejemplo «70 %» del criterio de recuperación): se prefirió eso a dejar pasar una cifra falsa.
+- Esfuerzo `low` y 6 s de espera por frase: el modelo siempre razona antes de responder, así que **es probable que en vivo muchas frases salgan de plantilla por tiempo**. Hay que medirlo con la llave puesta; si casi todas caen en plantilla, subir `config.NARRADOR_API_S` o dejar el narrador en plantillas.
+- En una sesión `--sham` no narra recuperaciones ni congelamientos durante los bloques (romperían el ciego); narra las dos perturbaciones y el resultado final.
+- Las frases llevan acentos dentro de `narrador.py` (las lee el jurado); la consola imprime con `errors='replace'`.
+- La recuperación se cuenta en filas desde la perturbación y en segundos nominales (`CICLO_S`), no en pasos válidos como `EVALUACION`: con pausas en medio da algo más.
+
 ---
 
 ## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black

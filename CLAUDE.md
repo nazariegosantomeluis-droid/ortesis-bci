@@ -20,7 +20,7 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 
 | Archivo | Rol |
 |---|---|
-| `config.py` | Contrato: flujos LSL (`EEG`, `IMU`...), montaje del Unicorn y papel de cada sensor (`PAPELES`), fuentes de EEG (`FUENTES_EEG`: puente propio o app UnicornLSL), marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
+| `config.py` | Contrato: flujos LSL (`EEG`, `IMU`, `Estado`, `Narracion`...), parámetros de la IA (`IA_MODELO`, rangos seguros de las propuestas, tiempos del narrador y del co-investigador), montaje del Unicorn y papel de cada sensor (`PAPELES`), fuentes de EEG (`FUENTES_EEG`: puente propio o app UnicornLSL), marcadores, CSV, tiempos, umbrales, protocolo del ESP32, máquina de estados. |
 | `salud.py` | `Vigilante` (semáforo VERDE/AMARILLO/ROJO por subsistema: EEG, órtesis, reloj, detector y piloto; el detector y el piloto empiezan en CALENTANDO; el piloto, alfa occipital contra su línea base, solo avisa), `Retroceso` (esperas de reconexión), `RelojContador` (hora de cada muestra por el contador del casco) y `RegistroHuecos` (pérdidas de Bluetooth). Clases puras, sin hardware. |
 | `caos.py` | `PlanCaos(semilla)`: fallas reproducibles (cortes de EEG, ACK perdidos, picos de latencia, parpadeos, canal despegado). Tasas en `config.CAOS_ESTANDAR`. |
 | `agente_errp.py` | `AgenteErrP` (filtro de Kalman sobre la corrección `beta` del logit; P_hat bayesiano; detectores de cambio por sesgo y chequeo predictivo), `ConfianzaDetector` (sens/espec vivas del detector de ErrP con posteriores Beta; congela el aprendizaje si el detector deja de informar) y `SenalSham` (lo que recibe el agente en el bloque sham: `nula`, sin evidencia del ErrP, o `recientes`, los `p_errp` permutados). |
@@ -33,6 +33,7 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | `embodiment.py` | Tarea 2 mínima (EXPLORATORIO): `amplitud_n1` (N1 visual en PO7/Oz/PO8) e `IndiceEmbodiment` (IIC = d de Cohen de la N1 de movimientos ajenos contra propios correctos, intervalo bootstrap y tendencia). Los movimientos ajenos (1 de cada 10 pasos del lazo adaptativo, anunciados y hacia la meta) los hace `Orquestador.paso_ajeno`; el gemelo atenúa la N1 propia con `--embodiment`. |
 | `ia.py` | Lo común a toda la IA (apagada por defecto, nunca dentro del lazo): `cargar_env`/`cliente` (llave `ANTHROPIC_API_KEY` desde `.env`; `None` sin llave), `sanear` (lo único que sale hacia la API: sin rutas ni listas largas de números), `conversar` (lazo manual de herramientas con `config.IA_MODELO`), `pedir_json` (salida estructurada), `ESQUEMA_PROPUESTA`, `validar_propuesta` (rangos seguros de `config.PARAMETROS_PROPUESTA`), `propuesta_por_reglas` y `proponer` (API si responde algo válido; si no, reglas). |
 | `copiloto.py` | Copiloto clínico: `Sesion` (CSV + `_estado.jsonl`: eventos, checkpoints y marcadores) con las herramientas `resumen_sesion`, `eventos_de`, `metrica`, `pasos` y `comparar_sesiones`; `responder` (Claude con herramientas, o `responder_reglas` por plantillas); `informe` (4 Markdown, figuras y propuesta para la próxima sesión); registro de propuestas, decisiones y efectos en `sesion_..._propuestas.jsonl`. |
+| `narrador.py` | Narrador para el jurado, en un proceso aparte: `Narrador.observar` convierte los eventos de `Estado` en hechos (checkpoint, perturbación, recuperación, congelamiento, pausa, control causal) y `frase` pide a Claude una frase (o usa `plantilla`: tarda, falla o trae una cifra ajena al evento, `frase_valida`). Publica en el flujo `Narracion`; `tablero.py --narrador` la muestra. Durante los bloques de `--sham` calla lo que delataría el bloque real. |
 | `repetir_sesion.py` | Plan B: vuelve a publicar en el flujo `Estado` lo que una sesión grabó en `resultados/sesion_..._estado.jsonl` (`config.SUFIJO_ESTADO`; lo escribe `Salidas.estado`), al ritmo original o más rápido; con `--puerto` la órtesis repite los ángulos. |
 | `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). Con `--sham`, línea del control causal y botón *Revelar bloques*; con `--copiloto`, caja de preguntas al copiloto (responde en otro hilo). |
 | `ver_flujos.py`, `pruebas.py` | Diagnóstico LSL y pruebas automáticas. |
@@ -62,6 +63,7 @@ python orquestador.py real --ortesis-sim --control-reposo   # tras calibrar: la 
 python copiloto.py --ultima "cuanto tardo en recuperarse?"   # copiloto clinico (sin llave: plantillas); --informe, --decidir
 python tablero.py --copiloto              # tablero con la caja de preguntas al copiloto
 python orquestador.py real --ortesis-sim --coinvestigador   # entre bloques, una propuesta que aprueba el operador en el tablero
+python narrador.py --idioma en            # narrador para el jurado (terminal aparte); tablero.py --narrador muestra la franja
 ```
 
 ## Cosas que muerden
@@ -79,6 +81,7 @@ python orquestador.py real --ortesis-sim --coinvestigador   # entre bloques, una
 - **La IA nunca se ha llamado de verdad** (3 de octubre: sin llave en la máquina). Todo lo de `ia.py` está probado con la API simulada de `pruebas.py` (`ApiSimulada`). `claude-opus-5-5` rechaza con un 400 `tool_choice` forzado, `thinking: disabled`, `budget_tokens` y `temperature`: no agregarlos. Las pruebas de la IA deben seguir pasando sin red y sin llave.
 - **El co-investigador solo puede tocar lo que está en `config.PARAMETROS_PROPUESTA`** (pasos y movimientos ajenos, con rangos). No agregar ahí parámetros del aprendizaje del agente: una propuesta aprobada los cambiaría sin pasar el control negativo. Entre los dos bloques de `--sham` no se aplica ningún ajuste.
 - **El `_estado.jsonl` ahora también lleva marcadores** (líneas `{'t', 'marcador'}` además de `{'t', 'evento'}`): quien lo lea debe saltarse las que no le tocan, como `repetir_sesion.leer`.
+- **Nunca `taskkill /IM python.exe` para cerrar un proceso de prueba:** mata todos los Python de la máquina (pasó el 3 de octubre por la noche). Guardar el PID y matar ese.
 - **Los trabajos largos en segundo plano necesitan mantener despierto el equipo** (`SetThreadExecutionState`): la laptop se suspende por inactividad y deja la corrida a medias.
 - **No correr estudios pesados en paralelo con `pruebas.py`:** numpy y scikit-learn usan todos los núcleos y se estorban; `seleccion_canales_vistas` pasó de segundos a 30 min así.
 

@@ -16,11 +16,14 @@ un electrodo, cual falla y por que.
 Con --copiloto, una caja de texto para preguntarle al copiloto clinico (copiloto.py) sobre la
 sesion mas reciente; responde en otro hilo, sin detener el tablero.
 
+Con --narrador, una franja con la ultima frase del narrador (narrador.py, flujo 'Narracion').
+
 Con orquestador.py --coinvestigador, al terminar un bloque aparece la propuesta con los botones
 Aprobar y Rechazar: la decision se escribe en el registro de propuestas de la sesion.
 
 Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
       python tablero.py --copiloto          (con la caja de preguntas)
+      python tablero.py --narrador          (con la franja del narrador; correr tambien narrador.py)
       python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
 """
 import argparse
@@ -44,7 +47,7 @@ VENTANA = 20     # para el error movil
 
 
 class Tablero(QtWidgets.QWidget):
-    def __init__(self, copiloto=False):
+    def __init__(self, copiloto=False, narrador=False):
         super().__init__()
         self.setWindowTitle('ortesis-bci · Tablero')
         self.resize(1200, 900)
@@ -67,6 +70,15 @@ class Tablero(QtWidgets.QWidget):
         self._semaforos({'eeg': config.VERDE, 'ortesis': config.VERDE, 'detector': config.CALENTANDO,
                          'piloto': config.CALENTANDO}, {})
         lay.addLayout(cab)
+        # narrador para el jurado (--narrador): la ultima frase del flujo Narracion
+        self.narracion, self._narr_encontrado, self._narr_buscando = None, None, False
+        self.lbl_narrador = QtWidgets.QLabel('')
+        self.lbl_narrador.setWordWrap(True)
+        self.lbl_narrador.setStyleSheet('font-size:20px; font-weight:bold; color:#1a3c6e; background:#eef3fb; '
+                                        'border-radius:8px; padding:8px 12px;')
+        self.lbl_narrador.setVisible(narrador)
+        self.con_narrador = narrador
+        lay.addWidget(self.lbl_narrador)
         lay.addWidget(self.lbl_cp)
         # Tarea 2: una linea con el IIC (exploratorio) en lugar de un panel: con ~12 movimientos
         # ajenos por sesion su curva seria casi toda ruido; el numero con su intervalo basta
@@ -198,8 +210,36 @@ class Tablero(QtWidgets.QWidget):
             self.lbl_copiloto.setText(self._respuesta)
             self._respuesta, self._pensando = None, False
 
+    def _narrar(self):
+        """Lee el flujo Narracion (lo busca en otro hilo, como _conectar) y muestra la ultima frase."""
+        if self.narracion is None:
+            if self._narr_encontrado is not None:
+                self.narracion = self._narr_encontrado
+            elif not self._narr_buscando:
+                self._narr_buscando = True
+
+                def buscar():
+                    try:
+                        s = resolve_byprop('name', 'Narracion', timeout=3.0)
+                        if s:
+                            self._narr_encontrado = StreamInlet(s[0], max_buflen=60)
+                    finally:
+                        self._narr_buscando = False
+                threading.Thread(target=buscar, daemon=True).start()
+            return
+        while True:
+            m, _ = self.narracion.pull_sample(timeout=0.0)
+            if m is None:
+                break
+            self._frase(json.loads(m[0]))
+
+    def _frase(self, d):
+        self.lbl_narrador.setText(d['texto'])
+
     def _actualizar(self):
         self._mostrar_respuesta()
+        if self.con_narrador:
+            self._narrar()
         if self.inlet is None:
             if self._encontrado is not None:
                 self.inlet = self._encontrado
@@ -370,9 +410,10 @@ def main():
     ap.add_argument('--captura', help='guarda una imagen del tablero y sale')
     ap.add_argument('--segundos', type=float, default=15)
     ap.add_argument('--copiloto', action='store_true', help='caja de preguntas al copiloto clinico')
+    ap.add_argument('--narrador', action='store_true', help='franja con las frases de narrador.py')
     a = ap.parse_args()
     app = QtWidgets.QApplication(sys.argv)
-    t = Tablero(copiloto=a.copiloto)
+    t = Tablero(copiloto=a.copiloto, narrador=a.narrador)
     t.show()
     if a.captura:
         def salir():

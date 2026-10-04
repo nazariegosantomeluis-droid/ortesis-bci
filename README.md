@@ -36,7 +36,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 50/50 pruebas pasaron
+python pruebas.py                    # debe decir 51/51 pruebas pasaron
 ```
 
 ## Archivos
@@ -59,6 +59,7 @@ python pruebas.py                    # debe decir 50/50 pruebas pasaron
 | `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
 | `ia.py` | Lo común a toda la IA: llave desde `.env`, lo que puede salir hacia la API (`sanear`), preguntas con herramientas, y el esquema, la validación y las reglas deterministas de las propuestas. Nada de esto corre dentro del lazo. |
 | `copiloto.py` | Copiloto clínico: preguntas sobre una sesión respondidas con herramientas sobre su CSV, e informe entre sesiones. |
+| `narrador.py` | Narrador para el jurado: proceso aparte que escucha `Estado` y publica una frase por evento relevante en el flujo `Narracion` (Claude, con plantillas de respaldo). |
 | `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
@@ -284,6 +285,22 @@ python orquestador.py real --puerto COM4 --coinvestigador
 Las reglas deterministas, en orden: pocos pasos válidos (< 30) → continuar; más de 25 % de filas excluidas → pausa para revisar el casco y la órtesis; alfa occipital ≥ 1.5 veces su línea base → pausa; BA viva < 0.60 o más de la mitad del bloque congelado → recalibrar; errores con pasos chicos que pasan sin ErrP 25 puntos más que con pasos grandes → subir `paso_visible` 0.02; si no, continuar. Los umbrales están en `config.REGLAS_PROPUESTA` y **no están validados con personas**.
 
 Probado en el simulador con la API simulada (`pruebas.py`, `coinvestigador_entre_bloques`): aprobada, `paso_visible` pasa de 0.08 a 0.10 y el lazo lo usa desde el bloque siguiente; rechazada o sin decisión, nada cambia; una propuesta de `paso_max = 0.95` se descarta. **Sin probar con la API real.**
+
+## Narrador para el jurado (`narrador.py`)
+
+Un proceso aparte que escucha el flujo `Estado` y, cuando pasa algo que vale la pena contar, publica **una frase corta** en español o en inglés: checkpoints, la perturbación, la recuperación, el congelamiento del aprendizaje (y cuando se reanuda), las pausas seguras con su motivo (y cuando terminan) y el resultado del control causal.
+
+```bash
+python narrador.py --idioma en        # terminal aparte; imprime cada frase y la publica en el flujo LSL `Narracion`
+python tablero.py --narrador          # franja con la última frase
+```
+
+- **Nunca bloquea el lazo:** es otro proceso y solo lee; el orquestador no sabe que existe.
+- **Basado solo en los datos del evento.** Con llave, Claude recibe el evento (un puñado de cifras) y escribe la frase. Se descarta, y se usa la plantilla, si la API tarda más de 6 s, falla o declina, si la frase pasa de 220 caracteres, o **si trae una cifra que no está en el evento**. Un evento con más de 8 s de atraso ya no se le pregunta a la API: una frase tardía confunde.
+- **Sin llave o sin conexión**, plantillas en los dos idiomas (`--sin-ia` las fuerza).
+- **Respeta el ciego del control causal:** durante los bloques A y B no cuenta recuperaciones ni congelamientos, que delatarían cuál es el real; al final cuenta el resultado.
+
+Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas, contra una sesión del simulador en vivo por LSL. **Sin probar con la API real.**
 
 ## Resiliencia: el lazo que no se cae
 
