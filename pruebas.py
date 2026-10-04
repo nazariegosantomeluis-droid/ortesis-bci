@@ -1888,8 +1888,94 @@ def calibracion_errp_fija():
     assert ensayos.sum() == 60, (ensayos.sum(), np.round(saltos, 2))
     assert all(np.isclose(posiciones[i + 1], 0.5) for i in np.flatnonzero(~ensayos)), np.round(posiciones, 2)
     assert min(posiciones) >= 0.1 - 1e-9 and max(posiciones) <= 0.9 + 1e-9
+    pd = b.detector.por_direccion                          # B2: el desglose por direccion llega al detector
+    assert pd['cerrar']['n'] + pd['abrir']['n'] == 60 and min(pd['cerrar']['n'], pd['abrir']['n']) >= 25, pd
     return (f'usa las 60 epocas pedidas aunque el detector es casi perfecto (BA {b.detector.ba:.2f}); '
             f'los 60 ensayos mueven la ortesis ({int((~ensayos).sum())} vueltas al centro)')
+
+
+@prueba
+def errp_por_direccion():
+    """B2: sensibilidad y especificidad del detector por direccion (cerrar / abrir). La diferencia de
+    especificidad pasa de config.ESPEC_DIF_MAX solo avisa (con ~40 aciertos por direccion el azar solo
+    ya da ~0.06): un detector sesgado a una direccion hace que el agente aprenda mal."""
+    import hardware as hw
+    import cerebro_sintetico as cs
+    y = np.r_[np.zeros(40), np.ones(10), np.zeros(40), np.ones(10)].astype(int)
+    d = np.r_[np.ones(50), np.zeros(50)].astype(int)                     # primera mitad cerrar, segunda abrir
+
+    def con_falsas_alarmas(n_cerrar, n_abrir):
+        pred = y.copy()
+        pred[np.flatnonzero((y == 0) & (d == 1))[:n_cerrar]] = 1
+        pred[np.flatnonzero((y == 0) & (d == 0))[:n_abrir]] = 1
+        return hw.metricas_por_direccion(y, pred, d)
+    parejo, sesgado = con_falsas_alarmas(4, 4), con_falsas_alarmas(4, 12)
+    assert abs(parejo['cerrar']['espec'] - 0.90) < 1e-9 and parejo['dif_espec'] == 0 and not parejo['avisa'], parejo
+    assert abs(sesgado['abrir']['espec'] - 0.70) < 1e-9 and abs(sesgado['dif_espec'] - 0.20) < 1e-9 and sesgado['avisa']
+    assert sesgado['cerrar']['sens'] == 1.0 and sesgado['cerrar']['n'] == 50
+    una = hw.metricas_por_direccion(y[:50], y[:50], np.ones(50, dtype=int))      # falta una direccion
+    assert np.isnan(una['abrir']['espec']) and not una['avisa']
+    # integrado: ajustar() desglosa las predicciones de su validacion anidada
+    X, ye = cs.sesion_errp(60, semilla=0)
+    dire = np.random.default_rng(0).permutation([1, 0] * 30)
+    det = hw.DetectorErrP().ajustar(X, ye, direccion=dire)
+    pd = det.por_direccion
+    assert pd['cerrar']['n'] + pd['abrir']['n'] == 60
+    for k in ('cerrar', 'abrir'):
+        assert 0 <= pd[k]['espec'] <= 1 and 0 <= pd[k]['sens'] <= 1, pd
+    assert not hasattr(hw.DetectorErrP().ajustar(X, ye), 'por_direccion')           # sin direccion no lo calcula
+    return (f"espec cerrar {pd['cerrar']['espec']:.2f} / abrir {pd['abrir']['espec']:.2f} "
+            f"(dif {pd['dif_espec']:.2f}); un sesgo de 0.20 si avisa")
+
+
+@prueba
+def bloque_sham():
+    """B1: el bloque sham detecta un p(t) que sigue a la ortesis (control positivo: un piloto que imagina lo
+    que hace la ortesis) y deja pasar a un piloto en reposo. Gemelo, 40 pasos por sesion."""
+    import hardware as hw
+    import cerebro_sintetico as cs
+    import bloque_sham
+    rng = np.random.default_rng(0)
+    # evaluador: separado -> FALLA; independiente -> PASA; pocos datos -> None
+    d = rng.permutation([1, 0] * 20)
+    assert hw.evaluar_sham(0.2 + 0.6 * d + rng.normal(0, 0.05, 40), d)['pasa'] is False
+    assert hw.evaluar_sham(rng.uniform(size=40), d)['pasa'] is True
+    assert hw.evaluar_sham([0.5] * 5, [1, 0, 1, 0, 1])['pasa'] is None
+    # contra el gemelo
+    Xmi, ymi = cs.sesion_mi(40, semilla=0)
+    dec = hw.DecoderIM().ajustar(Xmi, ymi)
+    p_de = lambda X: 1 / (1 + np.exp(-np.array([dec.w0 @ dec.phi(x, actualizar_centro=False) + dec.c0 for x in X])))
+
+    def sham(sigue, semilla):
+        X, direccion = cs.sesion_sham(40, sigue=sigue, semilla=semilla)
+        return hw.evaluar_sham(p_de(X), direccion)
+    nulos = [sham(False, s) for s in range(4)]
+    controles = [sham(True, s) for s in range(2)]
+    falsas = sum(r['pasa'] is False for r in nulos)
+    assert falsas <= 1, [round(r['auc'], 2) for r in nulos]                   # nominal: 5 % de falsas alarmas
+    assert all(r['pasa'] is False for r in controles), [round(r['auc'], 2) for r in controles]
+    # el script: pasos balanceados, ortesis que se mueve, y pasos excluidos si el EEG no esta fresco
+    class EEG:
+        fs, hay = 250, True
+
+        def ventana(self, seg, pm=0.0, hm=None):
+            return (rng.normal(0, 5, (8, int(seg * 250))), None) if self.hay else (None, None)
+
+        def ultimo_t(self):
+            return 0.0
+
+        def movimiento(self, t0, t1):
+            return None
+    ort = hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0)
+    filas, r = bloque_sham.correr(EEG(), ort, dec, pasos=8, semilla=0, reposo_s=0.0, despues_s=0.0, salida=lambda *a: None)
+    assert len(filas) == 8 and sum(f['direccion'] for f in filas) == 4 and not any(f['excluido'] for f in filas)
+    assert all(0 < f['p'] < 1 for f in filas) and ort.seq >= 16               # centrado + movimiento por paso
+    eeg_mal = EEG(); eeg_mal.hay = False
+    filas, r = bloque_sham.correr(eeg_mal, ort, dec, pasos=4, semilla=0, reposo_s=0.0, despues_s=0.0, salida=lambda *a: None)
+    assert all(f['excluido'] == 'eeg_no_fresco' for f in filas) and r['pasa'] is None
+    return (f"gemelo: piloto en reposo AUC {min(r['auc'] for r in nulos):.2f}-{max(r['auc'] for r in nulos):.2f} "
+            f"({falsas} de 4 con falsa alarma); piloto que sigue a la ortesis AUC "
+            f"{min(r['auc'] for r in controles):.2f}-{max(r['auc'] for r in controles):.2f} (2 de 2 detectados)")
 
 
 @prueba
@@ -2685,7 +2771,7 @@ def lazo_real_caos():
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
 RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
-           'calibracion_repeticiones', 'calibracion_errp_fija', 'cp1_robusto', 'seleccion_canales_vistas',
+           'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',

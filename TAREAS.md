@@ -98,6 +98,7 @@ El sistema aprende en tres escalas de tiempo:
   - *ErrP por dirección:* `hardware.errp_por_direccion` sobre las predicciones de la validación anidada; se imprime siempre al calibrar. En lugar de su umbral fijo de 0.05 sobre la diferencia de especificidad (que él mismo anotó que cae dentro del azar), prueba exacta de Fisher; solo avisa.
   - *Control de reposo:* integrado al orquestador (`--control-reposo`, tras calibrar o con `--saltar-calibracion`), sin parar y volver a arrancar la sesión. Prueba de Mann-Whitney en lugar de un intervalo bootstrap de la AUC, y la ventana termina 0.9 s tras el movimiento (lo que pasa en el lazo) en lugar de 1.5 s. Gemelo: pasa 6 de 6 en reposo y detecta 6 de 6 cuando el piloto sigue a la órtesis. Sin probar con el casco.
   - Su rama `origin/b1-b2-sham-errp` queda intacta.
+  - **Cambio de las 19:40:** al hacer `git fetch` antes de subir se vio que un compañero (juan-ML22) ya había fusionado la rama de jusren a `origin/main` a las 17:10. Se fusionó `origin/main` con este trabajo conservando los dos lados: ahora `main` tiene las dos implementaciones de cada control (la de jusren y la propia). **Pendiente de Luis:** con cuál se queda el proyecto. Recomendación: una sola; la de jusren ya es del equipo, y de la propia vale conservar la prueba de Fisher y el `--control-reposo` integrado al orquestador.
 
 **2. Copiloto clínico (3 de octubre, noche).**
 

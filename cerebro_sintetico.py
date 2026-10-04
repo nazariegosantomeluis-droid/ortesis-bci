@@ -416,6 +416,27 @@ def sesion_reposo(n=40, sigue=False, despues=config.REPOSO_DESPUES_S, **k):
     return np.array(X), dirs
 
 
+def sesion_sham(n=40, sigue=False, **k):
+    """Bloque sham offline (B1): el piloto reposa (meta 0) y la ortesis se mueve sola, en una direccion
+    al azar (n/2 cerrar, n/2 abrir). Devuelve ventanas de MI (n, canales, 2 s) de 0.5 s antes a 1.5 s
+    despues del inicio del movimiento, y la direccion (1 = cerrar). sigue=True es el control
+    positivo: el piloto imagina lo que hace la ortesis, asi que p(t) SI debe seguirla."""
+    import hardware as hw
+    cer = Cerebro(_args(**k))
+    rng = np.random.default_rng([cer.a.semilla, 5])           # flujo propio: etiquetas independientes del EEG
+    dirs = rng.permutation(np.array([1, 0] * (n // 2)))
+    t, X = 0.0, []
+    for d in dirs:
+        cer.meta = (1 if d else -1) if sigue else 0
+        pre, t = _bloque(cer, t, 0.5)
+        cer.movimiento(t + 1 / FS, False, propio=False)       # la ortesis se mueve sola
+        post, t = _bloque(cer, t, 1.5)
+        X.append(hw.filtrar(np.hstack([pre, post]), config.BANDA_MI, FS)[:, -int(config.VENTANA_MI * FS):])
+        cer.meta = 0
+        _, t = _bloque(cer, t, 1.0)
+    return np.array(X), dirs
+
+
 def sesion_embodiment(n=300, p_error=0.2, **k):
     """Epocas (n, canales, 1 s) de los movimientos de un lazo con movimientos ajenos (Tarea 2):
     uno de cada config.AJENOS_CADA, anunciado y hacia la meta. Devuelve (X, ajeno, correcto)."""
