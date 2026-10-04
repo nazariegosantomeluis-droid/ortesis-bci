@@ -105,6 +105,7 @@ class Cerebro:
         self.meta, self.dir_paso = 0, 0          # 0 = sin imaginar
         self.gan_izq = self.gan_der = 1.0        # ganancia mu/beta (1 = reposo)
         self.eventos = []                        # (t0, plantilla, pesos espaciales)
+        self.parpadeos_vivos = []                # horas de inicio de parpadeos aun en curso
         self.t0_sesion = local_clock()
         self.n_err = self.n_ok = 0
         self.caos = (PlanCaos(a.caos, config.CAOS[getattr(a, 'caos_nivel', 'estandar')])
@@ -245,11 +246,20 @@ class Cerebro:
         tasa = a.parpadeos
         if caos and caos.activo('rafaga_parpadeos', t_caos):
             tasa = self.caos.tasas['rafaga_parpadeos']['por_segundo']
+        # un parpadeo dura 0.3 s y puede cruzar varios bloques (en vivo cada bloque es de ~20 ms):
+        # se recuerda su hora de inicio, como los eventos de arriba, y no se recorta al bloque
         if self.rng.random() < tasa * n / FS:
-            i0 = self.rng.integers(0, n)
-            dur = int(0.3 * FS)
-            forma = 120 * np.sin(np.linspace(0, np.pi, dur))[: n - i0]
-            x[:, i0:i0 + len(forma)] += np.outer(W_PARPADEO, forma)
+            self.parpadeos_vivos.append(ts[int(self.rng.integers(0, n))])
+        dur = int(0.3 * FS)
+        activos = []
+        for t0p in self.parpadeos_vivos:
+            k = np.round((ts - t0p) * FS).astype(int)
+            ok = (k >= 0) & (k < dur)
+            if ok.any():
+                x[:, ok] += np.outer(W_PARPADEO, 120 * np.sin(np.pi * k[ok] / dur))
+            if ts[-1] - t0p < 0.3:
+                activos.append(t0p)
+        self.parpadeos_vivos = activos
         y = self.mezcla @ x
         y += self._cabeza_e_imu(ts)                          # el movimiento de cabeza ensucia el EEG
         # caos: un canal se despega (plano, o ruido grande con mucha red electrica)
