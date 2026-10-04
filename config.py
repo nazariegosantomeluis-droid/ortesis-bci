@@ -12,7 +12,7 @@ FLUJOS = {
     'IMU':        ('IMU',     6, 250, 'float32', 'unicorn-imu-01', 'puente_lsl.py (o el gemelo)'),
     'Intencion':  ('Control', 1, 16,  'float32', 'mi-01',     'decoder MI (B1)'),
     'Marcadores': ('Markers', 1, 0,   'string',  'orq-01',    'orquestador'),
-    'Paso':       ('Control', 3, 0,   'float32', 'agente-01', 'orquestador'),
+    'Paso':       ('Control', 3, 0,   'float32', 'agente-01', 'orquestador'),   # canales en el lazo: p_prima, direccion, delta
     'Error':      ('Control', 3, 0,   'float32', 'errp-01',   'detector ErrP (B2)'),
     'Estado':     ('Markers', 1, 0,   'string',  'estado-01', 'orquestador (JSON por paso, para el tablero)'),
     'Narracion':  ('Markers', 1, 0,   'string',  'narrador-01', 'narrador.py (JSON: una frase por evento, para el tablero)'),
@@ -60,8 +60,6 @@ FUENTES_EEG = {
     'unicornlsl': {'nombre': None, 'tipo': 'Data', 'canales': 17, 'eeg': list(range(8)),
                    'imu': list(range(8, 14)), 'bateria': 14, 'contador': 15, 'validez': 16},
 }
-CANALES_PASO  = ['p_prima', 'direccion', 'delta']
-CANALES_ERROR = ['p_errp', 'artefacto', 'youden']
 
 
 def crear_info(nombre):
