@@ -63,6 +63,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `narrador.py` | Narrador para el jurado: proceso aparte que escucha `Estado` y publica una frase por evento relevante en el flujo `Narracion` (Claude, con plantillas de respaldo). |
 | `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
+| `memoria.py` | Memoria entre sesiones del mismo piloto: lo que deja una sesión (`--guardar-memoria`) para que la siguiente calibre más corto (`--desde-sesion`). |
 | `estado_sistema.py` | Revisión previa del sistema (casco, flujos LSL, procesos, ACK, laptop, disco, API y git) y la franja en vivo de `tablero.py --estado-sistema`; cada falla con su solución en una línea. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
 
@@ -353,6 +354,58 @@ python orquestador.py real --puerto COM4 --preentrenado
 ```
 
 Con `--preentrenado`, la calibración de MI ajusta el clasificador con los ensayos de las otras personas más los del piloto (cada uno pesa como 20 de los otros) y usa los 8 canales, sin elegir entre C3/Cz/C4 y los 8. La BA que reporta el CP2 sigue siendo de validación cruzada sobre los ensayos del piloto, y el mínimo de 36 ensayos no cambia: bajarlo (`--min_mi`) acorta la calibración, pero el estimado con pocos ensayos vuelve a ser optimista (ver «la calibración secuencial inflaba la exactitud»).
+
+## Memoria entre sesiones: la segunda sesión del mismo piloto calibra más corto (`--desde-sesion`)
+
+Apagado por defecto. Una sesión puede dejar junto a su CSV lo que aprendió, y la siguiente **del mismo piloto** arranca de ahí en lugar de empezar de cero:
+
+```bash
+python orquestador.py real --puerto COM4 --guardar-memoria     # al terminar: resultados/sesion_real_<fecha>_memoria.pkl
+python memoria.py                                              # lo mismo para una sesión ya corrida sin la bandera
+python orquestador.py real --puerto COM4 --desde-sesion resultados/sesion_real_<fecha>.csv
+```
+
+| Pieza | Qué se guarda | Cómo arranca la sesión siguiente |
+|---|---|---|
+| Decoder de MI | Los ensayos de calibración como rasgos recentrados con el centro de **su** sesión (el formato del decoder pre-entrenado) | 12 ensayos en lugar de 36 a 60 (`config.MEMORIA_ENSAYOS_MI`), de largo fijo. Su centro, que no usa las etiquetas, recentra el decoder; el clasificador se ajusta con los rasgos previos más los de hoy, que pesan el triple. El lazo sigue recentrando con cada ventana, como siempre. |
+| Detector de ErrP | El detector y sus épocas con etiqueta (calibración y, con co-adaptación, las del lazo) | 40 épocas en lugar de 120 (`config.MEMORIA_EPOCAS_ERRP`). Se ajusta con las previas más las de hoy, con los canales y vistas que eligió la sesión previa. |
+| Agente | Su estado completo y la `beta` de **antes** de la perturbación | `beta` arranca en la de antes de la perturbación. Nunca en la final: esa incluye la corrección de una perturbación artificial de 2.4 logits que la sesión siguiente no tiene. Cómo aprende el agente no cambia. |
+
+**Los checkpoints no se heredan.** El CP2 es la BA de validación cruzada sobre los 12 ensayos de hoy, y el CP3 se mide solo con las 40 épocas de hoy: las de la sesión previa entrenan, pero nunca caen en un pliegue de prueba (`memoria.detector_con_memoria`). Con tan pocos ensayos el intervalo es ancho, y se imprime. Como el largo es fijo y no hay parada temprana, el estimado no se infla por suerte.
+
+`python memoria.py` arma la memoria de una sesión que no la guardó (la del domingo, corrida con `v-demo`) con lo que quedó en `modelos/` y `resultados/`. Ojo: `modelos/` guarda la última calibración, sea de quien sea; hay que armarla antes de que otra calibración la pise.
+
+### Cuántos ensayos ahorra (`estudios/memoria_sesiones.py`)
+
+Validación honesta, igual con todas las fuentes: la sesión previa solo aporta la memoria; de la sesión nueva, los primeros *n* ensayos calibran y los **últimos** prueban, y los de prueba nunca ajustan nada (ni el centro, ni el clasificador, ni la elección de canales, ni el umbral). El peso y los largos se fijaron antes de medir.
+
+**Con los datos reales del piloto: pendiente.** En esta máquina no había ninguna calibración real cuando se escribió esto (4 de octubre, mediodía). En cuanto haya dos calibraciones del mismo piloto:
+
+```bash
+python estudios/memoria_sesiones.py lista      # las calibraciones guardadas, con su hora
+python estudios/memoria_sesiones.py reales resultados/calibracion_mi_<previa>.npz resultados/calibracion_mi_<nueva>.npz \
+       resultados/calibracion_errp_<previa>.npz resultados/calibracion_errp_<nueva>.npz
+```
+
+Una pareja de sesiones es una sola medición: el programa la reporta con el intervalo de sus ensayos de prueba y la etiqueta como exploratoria.
+
+**Con personas reales que no son el piloto** (EEGMMIDB, las 40 del estudio de transferencia; memoria = corrida 4, calibración = primeros *n* ensayos de la corrida 8, BA en la corrida 12; media ± error estándar). Las tres corridas son del mismo día y sin quitarse el gorro, así que mide si la memoria ayuda entre corridas, no entre días:
+
+| Ensayos de hoy | Desde cero | Con memoria | Decoder previo sin recalibrar | Memoria − cero (pareada) |
+|---|---|---|---|---|
+| 0 | — | **0.689 ± 0.024** | 0.672 ± 0.027 | — |
+| 8 | 0.646 ± 0.027 | 0.694 ± 0.026 | 0.672 ± 0.027 | +0.047 ± 0.016 |
+| 12 | 0.689 ± 0.025 | 0.715 ± 0.026 | 0.672 ± 0.027 | +0.026 ± 0.015 |
+
+Lectura: sin ningún ensayo de hoy, la memoria (recentrada con 12 s de EEG sin etiquetas) da lo mismo que calibrar desde cero con 12; es decir, **ahorra al menos 12 ensayos, que es lo más que estos datos dejan medir** (cada corrida tiene unos 14 ensayos). Con los mismos ensayos, la ventaja es de 0.03 a 0.05, y con 12 no llega a dos errores estándar. No dice si 12 ensayos con memoria alcanzan a una calibración completa de 36.
+
+**Con el gemelo** (4 sujetos; solo verificación: «otra sesión» es otro ruido y otra ganancia por electrodo, un cambio que programamos nosotros y que el recentrado deshace por construcción): MI con 12 ensayos de hoy, 0.70 ± 0.10 desde cero contra 0.88 ± 0.03 con memoria (desde cero con 36: 0.84 ± 0.04). ErrP con 40 épocas de hoy, 0.66 ± 0.05 contra 0.82 ± 0.02 (desde cero con 120: 0.74 ± 0.05), y **el CP3 con memoria habría reportado 0.81 contra 0.82 real**: no infla. Por LSL contra el gemelo, la prueba `lazo_real_memoria` corre las dos sesiones de punta a punta.
+
+**El estado del agente no aporta nada medible en el gemelo.** En las 48 sesiones de `estudios/paso_sin_movimiento.py`, la `beta` de antes de la perturbación es ruido alrededor de cero (media −0.05 a −0.12 según el detector, desviación 0.14 a 0.20; dentro de un mismo sujeto varía tanto como entre sujetos) y antes de perturbar el agente y la sombra se equivocan igual (0.16 contra 0.15). Se hereda porque es barato y porque una persona podría tener un sesgo estable que el gemelo no tiene; con dos sesiones reales se puede ver.
+
+**Sin probar con una persona.** Y una memoria que no es del mismo piloto estorba: en una corrida contra el gemelo con una memoria de épocas ajenas, el CP3 dio BA 0.58 con las 40 de hoy (NO GO, como debe).
+
+![Memoria entre sesiones](docs/figuras/memoria_sesiones.png)
 
 ## Estado del sistema: revisión previa y franja en vivo (`estado_sistema.py`)
 

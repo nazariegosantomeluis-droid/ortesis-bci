@@ -2756,6 +2756,41 @@ def lazo_real_caos():
     return f"{pausas} pausas, todas reanudadas; {linea('excluidos del analisis')}; {linea('[CP4]')}"
 
 
+@prueba
+def lazo_real_memoria():
+    """Memoria entre sesiones por el camino real contra el gemelo (reutiliza los modelos que calibro
+    lazo_real_sintetico): una sesion deja su memoria con --guardar-memoria y la siguiente arranca de
+    ella con --desde-sesion y las dos calibraciones cortas. Cifras del gemelo, no de una persona."""
+    import memoria
+    comun = ['--ortesis-sim', '--forzar', '--guardar-memoria', '--seg_revision', '3', '--pasos_estatico', '5',
+             '--sin-cuestionario']
+    puente = subprocess.Popen([sys.executable, 'cerebro_sintetico.py'], cwd=config.RAIZ,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(2)
+
+        def sesion(*extra):
+            r = subprocess.run([sys.executable, 'orquestador.py', 'real', *comun, *extra],
+                               cwd=config.RAIZ, capture_output=True, text=True, timeout=400)
+            assert r.returncode == 0 and 'Traceback' not in r.stderr, r.stderr[-1500:]
+            ruta = next(l.split('Memoria de la sesion: ')[1].split('  (')[0] for l in r.stdout.splitlines()
+                        if 'Memoria de la sesion: ' in l)
+            return r.stdout, ruta
+        _, ruta = sesion('--saltar-calibracion', '--pasos_adaptativo', '30')
+        m = memoria.cargar(ruta)
+        salida, ruta2 = sesion('--desde-sesion', ruta, '--duracion_mi', '2.5', '--espera', '0.3', '--pasos_adaptativo', '10')
+    finally:
+        puente.terminate()
+    cp = {n: next(l for l in salida.splitlines() if l.startswith(f'[CP{n}]')) for n in (2, 3)}
+    n, k = config.MEMORIA_ENSAYOS_MI, config.MEMORIA_EPOCAS_ERRP
+    assert 'Calibracion corta de MI' in salida and 'largo fijo' in cp[2] and 'memoria de sesion' in cp[2], cp[2]
+    assert f'con {k} epocas' in cp[3] and 'memoria de' in cp[3], cp[3]                 # el CP3, solo con las de hoy
+    m2 = memoria.cargar(ruta2)                                                         # la memoria nueva lleva las dos sesiones
+    assert len(m2['mi']['y']) > len(m['mi']['y']) and len(m2['errp']['y']) >= len(m['errp']['y']) + k - 5
+    return (f"sesion 1 deja {len(m['mi']['y'])} ensayos de MI y {len(m['errp']['y'])} epocas; sesion 2 calibra con {n} y {k}: "
+            + ' | '.join(c.split(' -> ')[0][:60] + ' -> ' + c.split(' -> ')[-1] for c in cp.values()))
+
+
 # ------------------------------------------------------------ estado del sistema
 @prueba
 def estado_sistema():
@@ -2914,6 +2949,131 @@ def estado_sistema_lsl():
     return f"gemelo como UnicornLSL: {r['bateria']['texto']}, {r['perdidas']['texto']}; dos fuentes de EEG -> FALLA"
 
 
+# ------------------------------------------------------------ memoria entre sesiones
+@prueba
+def memoria_sesiones():
+    """Memoria entre sesiones (--guardar-memoria y --desde-sesion, apagados por defecto), con dos
+    sesiones del mismo sujeto del gemelo: otro ruido y otra ganancia por electrodo, un cambio que
+    programamos nosotros. Aqui solo se prueba el mecanismo; lo medido esta en estudios/memoria_sesiones.py."""
+    import copy
+    import tempfile
+    import types
+    from pathlib import Path
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import memoria
+    import orquestador
+    from agente_errp import AgenteErrP, ConfianzaDetector
+    a = orquestador.argumentos(['real'])
+    assert a.desde_sesion is None and not a.guardar_memoria                        # apagado por defecto
+    assert config.MEMORIA_ENSAYOS_MI < a.min_mi and config.MEMORIA_EPOCAS_ERRP < a.ensayos_errp
+    # el gemelo sin 'sesion' es el de siempre; con sesion = 1, el mismo sujeto en otra sesion
+    X0 = cs.sesion_mi(3, semilla=3)[0]
+    assert np.array_equal(X0, cs.sesion_mi(3, semilla=3, sesion=0)[0])
+    assert not np.allclose(X0, cs.sesion_mi(3, semilla=3, sesion=1)[0])
+    # sesion previa -> memoria -> archivo
+    s = 1
+    Xa, ya = cs.sesion_mi(40, semilla=s)
+    Ea, ea = cs.sesion_errp(100, semilla=s)
+    dec = hw.DecoderIM().ajustar(Xa, ya, config.candidatos('decoder'))
+    det = hw.DetectorErrP(canales=config.indices('errp'), vistas='tres').ajustar(Ea, ea, evaluar=False)
+    det.sens, det.espec, det.ba, det.eleccion = 0.7, 0.9, 0.8, 'Fz/Cz/Pz, tres vistas'
+    ag = AgenteErrP(dec.w0, dec.c0)
+    ag.beta = 2.1                                           # la beta final: con la perturbacion de la demo compensada
+    m = memoria.construir(dec, det, memoria.mi_de_sesion(Xa, ya), Ea, ea, ag.a_dict(), ConfianzaDetector().a_dict(),
+                          beta_sin_perturbar=0.15, origen='sesion_real_prueba.csv')
+    carpeta = Path(tempfile.mkdtemp())
+    ruta = memoria.guardar(carpeta / 'sesion_real_prueba.csv', m)
+    assert ruta.name == 'sesion_real_prueba' + config.SUFIJO_MEMORIA
+    m = memoria.cargar(carpeta / 'sesion_real_prueba.csv')                         # por el CSV o por el archivo
+    assert memoria.cargar(ruta)['origen'] == 'sesion_real_prueba.csv' and 'MISMO piloto' in memoria.texto(m)
+    assert m['mi']['Z'].shape == (40, 36) and m['agente']['beta'] == 2.1
+    assert memoria.beta_inicial(m, 6.0) == 0.15, 'el agente parte de la beta de antes de perturbar, nunca de la final'
+    assert memoria.beta_inicial({'agente': {'beta_sin_perturbar': None}}, 6.0) is None
+    assert memoria.beta_inicial({'agente': {'beta_sin_perturbar': 9.0}}, 6.0) == 6.0
+    for mala, error in ((carpeta / 'no_existe.csv', FileNotFoundError), (None, ValueError)):
+        if mala is None:                                    # memoria grabada con otro montaje
+            mala = memoria.guardar(carpeta / 'otro.csv', dict(m, mi=dict(m['mi'], canales=['Cz'])))
+        try:
+            memoria.cargar(mala)
+            assert False, 'debio rechazarla'
+        except error:
+            pass
+    # MI: calibracion corta de la sesion nueva; se prueba en ensayos posteriores que no ajustaron nada
+    n = config.MEMORIA_ENSAYOS_MI
+    Xb, yb = cs.sesion_mi(60, semilla=s, sesion=1)
+    Xp, yp = Xb[24:], yb[24:]
+    ba = lambda d: hw.exactitud_balanceada(yp, np.array([int(d.w0 @ d.phi(x) + d.c0 >= 0) for x in Xp]))
+    con = hw.DecoderIM().ajustar_desde(m['mi'], Xb[:n], yb[:n], peso=config.MEMORIA_PESO_NUEVO)
+    assert con.eleccion == 'memoria de sesion' and len(con.pred_cv) == n and 0 <= con.ba <= 1   # CP2: solo ensayos de hoy
+    b_con = ba(con)
+    b_cero = ba(hw.DecoderIM().ajustar(Xb[:n], yb[:n], config.candidatos('decoder')))
+    b_previo = ba(copy.deepcopy(dec))
+    assert b_con > 0.65 and b_con >= b_cero - 0.05, (b_con, b_cero, b_previo)
+    encadenada = memoria.mi_de_sesion(Xb[:n], yb[:n], m['mi'])                     # la memoria de la sesion nueva lleva las dos
+    assert encadenada['Z'].shape == (40 + n, 36) and memoria.mi_de_sesion() is None
+    # ErrP: epocas previas + las de hoy; lo que ve el CP3 son SOLO las de hoy
+    k = config.MEMORIA_EPOCAS_ERRP
+    Eb, eb = cs.sesion_errp(100, semilla=s, sesion=1)
+    d = memoria.detector_con_memoria(m['detector'], m['errp']['X'], m['errp']['y'], Eb[:k], eb[:k], np.arange(k) % 2)
+    assert len(d.pred_cv) == k and np.array_equal(d.y_cal, eb[:k]) and 0 <= d.ba <= 1
+    assert d.canales == det.canales and d.vistas == det.vistas and 'memoria de 100 epocas' in d.eleccion
+    assert set(d.por_direccion) >= {'cerrar', 'abrir'}
+    b_det = hw.exactitud_balanceada(eb[k:], np.array([int(d.p_error(e) > d.umbral) for e in Eb[k:]]))
+    assert b_det > 0.6, b_det
+    # el orquestador: --desde-sesion carga la memoria y acorta las dos calibraciones; el agente parte de su beta
+    b = orquestador.BackendReal.__new__(orquestador.BackendReal)
+    b.a, b.hw, vistos = orquestador.argumentos(['real', '--desde-sesion', str(ruta)]), hw, []
+    b.revisar = lambda orq: True
+    b.calibrar_mi = lambda orq: vistos.append((b.a.ensayos_mi, b.a.min_mi)) or setattr(b, 'decoder', dec) or True
+    b.calibrar_errp = lambda orq: vistos.append(b.a.ensayos_errp) or setattr(b, 'detector', d) or True
+    b.preparar_coadaptacion = lambda orq: None
+    falso = types.SimpleNamespace(inst=None, b=b, a=b.a, fsm=types.SimpleNamespace(ir_a=lambda e: None))
+    assert orquestador.Orquestador.preparar(falso)
+    assert vistos == [(n, n), k] and b.memoria['origen'] == 'sesion_real_prueba.csv', vistos
+    assert falso.agente.beta == 0.15 and falso.agente.var == falso.agente.cfg.varianza_inicial
+    # --guardar-memoria: del agente, la beta de antes de perturbar; nunca lanza; el simulador no aplica
+    b.cal_mi, b.coadapta = (Xb[:n], yb[:n]), None
+    original = config.MODELOS
+    config.MODELOS = carpeta
+    try:
+        np.savez(carpeta / 'detector_errp_datos.npz', X=Eb[:k], y=eb[:k])
+        falso.ruta_csv, falso.sham, falso.beta_pre, falso.confianza = carpeta / 'sesion_real_dos.csv', None, 0.4, ConfianzaDetector()
+        falso.agente.beta = 2.3
+        orquestador.Orquestador.guardar_memoria(falso)
+        m2 = memoria.cargar(falso.ruta_csv)
+        assert memoria.beta_inicial(m2, 6.0) == 0.4 and len(m2['mi']['y']) == 40 + n and len(m2['errp']['y']) == k
+        falso.sham = {'orden': ['real', 'sham']}            # control causal: dos perturbaciones, no hay una beta limpia
+        orquestador.Orquestador.guardar_memoria(falso)
+        assert memoria.beta_inicial(memoria.cargar(falso.ruta_csv), 6.0) is None
+        b.datos_memoria = lambda: 1 / 0
+        orquestador.Orquestador.guardar_memoria(falso)      # un fallo al guardar no rompe el final de la sesion
+        orquestador.Orquestador.guardar_memoria(types.SimpleNamespace(b=object()))
+        # memoria de una sesion ya corrida sin la bandera (la del domingo): con lo que quedo en modelos/ y resultados/
+        resultados, instantanea = config.RESULTADOS, config.ESTADO_SESION_JSON
+        config.RESULTADOS, config.ESTADO_SESION_JSON = carpeta, carpeta / 'estado_sesion.json'
+        try:
+            hw.guardar(dec, 'decoder_im.pkl')
+            hw.guardar(det, 'detector_errp.pkl')
+            np.savez(carpeta / 'calibracion_mi_100.npz', X=Xa, y=ya)
+            np.savez(carpeta / 'calibracion_mi_200.npz', X=Xb, y=yb)               # de otra calibracion: no es la del decoder
+            config.ESTADO_SESION_JSON.write_text(json.dumps({
+                'ruta_csv': 'resultados/sesion_real_tres.csv', 'terminada': True, 'sham': None, 'beta_pre': 0.3,
+                'agente': ag.a_dict(), 'confianza': ConfianzaDetector().a_dict()}))
+            m3, notas, csv_ = memoria.desde_archivos()
+            assert csv_.name == 'sesion_real_tres.csv' and len(m3['mi']['y']) == 40 and memoria.beta_inicial(m3, 6.0) == 0.3
+            assert any('calibracion_mi_100.npz' in t for t in notas)
+            m4 = memoria.desde_archivos('resultados/sesion_real_otra.csv')[0]      # la instantanea es de otra sesion
+            assert memoria.beta_inicial(m4, 6.0) is None and m4['confianza'] is None
+        finally:
+            config.RESULTADOS, config.ESTADO_SESION_JSON = resultados, instantanea
+    finally:
+        config.MODELOS = original
+    return (f'gemelo, 1 sujeto en otra sesion: con {n} ensayos de MI, BA desde cero {b_cero:.2f}, con memoria {b_con:.2f} '
+            f'(decoder previo sin recalibrar {b_previo:.2f}); detector con memoria y {k} epocas de hoy BA {b_det:.2f} '
+            f'(el CP3 reportaria {d.ba:.2f})')
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -2927,10 +3087,10 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
-           'estado_sistema']
+           'estado_sistema', 'memoria_sesiones']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl']
-LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos']
+LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']
 
 
 def main():

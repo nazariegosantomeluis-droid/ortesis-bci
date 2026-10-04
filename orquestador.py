@@ -14,6 +14,8 @@ Uso
   python orquestador.py real --puerto COM4 --reanudar   continua la sesion tras un cierre inesperado
   python orquestador.py real --puerto COM4 --sham       control causal: bloque real contra bloque sham
   python orquestador.py real --puerto COM4 --coinvestigador   entre bloques, una propuesta que aprueba una persona
+  python orquestador.py real --puerto COM4 --guardar-memoria  al terminar deja la memoria de la sesion (memoria.py)
+  python orquestador.py real --puerto COM4 --desde-sesion resultados/sesion_real_<fecha>.csv   mismo piloto: calibra corto
 
 Antes de 'real': puente_lsl.py corriendo y LabRecorder grabando.
 
@@ -485,8 +487,13 @@ class BackendReal:
     def calibrar_mi(self, orq):
         rng = np.random.default_rng()
         X, y = [], []
-        pre = None
-        if getattr(self.a, 'preentrenado', False):   # arranca del decoder de otras personas (PhysioNet)
+        pre, peso = None, config.PREENTRENADO_PESO_PROPIO
+        mem = getattr(self, 'memoria', None)
+        if mem is not None:                          # arranca de la sesion previa del mismo piloto
+            pre, peso = mem['mi'], config.MEMORIA_PESO_NUEVO
+            aviso(f"Calibracion corta de MI ({self.a.ensayos_mi} ensayos) desde la memoria: {len(pre['y'])} ensayos de la "
+                  f"sesion previa, recentrados con los de hoy.")
+        elif getattr(self.a, 'preentrenado', False):   # arranca del decoder de otras personas (PhysioNet)
             pre = self.hw.cargar(config.DECODER_PREENTRENADO)
             aviso(f"Calibracion de MI desde el decoder pre-entrenado ({pre['personas']} personas; {pre['origen']}).")
         for k in range(self.a.ensayos_mi):
@@ -511,7 +518,7 @@ class BackendReal:
                 y.append(clase)
             n = k + 1
             if (n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi) and self._ajustable(y):
-                self.decoder = (self.hw.DecoderIM().ajustar_desde(pre, np.array(X), np.array(y)) if pre is not None
+                self.decoder = (self.hw.DecoderIM().ajustar_desde(pre, np.array(X), np.array(y), peso=peso) if pre is not None
                                 else self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos('decoder')))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
                                              config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
@@ -521,9 +528,11 @@ class BackendReal:
             aviso('No se pudo calibrar MI: no quedaron ensayos validos.')
             return False
         np.savez(config.RESULTADOS / f'calibracion_mi_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
+        self.cal_mi = (np.array(X), np.array(y))     # para la memoria de la sesion (--guardar-memoria)
         self.hw.guardar(self.decoder, 'decoder_im.pkl')
         return checkpoint(orq.salidas, 2, self.decoder.ba >= config.MI_EXACTITUD_MIN,
-                          f'MI: BA {self.decoder.ba:.2f} con {len(y)} ensayos (calibracion secuencial; '
+                          f'MI: BA {self.decoder.ba:.2f} con {len(y)} ensayos '
+                          f"({'calibracion corta de largo fijo' if mem is not None else 'calibracion secuencial'}; "
                           f'canales: {self.decoder.eleccion})',
                           self.a.forzar)
 
@@ -581,11 +590,18 @@ class BackendReal:
         # Todas las epocas pedidas, sin GO ni NO GO tempranos: con 40 a 60 epocas la parada
         # secuencial elegia estimados inflados por suerte (en el gemelo: 0.87 reportado contra
         # 0.69 real). El umbral se elige con validacion anidada (DetectorErrP.ajustar).
+        mem, X_det, y_det = getattr(self, 'memoria', None), np.array(X), np.array(y)
         if self._ajustable(y):
-            self.detector = self.hw.DetectorErrP().ajustar(np.array(X), np.array(y), config.candidatos('detector'),
-                                                          direccion=np.array(dirs))
+            if mem is not None:                      # epocas de la sesion previa + las de hoy; el CP3, solo con las de hoy
+                import memoria
+                self.detector = memoria.detector_con_memoria(mem['detector'], mem['errp']['X'], mem['errp']['y'],
+                                                             X_det, y_det, np.array(dirs))
+                X_det, y_det = np.concatenate([mem['errp']['X'], X_det]), np.r_[mem['errp']['y'], y_det]
+            else:
+                self.detector = self.hw.DetectorErrP().ajustar(X_det, y_det, config.candidatos('detector'),
+                                                              direccion=np.array(dirs))
             aviso('    eleccion del detector (AUC de validacion cruzada): '
-                  + ', '.join(f'{n} {v:.2f}' for n, v in self.detector.puntajes.items())
+                  + (', '.join(f'{n} {v:.2f}' for n, v in self.detector.puntajes.items()) or 'la de la sesion previa')
                   + f' -> {self.detector.eleccion}')
             lo, hi = self.hw.intervalo_ba(np.array(y), self.detector.pred_cv)
             aviso(f'    [{len(y)} epocas] BA {self.detector.ba:.2f}  IC90 [{lo:.2f}, {hi:.2f}]')
@@ -603,7 +619,7 @@ class BackendReal:
         np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y),
                  direccion=np.array(dirs))
         config.MODELOS.mkdir(exist_ok=True)
-        np.savez(config.MODELOS / 'detector_errp_datos.npz', X=np.array(X), y=np.array(y))   # para co-adaptar
+        np.savez(config.MODELOS / 'detector_errp_datos.npz', X=X_det, y=y_det)   # para co-adaptar (con las de la memoria)
         self.hw.guardar(self.detector, 'detector_errp.pkl')
         d = self.detector
         ok = d.ba >= config.BA_MIN and d.espec >= config.ESPEC_MIN
@@ -615,6 +631,13 @@ class BackendReal:
     def preparar(self, orq):
         if not self.revisar(orq):
             return None
+        if getattr(self.a, 'desde_sesion', None):    # memoria de una sesion previa del mismo piloto
+            import memoria
+            self.memoria = memoria.cargar(self.a.desde_sesion)
+            aviso(memoria.texto(self.memoria))
+            # calibraciones cortas y de largo fijo: sin parada temprana no hay estimado inflado por suerte
+            self.a.ensayos_mi = self.a.min_mi = self.a.memoria_mi
+            self.a.ensayos_errp = self.a.memoria_errp
         if self.a.saltar_calibracion:
             self.decoder = self.hw.cargar('decoder_im.pkl')
             self.detector = self.hw.cargar('detector_errp.pkl')
@@ -673,6 +696,22 @@ class BackendReal:
                                                      config.COADAPTAR_PRUEBA, al_cambiar=orq.detector_cambiado)
 
     # ---------------- persistencia ----------------
+    def datos_memoria(self):
+        """Lo que esta sesion deja para la siguiente del mismo piloto (memoria.construir): modelos como
+        terminaron, los ensayos de MI (los de hoy mas los que traia la memoria) y las epocas de ErrP con
+        etiqueta (calibracion y, si hubo co-adaptacion, las del lazo)."""
+        import memoria
+        co = getattr(self, 'coadapta', None)
+        if co is not None:
+            X, y = np.array(co._X), np.array(co._y)
+        else:
+            d = np.load(config.MODELOS / 'detector_errp_datos.npz')
+            X, y = d['X'], d['y']
+        previa = getattr(self, 'memoria', None)
+        X_mi, y_mi = getattr(self, 'cal_mi', None) or memoria.ensayos_del_decoder(self.decoder)[:2]   # sin calibrar hoy: los guardados
+        return {'decoder': self.decoder, 'detector': self.detector, 'X_errp': X, 'y_errp': y,
+                'mi': memoria.mi_de_sesion(X_mi, y_mi, previa['mi'] if previa else None)}
+
     def instantanea(self):
         return {'seq': self.ortesis.seq, 'M': np.asarray(self.decoder.M).tolist()}
 
@@ -834,6 +873,13 @@ class Orquestador:
             self.b.activar_caos('lazo')
         self.lista = True
         if inst is None:
+            mem = getattr(self.b, 'memoria', None)
+            if mem is not None:                      # --desde-sesion: el agente parte de lo que ya sabia
+                import memoria
+                beta = memoria.beta_inicial(mem, cfg.beta_max)
+                if beta is not None:
+                    self.agente.beta = beta
+                    aviso(f'  agente: beta arranca en {beta:+.2f} (la de antes de la perturbacion de la sesion previa)')
             self.fsm.ir_a('LAZO_ESTATICO')
             return True
         self.agente.desde_dict(inst['agente'])
@@ -875,6 +921,22 @@ class Orquestador:
 
     def guardar(self, terminada=False):
         guardar_instantanea(config.ESTADO_SESION_JSON, self.instantanea(terminada))
+
+    def guardar_memoria(self):
+        """--guardar-memoria: deja junto al CSV lo que la siguiente sesion del mismo piloto puede reusar
+        (memoria.py). Del agente, la beta de ANTES de la perturbacion: la final incluye la correccion de
+        una perturbacion artificial que la sesion siguiente no tendra. Nunca lanza."""
+        if not hasattr(self.b, 'datos_memoria'):
+            return aviso('  (--guardar-memoria solo aplica al backend real: el simulador no tiene modelos)')
+        try:
+            import memoria
+            beta = None if self.sham else (self.beta_pre if self.beta_pre is not None else self.agente.beta)
+            ruta = memoria.guardar(self.ruta_csv, memoria.construir(
+                **self.b.datos_memoria(), agente=self.agente.a_dict(), confianza=self.confianza.a_dict(),
+                beta_sin_perturbar=beta, origen=self.ruta_csv.name))
+            aviso(f'  Memoria de la sesion: {ruta}  (la siguiente del MISMO piloto: --desde-sesion con esa ruta)')
+        except Exception as e:
+            aviso(f'  AVISO: no se pudo guardar la memoria de la sesion ({type(e).__name__}: {e})')
 
     # ---------------- salud y pausa segura ----------------
     def revisar_salud(self):
@@ -1470,6 +1532,15 @@ def argumentos(argv=None):
                     help='usa el decoder de MI guardado y repite solo la calibracion de ErrP (tras un CP3 NO GO)')
     ap.add_argument('--preentrenado', action='store_true',
                     help='la calibracion de MI arranca del decoder pre-entrenado con PhysioNet (modelos/decoder_preentrenado.pkl)')
+    ap.add_argument('--guardar-memoria', dest='guardar_memoria', action='store_true',
+                    help='al terminar deja junto al CSV el decoder, el detector, sus datos y el estado del agente (memoria.py)')
+    ap.add_argument('--desde-sesion', dest='desde_sesion', default=None, metavar='RUTA',
+                    help='arranca de la memoria de una sesion previa del MISMO piloto (su CSV o su _memoria.pkl): '
+                         'recentra el decoder y calibra con menos ensayos')
+    ap.add_argument('--memoria-mi', dest='memoria_mi', type=int, default=config.MEMORIA_ENSAYOS_MI,
+                    help='con --desde-sesion: ensayos de la calibracion corta de MI (largo fijo)')
+    ap.add_argument('--memoria-errp', dest='memoria_errp', type=int, default=config.MEMORIA_EPOCAS_ERRP,
+                    help='con --desde-sesion: epocas de la calibracion corta de ErrP')
     ap.add_argument('--control-reposo', dest='control_reposo', action='store_true',
                     help='tras calibrar, la ortesis se mueve sola con el piloto en reposo: p(t) no debe seguirla (~2 min)')
     ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
@@ -1532,6 +1603,8 @@ def correr(orq, a):
         orq.evaluar()
         if completa:
             orq.guardar(terminada=True)              # una sesion completa ya no se reanuda
+            if getattr(a, 'guardar_memoria', False):
+                orq.guardar_memoria()
         orq.cerrar()
     if completa and a.backend == 'real' and not a.sin_cuestionario and sys.stdin.isatty():
         try:

@@ -737,16 +737,17 @@ class DecoderIM:
         self.w0, self.c0 = clf.coef_[0].copy(), float(clf.intercept_[0])
         return self
 
-    def ajustar_desde(self, pre, X=None, y=None, reposo=None):
+    def ajustar_desde(self, pre, X=None, y=None, reposo=None, peso=config.PREENTRENADO_PESO_PROPIO):
         """Arranca del decoder pre-entrenado con otras personas (estudios/transferencia_physionet.py;
         pre = {'Z': rasgos, 'y': etiquetas, 'canales'}). El recentrado alinea a las personas: cada
         una queda centrada en la identidad, asi que el clasificador de otras se aplica tal cual.
           sin ensayos propios  el clasificador es el de las otras personas y el centro sale de EEG
                                sin etiquetas del piloto (`reposo`: ventanas de la revision de senal)
           con ensayos propios  el centro es el de esos ensayos y el clasificador se ajusta con todo,
-                               pesando cada ensayo propio PREENTRENADO_PESO_PROPIO veces
+                               pesando cada ensayo propio `peso` veces
         self.ba y self.pred_cv son de validacion cruzada sobre los ensayos PROPIOS (nan sin ellos).
-        Usa todos los canales del pre-entrenado, sin eleccion."""
+        Usa todos los canales del pre-entrenado, sin eleccion. Tambien sirve con la memoria de una
+        sesion previa del mismo piloto (memoria.py): mismo formato, otro peso."""
         from pyriemann.estimation import Covariances
         from pyriemann.tangentspace import TangentSpace
         from pyriemann.utils.base import invsqrtm
@@ -754,7 +755,7 @@ class DecoderIM:
         from sklearn.linear_model import LogisticRegression
         from sklearn.model_selection import StratifiedKFold
         propios = X is not None and len(X) > 0
-        self.canales, self.eleccion = list(range(len(pre['canales']))), 'pre-entrenado'
+        self.canales, self.eleccion = list(range(len(pre['canales']))), pre.get('nombre', 'pre-entrenado')
         self.cov = Covariances('oas')
         C = self.cov.fit_transform(np.asarray(X if propios else reposo)[:, self.canales])
         self.M = mean_riemann(C)
@@ -770,7 +771,7 @@ class DecoderIM:
             Mi = invsqrtm(self.M)
             Z = self.ts.transform(np.array([self._blanquear(c, Mi) for c in C]))
             ajuste = lambda ent: lr().fit(np.vstack([Zf, Z[ent]]), np.r_[yf, y[ent]],
-                                          sample_weight=np.r_[np.ones(len(yf)), np.full(len(ent), config.PREENTRENADO_PESO_PROPIO)])
+                                          sample_weight=np.r_[np.ones(len(yf)), np.full(len(ent), peso)])
             self.pred_cv = np.zeros(len(y), dtype=int)
             k = int(min(5, np.bincount(y, minlength=2).min()))
             for ent, pru in StratifiedKFold(max(k, 2), shuffle=True, random_state=0).split(Z, y):

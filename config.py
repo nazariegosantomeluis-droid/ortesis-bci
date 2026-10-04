@@ -369,3 +369,14 @@ ESTADO_SISTEMA = {
 }
 # procesos del proyecto que la revision busca vivos, por su linea de comando
 PROCESOS = ['puente_lsl.py', 'cerebro_sintetico.py', 'orquestador.py', 'tablero.py', 'narrador.py', 'LabRecorder']
+
+# ============================ Memoria entre sesiones (orquestador.py --guardar-memoria / --desde-sesion) ============================
+# Apagado por defecto. Una sesion puede dejar junto a su CSV el decoder, el detector, sus datos de
+# calibracion y el estado del agente (memoria.py); la siguiente del MISMO piloto arranca de ahi: el
+# decoder se recentra con las ventanas de hoy (sin usar sus etiquetas) y las dos calibraciones son
+# cortas y de largo fijo, sin parada temprana. Los largos y el peso se fijaron antes de medir
+# (estudios/memoria_sesiones.py) y no se ajustaron contra los datos de prueba.
+SUFIJO_MEMORIA = '_memoria.pkl'
+MEMORIA_ENSAYOS_MI = 12                 # en lugar de los 36 a 60 de la calibracion completa
+MEMORIA_EPOCAS_ERRP = 40                # en lugar de 120
+MEMORIA_PESO_NUEVO = 3.0                # cada ensayo de hoy pesa como 3 de la sesion previa
