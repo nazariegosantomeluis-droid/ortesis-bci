@@ -214,6 +214,41 @@ def agente_basico():
 
 
 @prueba
+def prior_por_paso():
+    """Prior de error por paso (experimental, apagado): el error que el agente predice, con un piso."""
+    from agente_errp import AgenteErrP, ConfigAgente
+    assert config.PRIOR_POR_PASO is False and ConfigAgente().prior_por_paso is False     # apagado por defecto
+    kw = dict(salida_detector='calibrada', p_error_calibracion=0.3)
+    phi = np.array([6.0])                                    # decoder muy seguro: p' ~ 0.998, error predicho ~ 0.002
+
+    def p_hat(**c):
+        ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, **c))
+        d = ag.decidir(phi)
+        return ag.actualizar(0.9, False, 1.0)['P_hat'], d.p_prima, ag
+    base, p_prima, _ = p_hat()
+    assert p_prima > 0.99
+    for piso, esperado in ((0.0, 0.0), (0.05, 0.05), (0.10, 0.10), (None, 0.2)):         # None: la tasa global (prior 0.2)
+        ph, _, ag = p_hat(prior_por_paso=True, piso_prior=piso)
+        prior = max(1 - max(p_prima, 1 - p_prima), esperado)
+        assert abs(ag.prior_del_paso() - ag.prior) < 1e-12                               # sin paso pendiente: el global
+        llr = np.log(0.9 / 0.1) - np.log(0.3 / 0.7)
+        previsto = float(1 / (1 + np.exp(-(np.log(max(prior, 1e-6) / (1 - max(prior, 1e-6))) + llr))))
+        assert abs(ph - previsto) < 1e-6, (piso, ph, previsto)
+        assert ph <= base + 1e-12                                                                 # seguro y con prior bajo: duda menos del paso
+    # con un paso dudoso (p' ~ 0.5) el error predicho (0.5) pasa por encima del piso
+    ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, prior_por_paso=True, piso_prior=0.05))
+    d = ag.decidir(np.array([0.0]))
+    assert abs(ag.prior_del_paso(d) - 0.5) < 1e-9
+    for malo in (-0.1, 0.5):
+        try:
+            ConfigAgente(prior_por_paso=True, piso_prior=malo)
+            raise AssertionError('debio rechazar el piso')
+        except ValueError:
+            pass
+    return 'apagado por defecto; con epsilon 0, 0.05, 0.10 y tasa global el prior de cada paso es el error predicho con piso'
+
+
+@prueba
 def p_hat_refleja_errp():
     """P_hat dice lo que vio el detector aunque el agente no este aprendiendo (bloque estatico,
     aprendizaje congelado, reloj en ROJO). Antes, con salida calibrada, quedaba igual al prior."""
@@ -1125,6 +1160,52 @@ def narrador_jurado():
 
 
 # ------------------------------------------------------------ tablero
+@prueba
+def tablero_flechas():
+    """--flechas: la contribucion de cada ErrP al cambio de beta (tamano y direccion), sin pantalla;
+    el reinicio de beta entre bloques del control causal no cuenta como flecha, y en el ciego queda oculto."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from pyqtgraph.Qt import QtWidgets
+    import tablero
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    paso = {'tipo': 'paso', 'estado': 'LAZO_ADAPTATIVO', 'meta': 1, 'angulo': 0.5, 'p_crudo': 0.6, 'b': 0.5,
+            'p_prima': 0.6, 'P_hat': 0.7, 'error': 1, 'error_sombra': 1, 'sd_beta': 0.5, 'youden': 0.6,
+            'fiabilidad': 1.0, 'congelado': False, 'cambio': '', 'latencia_ms': 5.0, 'perturbado': False,
+            'salud': {'eeg': 'VERDE', 'ortesis': 'VERDE', 'reloj': 'VERDE', 'detector': 'VERDE'}}
+    # la funcion pura
+    a = {**paso, 'paso': 1, 'beta': 0.0, 'bloque': None}
+    assert tablero.contribucion_beta(None, a) == 0.0 and tablero.contribucion_beta(0.0, a, None) == 0.0
+    assert abs(tablero.contribucion_beta(0.0, {**a, 'paso': 2, 'beta': 0.4}, a) - 0.4) < 1e-12
+    assert abs(tablero.contribucion_beta(0.4, {**a, 'paso': 3, 'beta': 0.1}, {**a, 'paso': 2}) + 0.3) < 1e-12
+    assert tablero.contribucion_beta(0.4, {**a, 'paso': 1, 'beta': 0.0}, {**a, 'paso': 9}) == 0.0          # sesion nueva
+    assert tablero.contribucion_beta(1.2, {**a, 'paso': 5, 'beta': 0.0, 'bloque': 'B'}, {**a, 'paso': 4, 'bloque': 'A'}) == 0.0
+    # el tablero
+    t = tablero.Tablero(flechas=True)
+    sin = tablero.Tablero()
+    try:
+        t.timer.stop(); sin.timer.stop()
+        assert len(t.p) == 6 and len(sin.p) == 5 and not hasattr(sin, 'lbl_flecha')        # apagado por defecto
+        betas = [(0.0, True), (0.5, True), (0.3, True), (0.3, False), (-0.2, True)]
+        for i, (b, det) in enumerate(betas, 1):
+            t._procesar({**paso, 'paso': i, 'beta': b, 'detectado': det})
+        t._dibujar()
+        assert np.allclose(list(t.d['db']), [0.0, 0.5, -0.2, 0.0, -0.5]), list(t.d['db'])
+        assert 'RELAJAR' in t.lbl_flecha.text() and '-0.50' in t.lbl_flecha.text(), t.lbl_flecha.text()
+        assert len(t.c_puntas.data) == 3                                                    # 3 flechas: los pasos con cambio
+        # control causal ciego: sin flechas hasta revelar
+        t._procesar({'tipo': 'bloque_sham', 'letra': 'A', 'nombre': 'sham', 'pasos': 80, 'fuente': 'nula'})
+        t._procesar({**paso, 'paso': 6, 'beta': -0.3, 'detectado': False, 'bloque': 'A'})
+        t._dibujar()
+        assert 'oculto' in t.p[5].titleLabel.text and len(t.c_puntas.data) == 0
+        t.btn_sham.setChecked(True)
+        t._dibujar()
+        assert 'oculto' not in t.p[5].titleLabel.text and len(t.c_puntas.data) > 0
+    finally:
+        t.close(); sin.close()
+    return 'flechas con tamano y direccion; ciego en el control causal; apagado por defecto'
+
+
 @prueba
 def tablero_salud():
     """El tablero (sin pantalla) pinta los cuatro semaforos y PAUSA_SEGURA en rojo con el electrodo."""
@@ -3110,14 +3191,14 @@ def memoria_sesiones():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones']

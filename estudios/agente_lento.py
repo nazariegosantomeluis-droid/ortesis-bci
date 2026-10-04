@@ -155,10 +155,10 @@ class Agente(AgenteErrP):
     prior_prediccion = None     # igual, pero solo si el cambio lo detecto el chequeo predictivo (ErrP)
     prior_momentos = None       # alfa: prior = tasa de detecciones corregida por sens y espec vivas
 
-    def prob_error(self, p_errp, sens=None, espec=None, fiabilidad=1.0):
+    def prob_error(self, p_errp, sens=None, espec=None, fiabilidad=1.0, dec=None):
         if self.transformar is not None and self.cfg.salida_detector == 'calibrada':
             p_errp = self.transformar(p_errp)
-        return super().prob_error(p_errp, sens, espec, 1.0 if self.sin_fiabilidad else fiabilidad)
+        return super().prob_error(p_errp, sens, espec, 1.0 if self.sin_fiabilidad else fiabilidad, dec)
 
     def actualizar(self, p_errp, artefacto=False, fiabilidad=1.0, sens=None, espec=None, peso=None):
         self._p_errp = p_errp
@@ -182,7 +182,7 @@ class Agente(AgenteErrP):
 
 def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabilidad=False, transformar=None,
          prior_al_cambio=None, prior_momentos=None, alfa_prior=None, coadaptar=False, prior_prediccion=None,
-         evidencia_nula=False):
+         evidencia_nula=False, cfg_agente=None):
     """Una sesion del lazo (estatico + adaptativo con perturbacion). Devuelve una fila por paso.
     coadaptar: el detector se re-entrena en el lazo como en BackendReal (DetectorCoadaptativo); aqui
     el re-entrenamiento termina antes del paso siguiente (en vivo tarda unos pasos).
@@ -199,6 +199,8 @@ def lazo(mod, semilla_lazo, salida='calibrada', umbral_cambio=False, sin_fiabili
                        umbral_detector=det.umbral if salida == 'binaria' else 0.5)
     if alfa_prior is not None:
         cfg.alfa_prior = alfa_prior
+    for k, v in (cfg_agente or {}).items():            # estudios/prior_por_paso.py
+        setattr(cfg, k, v)
     ag = Agente(dec.w0, dec.c0, cfg)
     ag.umbral_cambio = det.umbral if umbral_cambio else None
     ag.sin_fiabilidad = sin_fiabilidad

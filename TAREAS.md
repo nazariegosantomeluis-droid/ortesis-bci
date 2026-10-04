@@ -420,3 +420,5 @@ Después: Tarea 2 mínima, con la atenuación sensorial en PO7/Oz/PO8 como firma
 ### Criterio de aceptación
 
 `python demo.py --fuente gemelo --idioma en` corre de punta a punta sin intervención y deja la tarjeta de resultados en `resultados/`.
+
+**6. Prior de error por paso contra el sham ciego (4 de octubre; gemelo, `estudios/prior_por_paso.py`, 16 sesiones).** Bandera `ConfigAgente.prior_por_paso` (apagada; `config.PRIOR_POR_PASO`). Frontera: ε ≤ 0.10 deja el sham ciego en 1 a 2 de 16 (antes 7), el real en 16 de 16 y el control negativo en 0 de 16; ε = 0.15 da 4 de 16; ε ≥ 0.20 y la tasa global fallan (el control negativo se recupera). Tabla y salvedades en el README. **Pendiente de Luis:** si se enciende (recomendado ε = 0.10) y si el sham ciego pasa a ser el del orquestador.

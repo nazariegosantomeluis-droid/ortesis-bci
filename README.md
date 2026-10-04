@@ -61,7 +61,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `ia.py` | Lo común a toda la IA: llave desde `.env`, lo que puede salir hacia la API (`sanear`), preguntas con herramientas, y el esquema, la validación y las reglas deterministas de las propuestas. Nada de esto corre dentro del lazo. |
 | `copiloto.py` | Copiloto clínico: preguntas sobre una sesión respondidas con herramientas sobre su CSV, e informe entre sesiones. |
 | `narrador.py` | Narrador para el jurado: proceso aparte que escucha `Estado` y publica una frase por evento relevante en el flujo `Narracion` (Claude, con plantillas de respaldo). |
-| `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
+| `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. Con `--flechas`, un sexto panel con la contribución de cada ErrP al cambio de `beta`. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `memoria.py` | Memoria entre sesiones del mismo piloto: lo que deja una sesión (`--guardar-memoria`) para que la siguiente calibre más corto (`--desde-sesion`). |
 | `estado_sistema.py` | Revisión previa del sistema (casco, flujos LSL, procesos, ACK, laptop, disco, API y git) y la franja en vivo de `tablero.py --estado-sistema`; cada falla con su solución en una línea. |
@@ -231,6 +231,28 @@ El **«sham ciego»** lo confirma por el otro lado. Recibe `p_errp` sacados al a
 
 La conclusión para el control: el contraste limpio no es «ErrP ordenados contra desordenados», sino **«con la evidencia del ErrP contra sin ella»**. El sham permutado sigue disponible para mostrarlo (`--sham-fuente recientes`); el ciego se descartó para el lazo y queda en el estudio.
 
+### Prior de error por paso: la frontera del sham ciego (EXPLORATORIO, apagado por defecto)
+
+Hipótesis (4 de octubre): el sham ciego se recupera 7 de 16 porque, con el agente muy seguro y equivocado, `P_hat` promedia el **prior global** de error y el gradiente empuja `beta` sin información real. Se probó dar a cada paso como prior el error que el propio agente predice, `1 − max(p', 1 − p')`, con un piso ε (`ConfigAgente.prior_por_paso` y `piso_prior`; en `config`, `PRIOR_POR_PASO = False` y `PISO_PRIOR_PASO = 0.05`; ε = `None` es la tasa global, el prior global vivo del agente). **El valor por defecto no cambió: pendiente de que Luis lo apruebe.**
+
+Medido en el gemelo sin LSL (`python estudios/prior_por_paso.py`: 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10, detector actual). **Es el gemelo, no una persona.**
+
+| ε | Real se recupera | Sham ciego se recupera | Sham − real, ciego (IC 90 %) | Control negativo: sin ErrP, recupera en 2 min |
+|---|---|---|---|---|
+| sin la bandera (prior global) | 16/16 | 7/16 | +0.126 [+0.095, +0.156] | 3/16 |
+| 0 | 16/16 | 1/16 | +0.170 [+0.140, +0.196] | 0/16 |
+| 0.05 | 16/16 | 2/16 | +0.183 [+0.154, +0.210] | 0/16 |
+| **0.10** | 16/16 | 2/16 | +0.158 [+0.127, +0.191] | 0/16 |
+| 0.15 | 16/16 | 4/16 | +0.152 [+0.124, +0.179] | 0/16 |
+| 0.20 | 16/16 | 7/16 | +0.140 [+0.100, +0.179] | 8/16 |
+| tasa global | 16/16 | 11/16 | +0.109 [+0.074, +0.145] | 16/16 |
+
+- **La frontera está entre ε = 0.10 y 0.15:** con ε ≤ 0.10 se cumple el criterio de `TAREAS.md` también con el sham ciego (real ≥ 12, sham ≤ 3, intervalo sin el 0) y el control negativo da 0 de 16. Con 0.15 el ciego llega a 4 de 16 (justo fuera). Desde 0.20 el piso vuelve a mezclar el prior global y el control negativo falla (8 de 16, y 16 de 16 con la tasa global): **la tasa global como piso está descartada.**
+- **El control negativo es obligatorio** (`CLAUDE.md`): se midió en el lazo de `estudios/agente_lento.py` (todo paso visible, sin topes), con el agente recibiendo siempre la tasa base (LLR = 0). Sin la bandera dio 3 de 16 (la referencia del README decía 4 de 16: varía entre corridas). Con la bandera y ε ≤ 0.15, 0 de 16. Con el sham `nula` del orquestador (el de la demo) el sham se recupera 0 de 16 con ε ≤ 0.20.
+- **Costo con detectores peores** (ε entre 0 y 0.10): con el detector de ayer el real se recupera 12 a 15 de 16 (sin la bandera, 15 de 16) y el sham ciego 0 a 1 de 16 (antes 5); con el débil el real baja de 11 a 9–10 de 16 con ε ≤ 0.05 y queda en 10 a 12 de 16 con 0.10 (ese detector ya no cumplía el criterio). Con ε = 0.10 el bloque real queda a una sesión o menos de la base en los tres detectores. Las diferencias de 1 a 2 sesiones sobre 16 no se distinguen del azar.
+- **Qué dice esto del mecanismo:** consistente con la hipótesis, pero no la prueba. Con ε bajo, un ErrP en una decisión muy segura del agente se lee como probable falsa alarma y empuja poco; solo un ErrP que sigue llegando con la perturbación (el real) la contrarresta. Queda sin medir si el costo de ε bajo aparece con una persona (el ErrP real puede ser más ruidoso que el del gemelo).
+- Recomendación (no aplicada): si se enciende para la final, **ε = 0.10**, y entonces el ciego (`--sham-fuente calibracion`, hoy solo en `estudios/sham_gemelo.py`) podría competir con `nula`. Ninguna de las dos cosas está en el orquestador todavía.
+
 ### Lo que una sola sesión puede mostrar
 
 Tras la perturbación quedan 70 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.3 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 2 de 12 en el sham (`pruebas.py`, `orquestador_sham`).
@@ -305,6 +327,19 @@ python orquestador.py real --puerto COM4 --coinvestigador
 Las reglas deterministas, en orden: pocos pasos válidos (< 30) → continuar; más de 25 % de filas excluidas → pausa para revisar el casco y la órtesis; alfa occipital ≥ 1.5 veces su línea base → pausa; BA viva < 0.60 o más de la mitad del bloque congelado → recalibrar; errores con pasos chicos que pasan sin ErrP 25 puntos más que con pasos grandes → subir `paso_visible` 0.02; si no, continuar. Los umbrales están en `config.REGLAS_PROPUESTA` y **no están validados con personas**.
 
 Probado en el simulador con la API simulada (`pruebas.py`, `coinvestigador_entre_bloques`): aprobada, `paso_visible` pasa de 0.08 a 0.10 y el lazo lo usa desde el bloque siguiente; rechazada o sin decisión, nada cambia; una propuesta de `paso_max = 0.95` se descarta. **Sin probar con la API real.**
+
+## El cerebro enseñando a la máquina: flechas de ErrP (`tablero.py --flechas`)
+
+```bash
+python tablero.py --flechas           # apagado por defecto
+```
+
+Un sexto panel dibuja **una flecha por paso**: su dirección es hacia dónde movió ese paso a `beta` (arriba = hacia CERRAR, abajo = hacia RELAJAR) y su largo, cuánto. Violeta cuando el detector marcó ese paso como ErrP, gris cuando no (la ausencia de ErrP también enseña, menos). Sobre el panel, una línea cuenta el último paso en palabras. Tras la perturbación se ve la ráfaga de flechas violetas hacia el mismo lado que va corrigiendo el agente.
+
+- **Es lo que el agente hizo, no una interpretación:** la flecha es la diferencia de `beta` entre dos pasos consecutivos del flujo `Estado` (el contrato no cambia). Un paso sin época útil, o con el aprendizaje congelado, no dibuja flecha.
+- **El cambio de `beta` junta todo lo que el agente usó de ese paso** (ErrP, prior y confianza del detector); no mide la amplitud del ErrP en microvoltios.
+- **Respeta el ciego del control causal:** en una sesión `--sham` el panel queda en blanco hasta pulsar *Revelar bloques*, porque el tamaño de las flechas (grandes en el bloque real, casi nulas en el sham `nula`) delataría cuál es cuál.
+- Probado sin pantalla en `pruebas.py` (`tablero_flechas`). **Todavía no se ha visto con una sesión en vivo.**
 
 ## Narrador para el jurado (`narrador.py`)
 
