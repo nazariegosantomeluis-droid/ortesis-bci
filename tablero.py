@@ -18,18 +18,25 @@ sesion mas reciente; responde en otro hilo, sin detener el tablero.
 
 Con --narrador, una franja con la ultima frase del narrador (narrador.py, flujo 'Narracion').
 
+Con --estado-sistema, una franja con el estado del sistema (estado_sistema.py): casco, flujos LSL,
+procesos, latencia del ACK, laptop, disco, llave de la API y version de git; cada falla con su
+solucion. Se revisa en otro hilo cada config.ESTADO_SISTEMA['periodo_s'] segundos.
+
 Con orquestador.py --coinvestigador, al terminar un bloque aparece la propuesta con los botones
 Aprobar y Rechazar: la decision se escribe en el registro de propuestas de la sesion.
 
 Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
       python tablero.py --copiloto          (con la caja de preguntas)
       python tablero.py --narrador          (con la franja del narrador; correr tambien narrador.py)
+      python tablero.py --estado-sistema    (con la franja del estado del sistema)
       python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
 """
 import argparse
+import html
 import json
 import sys
 import threading
+import time
 from collections import deque
 
 import numpy as np
@@ -44,10 +51,12 @@ COLORES_SALUD = {config.VERDE: '#2ca02c', config.AMARILLO: '#e6b800', config.ROJ
                  config.CALENTANDO: '#9e9e9e'}
 SEMAFOROS = {'eeg': 'EEG', 'ortesis': 'ORTESIS', 'detector': 'DETECTOR', 'piloto': 'PILOTO'}
 VENTANA = 20     # para el error movil
+COLORES_SISTEMA = {'OK': COLORES_SALUD[config.VERDE], 'AVISO': COLORES_SALUD[config.AMARILLO],
+                   'FALLA': COLORES_SALUD[config.ROJO]}
 
 
 class Tablero(QtWidgets.QWidget):
-    def __init__(self, copiloto=False, narrador=False):
+    def __init__(self, copiloto=False, narrador=False, estado_sistema=False):
         super().__init__()
         self.setWindowTitle('ortesis-bci · Tablero')
         self.resize(1200, 900)
@@ -79,6 +88,15 @@ class Tablero(QtWidgets.QWidget):
         self.lbl_narrador.setVisible(narrador)
         self.con_narrador = narrador
         lay.addWidget(self.lbl_narrador)
+        # estado del sistema (--estado-sistema): una ficha por revision y, debajo, cada falla con su solucion
+        self._sistema, self.latencias = None, deque(maxlen=config.CP1_MOVIMIENTOS)
+        self.lbl_sistema = QtWidgets.QLabel('<b>SISTEMA</b> &nbsp; revisando...')
+        self.lbl_sistema.setWordWrap(True)
+        self.lbl_sistema.setStyleSheet('font-size:11px; background:#f4f4f4; border-radius:6px; padding:4px 8px;')
+        self.lbl_sistema.setVisible(estado_sistema)
+        lay.addWidget(self.lbl_sistema)
+        if estado_sistema:
+            threading.Thread(target=self._vigilar_sistema, daemon=True).start()
         lay.addWidget(self.lbl_cp)
         # Tarea 2: una linea con el IIC (exploratorio) en lugar de un panel: con ~12 movimientos
         # ajenos por sesion su curva seria casi toda ruido; el numero con su intervalo basta
@@ -178,6 +196,27 @@ class Tablero(QtWidgets.QWidget):
                 self._buscando = False
         threading.Thread(target=buscar, daemon=True).start()
 
+    def _vigilar_sistema(self):
+        """En otro hilo: no toca la ventana, deja la revision para _actualizar(). Nunca tumba el tablero."""
+        import estado_sistema as es
+        monitor = es.Monitor(self.latencias)
+        while True:
+            try:
+                self._sistema = monitor.ciclo()
+            except Exception as e:
+                self._sistema = [es.res('sistema', es.AVISO, f'la revision fallo: {type(e).__name__}: {e}',
+                                        'corre python estado_sistema.py en otra terminal')]
+            time.sleep(config.ESTADO_SISTEMA['periodo_s'])
+
+    def _franja_sistema(self, resultados):
+        c = COLORES_SISTEMA
+        fichas = ' &nbsp; '.join(f'<span style="color:{c[r["estado"]]}">&#9679;</span> {r["clave"]}' for r in resultados)
+        malas = ''.join(f'<br><b style="color:{c[r["estado"]]}">{r["estado"]}</b> {r["clave"]}: {html.escape(r["texto"])}'
+                        f' &rarr; <i>{html.escape(r["solucion"])}</i>'
+                        for r in sorted(resultados, key=lambda r: r['estado'] != 'FALLA') if r['estado'] != 'OK')
+        self.lbl_sistema.setText('<b>SISTEMA</b> &nbsp; ' + fichas + malas)
+        self.lbl_sistema.setToolTip('\n'.join(f"{r['estado']:6s} {r['clave']}: {r['texto']}" for r in resultados))
+
     def _decidir(self, aprobar):
         """El operador decide: queda escrito en el registro de propuestas, que el orquestador esta leyendo."""
         import copiloto
@@ -238,6 +277,9 @@ class Tablero(QtWidgets.QWidget):
 
     def _actualizar(self):
         self._mostrar_respuesta()
+        if self._sistema is not None:
+            self._franja_sistema(self._sistema)
+            self._sistema = None
         if self.con_narrador:
             self._narrar()
         if self.inlet is None:
@@ -331,6 +373,7 @@ class Tablero(QtWidgets.QWidget):
                     pl.addItem(pg.InfiniteLine(e['paso'], angle=90,
                                                pen=pg.mkPen('r', width=1, style=QtCore.Qt.DotLine)))
                 self._pert_marcada = True
+            self.latencias.append(float('nan') if e['latencia_ms'] is None else e['latencia_ms'])
             if 'iic' in e:                                       # las sesiones viejas no lo traen
                 self._iic(e['iic'])
             congel = ' · APRENDIZAJE CONGELADO' if e['congelado'] else ''
@@ -411,9 +454,11 @@ def main():
     ap.add_argument('--segundos', type=float, default=15)
     ap.add_argument('--copiloto', action='store_true', help='caja de preguntas al copiloto clinico')
     ap.add_argument('--narrador', action='store_true', help='franja con las frases de narrador.py')
+    ap.add_argument('--estado-sistema', dest='estado_sistema', action='store_true',
+                    help='franja con el estado del sistema (estado_sistema.py), cada falla con su solucion')
     a = ap.parse_args()
     app = QtWidgets.QApplication(sys.argv)
-    t = Tablero(copiloto=a.copiloto, narrador=a.narrador)
+    t = Tablero(copiloto=a.copiloto, narrador=a.narrador, estado_sistema=a.estado_sistema)
     t.show()
     if a.captura:
         def salir():

@@ -350,3 +350,22 @@ REGLAS_PROPUESTA = {
     'ba_recalibrar': 0.60, 'congelado_max': 0.5,
     'errores_min': 8, 'dif_sin_errp': 0.25, 'paso_visible_incremento': 0.02,
 }
+
+# ============================ Estado del sistema (estado_sistema.py; tablero.py --estado-sistema) ============================
+# Revision previa a la sesion y franja en vivo del tablero. Apagado por defecto; nada de esto corre
+# dentro del lazo. puente_lsl.py --estado deja en este archivo, cada pocos segundos, lo que el flujo
+# 'EEG' no lleva: bateria y validez del casco (la app UnicornLSL si los trae en su flujo).
+ESTADO_PUENTE_JSON = RESULTADOS / 'estado_puente.json'
+ESTADO_SISTEMA = {
+    'periodo_s': 10.0,                                      # cada cuanto se refresca la franja del tablero
+    'ventana_s': 5.0,                                       # EEG que se mira: calidad por canal y perdidas
+    'puente_vigencia_s': 30.0,                              # un estado del puente mas viejo ya no cuenta
+    'bateria_aviso': 30.0, 'bateria_falla': 15.0,           # % de bateria del casco
+    'validez_min': 0.99,                                    # fraccion de muestras marcadas como validas
+    'perdidas_aviso': 0.01, 'perdidas_falla': 0.05,         # fraccion de muestras perdidas (por contador)
+    'ack_movimientos': 10,                                  # los de la revision previa; minimo para opinar
+    'disco_aviso_gb': 5.0, 'disco_falla_gb': 1.0,
+    'api_s': 30.0, 'api_max_tokens': 256,                   # la llamada minima a la API
+}
+# procesos del proyecto que la revision busca vivos, por su linea de comando
+PROCESOS = ['puente_lsl.py', 'cerebro_sintetico.py', 'orquestador.py', 'tablero.py', 'narrador.py', 'LabRecorder']

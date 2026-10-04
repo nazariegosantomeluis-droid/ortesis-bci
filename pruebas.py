@@ -5,6 +5,7 @@ Uso:  python pruebas.py              pruebas rapidas (~1 min)
 """
 import argparse
 import csv
+import json
 import subprocess
 import sys
 import time
@@ -13,6 +14,12 @@ import traceback
 import numpy as np
 
 import config
+
+# Las pruebas nunca llaman a la API real, haya o no llave en la maquina: usan ApiSimulada. Con una
+# llave en .env, tablero_salud le preguntaba al copiloto de verdad (y fallaba: esperaba la plantilla).
+import os
+os.environ.pop('ANTHROPIC_API_KEY', None)
+config.ARCHIVO_ENV = config.RAIZ / '.env.pruebas'            # no existe: ia.cliente() da None
 
 RESULTADOS = []
 
@@ -2749,6 +2756,164 @@ def lazo_real_caos():
     return f"{pausas} pausas, todas reanudadas; {linea('excluidos del analisis')}; {linea('[CP4]')}"
 
 
+# ------------------------------------------------------------ estado del sistema
+@prueba
+def estado_sistema():
+    """Revision previa y franja del tablero: cada revision es una funcion pura sobre lecturas, asi
+    que se prueba sin casco, sin ortesis, sin red y sin llave. Toda falla trae su solucion en una linea."""
+    import os
+    import tempfile
+    from pathlib import Path
+    import estado_sistema as es
+    import puente_lsl
+    todos = []
+
+    def estados(resultados):
+        todos.extend(resultados)
+        return {r['clave']: r['estado'] for r in resultados}
+    f = lambda nombre, tipo, canales=8, hz=250, host='pc': {'nombre': nombre, 'tipo': tipo, 'canales': canales, 'hz': hz, 'host': host}
+    # flujos: sin EEG, dos fuentes a la vez, flujos repetidos y tasa baja
+    assert estados(es.revisar_flujos([f('Estado', 'Markers', 1, 0)])) == {'flujos': 'FALLA'}
+    dos = es.revisar_flujos([f('EEG', 'EEG'), f('UN-2023.01.01', 'Data', 17, host='otra')])
+    assert estados(dos)['fuentes_eeg'] == 'FALLA' and 'otra' in dos[1]['texto'] and 'cierra' in dos[1]['solucion']
+    e = estados(es.revisar_flujos([f('EEG', 'EEG'), f('IMU', 'IMU', 6), f('Estado', 'Markers', 1, 0), f('Estado', 'Markers', 1, 0)],
+                                  {'EEG': (249.0, 250.0), 'IMU': (180.0, 250.0)}))
+    assert e == {'flujos': 'OK', 'fuentes_eeg': 'OK', 'flujos_repetidos': 'FALLA', 'tasas': 'FALLA'}, e
+    assert estados(es.revisar_flujos([f('EEG', 'EEG')], {'EEG': (None, 250.0)}))['tasas'] == 'FALLA'
+    # casco: bateria, validez, perdidas por contador y calidad por canal
+    bien = [{'canal': c, 'rms_uv': 10.0, 'red': 0.1, 'saturado': 0.0, 'ok': True} for c in config.CANALES_EEG]
+    casco = lambda **k: estados(es.revisar_casco({'bateria': 80.0, 'validas': 1.0, 'perdidas': 0.0, 'calidad': bien,
+                                                  'edad_s': 0.05, **k}))
+    assert set(casco().values()) == {'OK'} and set(casco()) == {'bateria', 'validez', 'perdidas', 'canales'}
+    assert casco(bateria=20.0)['bateria'] == 'AVISO' and casco(bateria=10.0)['bateria'] == 'FALLA'
+    assert casco(bateria=None, validas=None) == {'bateria': 'AVISO', 'perdidas': 'OK', 'canales': 'OK'}
+    assert casco(validas=0.9)['validez'] == 'AVISO'
+    assert casco(perdidas=0.02)['perdidas'] == 'AVISO' and casco(perdidas=0.2)['perdidas'] == 'FALLA'
+    assert casco(edad_s=4.0)['perdidas'] == 'FALLA'
+    malo = es.revisar_casco({'bateria': 80.0, 'validas': 1.0, 'perdidas': 0.0, 'edad_s': 0.05,
+                             'calidad': bien[:2] + [dict(bien[2], rms_uv=140.0, ok=False)] + bien[3:]})[-1]
+    assert malo['estado'] == 'FALLA' and 'Cz' in malo['texto'] and 'electrodo' in malo['solucion']
+    t = np.r_[np.arange(250), np.arange(275, 500)] / 250.0          # faltan 25 de 500 muestras
+    assert abs(es.fraccion_perdida(t, 250) - 25 / 500) < 1e-9 and es.fraccion_perdida(t[:250], 250) == 0.0
+    # lo que deja puente_lsl.py --estado: vigente se usa, viejo no
+    original = config.ESTADO_PUENTE_JSON
+    config.ESTADO_PUENTE_JSON = Path(tempfile.mkdtemp()) / 'estado_puente.json'
+    try:
+        assert es.leer_estado_puente() is None
+        d = puente_lsl.estado_puente('unicorn', 64.0, 5000, 10)
+        config.ESTADO_PUENTE_JSON.write_text(json.dumps(d))
+        assert es.leer_estado_puente()['bateria'] == 64.0
+        config.ESTADO_PUENTE_JSON.write_text(json.dumps(dict(d, t=time.time() - 120)))
+        assert es.leer_estado_puente() is None
+    finally:
+        config.ESTADO_PUENTE_JSON = original
+    # procesos: el lanzador del .venv y su hijo cuentan una vez; una terminal que menciona el guion, no
+    py = r'C:\ortesis-bci\.venv\Scripts\python.exe'
+    procesos = [(10, 1, f'{py} cerebro_sintetico.py --caos 1'), (11, 10, f'{py} cerebro_sintetico.py --caos 1'),
+                (12, 1, 'bash -c "python cerebro_sintetico.py & python puente_lsl.py"'),
+                (13, 1, f'"{py}" -u "C:\\ortesis-bci\\tablero.py" --narrador'), (14, 1, r'"C:\LabRecorder\LabRecorder.exe"')]
+    assert es.vivos(procesos, 'cerebro_sintetico.py') == [11] and es.vivos(procesos, 'puente_lsl.py') == []
+    assert es.vivos(procesos, 'tablero.py') == [13] and es.vivos(procesos, 'LabRecorder') == [14]
+    assert estados(es.revisar_procesos(procesos)) == {'procesos': 'OK'}
+    assert estados(es.revisar_procesos(procesos[:4])) == {'procesos': 'AVISO'}          # sin LabRecorder
+    dos = es.revisar_procesos(procesos + [(20, 1, f'{py} puente_lsl.py --placa unicorn')])[0]
+    todos.append(dos)
+    assert dos['estado'] == 'FALLA' and '/PID 20' in dos['solucion'] and 'nunca taskkill /IM' in dos['solucion']
+    assert estados(es.revisar_procesos(None)) == {'procesos': 'AVISO'}
+    # ACK: los umbrales del CP1
+    assert estados(es.revisar_ack([8.0] * 3)) == {'ack': 'AVISO'}
+    assert estados(es.revisar_ack([8.0, 9.0] * 10)) == {'ack': 'OK'}
+    assert estados(es.revisar_ack([8.0, 60.0, 30.0, 95.0] * 5)) == {'ack': 'FALLA'}
+    # laptop: cargador, suspension (powercfg en cualquier idioma) y tapa
+    salida = ('Indice de configuracion de corriente alterna actual: 0x00000708\n'
+              'Indice de configuracion de corriente continua actual: 0x00000384\n')
+    assert es.indices_powercfg('Minimo: 0x00000000\nMaximo: 0xffffffff\n' + salida) == (1800, 900)
+    assert es.indices_powercfg('') is None and es.indices_powercfg(None) is None
+    assert set(estados(es.revisar_laptop(True, 100, {'suspension': (0, 900), 'tapa': (0, 0)})).values()) == {'OK'}
+    r = es.revisar_laptop(True, 100, {'suspension': (1800, 900), 'tapa': (1, 1)})
+    assert estados(r) == {'cargador': 'OK', 'suspension': 'FALLA', 'tapa': 'AVISO'}
+    assert '30 min' in r[1]['texto'] and r[1]['solucion'] == 'powercfg /change standby-timeout-ac 0'
+    r = es.revisar_laptop(False, 41, {'suspension': (0, 900), 'tapa': None})
+    assert estados(r) == {'cargador': 'FALLA', 'suspension': 'FALLA'} and '41 %' in r[0]['texto']
+    assert r[1]['solucion'].endswith('standby-timeout-dc 0')
+    assert estados(es.revisar_laptop(None, None, {'suspension': None, 'tapa': None})) == {'cargador': 'AVISO', 'suspension': 'AVISO'}
+    assert [estados(es.revisar_disco(g))['disco'] for g in (0.5, 3.0, 50.0)] == ['FALLA', 'AVISO', 'OK']
+    # API: una llamada minima con el modelo del contrato y sin parametros que ese modelo rechaza
+    api = ApiSimulada(_resp('ok'))
+    assert estados(es.revisar_api(api)) == {'env': 'OK', 'api': 'OK'}
+    pet = api.peticiones[0]
+    assert pet['model'] == config.IA_MODELO and not {'temperature', 'thinking', 'tool_choice'} & set(pet)
+    AuthenticationError = type('AuthenticationError', (Exception,), {})
+    r = es.revisar_api(ApiSimulada(AuthenticationError('401 invalid x-api-key')))
+    assert estados(r) == {'env': 'OK', 'api': 'FALLA'} and 'llave' in r[1]['solucion']
+    assert estados(es.revisar_api(ApiSimulada(TimeoutError('lenta')))) == {'env': 'OK', 'api': 'FALLA'}
+    assert estados(es.revisar_api(ApiSimulada(), llamar=False)) == {'env': 'OK'}
+    llave, env = os.environ.pop('ANTHROPIC_API_KEY', None), config.ARCHIVO_ENV
+    config.ARCHIVO_ENV = Path(tempfile.mkdtemp()) / '.env'
+    try:                                                    # sin llave no es una falla: la IA usa plantillas
+        r = es.revisar_api()
+        assert estados(r) == {'env': 'AVISO'} and 'ANTHROPIC_API_KEY' in r[0]['solucion']
+    finally:
+        config.ARCHIVO_ENV = env
+        if llave is not None:
+            os.environ['ANTHROPIC_API_KEY'] = llave
+    # git
+    g = {'rama': 'main', 'version': 'v-demo-13-gce4c633', 'sucios': 0, 'atras': 0}
+    assert estados(es.revisar_git(g)) == {'git': 'OK'} and 'v-demo' in es.revisar_git(g)[0]['texto']
+    assert estados(es.revisar_git(dict(g, sucios=2))) == {'git': 'AVISO'}
+    assert estados(es.revisar_git(dict(g, atras=3))) == {'git': 'AVISO'}
+    assert estados(es.revisar_git(dict(g, version=''))) == {'git': 'AVISO'}
+    # toda revision que no esta bien dice que hacer, en una linea; las que estan bien, nada
+    for r in todos:
+        assert bool(r['solucion']) == (r['estado'] != 'OK') and '\n' not in r['solucion'], r
+    assert '-> ' in es.texto(todos)
+    # la franja del tablero: apagada por defecto; con resultados, las fallas primero y con su solucion
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from pyqtgraph.Qt import QtWidgets
+    import tablero
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    t = tablero.Tablero()
+    try:
+        t.timer.stop()
+        assert t.lbl_sistema.isHidden()
+        t._franja_sistema(es.revisar_laptop(False, 41, {'suspension': (0, 0), 'tapa': None}) + es.revisar_disco(3.0))
+        txt = t.lbl_sistema.text()
+        assert 'conecta el cargador' in txt and txt.index('FALLA') < txt.index('AVISO'), txt
+        assert tablero.COLORES_SISTEMA['FALLA'] in txt and 'cargador' in t.lbl_sistema.toolTip()
+    finally:
+        t.close()
+    n = {e: sum(r['estado'] == e for r in todos) for e in ('OK', 'AVISO', 'FALLA')}
+    return f"{len(todos)} revisiones puras ({n['FALLA']} fallas y {n['AVISO']} avisos, todos con solucion); franja del tablero apagada por defecto"
+
+
+@prueba
+def estado_sistema_lsl():
+    """La revision contra el gemelo como la app UnicornLSL (bateria, validez y perdidas van en el flujo)
+    y la alerta de dos fuentes de EEG al aparecer otra. Cifras del gemelo."""
+    import estado_sistema as es
+    from pylsl import StreamInfo, StreamOutlet
+    gemelo = subprocess.Popen([sys.executable, 'cerebro_sintetico.py', '--formato', 'unicornlsl', '--cabeza', '0'],
+                              cwd=config.RAIZ, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    monitor = es.Monitor()
+    try:
+        time.sleep(3)
+        r = {x['clave']: x for x in monitor.ciclo(espera_s=config.ESTADO_SISTEMA['ventana_s'] + 1)}
+        assert r['bateria']['estado'] == 'OK' and '87' in r['bateria']['texto'], r['bateria']
+        assert r['validez']['estado'] == 'OK' and r['fuentes_eeg']['estado'] == 'OK', (r['validez'], r['fuentes_eeg'])
+        assert r['perdidas']['estado'] == 'OK' and r['tasas']['estado'] == 'OK', (r['perdidas'], r['tasas'])
+        assert r['canales']['estado'] == 'OK', r['canales']
+        assert {'procesos', 'ack', 'cargador', 'suspension', 'disco', 'env', 'git'} <= set(r), sorted(r)
+        otra = StreamOutlet(StreamInfo('EEG_olvidado', 'EEG', 8, 250, 'float32', 'estado-prueba'))
+        time.sleep(0.5)
+        dos = {x['clave']: x for x in es.revisar_flujos(es.listar_flujos())}
+        assert dos['fuentes_eeg']['estado'] == 'FALLA' and 'EEG_olvidado' in dos['fuentes_eeg']['texto'], dos
+        del otra
+    finally:
+        monitor.cerrar()
+        gemelo.terminate()
+    return f"gemelo como UnicornLSL: {r['bateria']['texto']}, {r['perdidas']['texto']}; dos fuentes de EEG -> FALLA"
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -2761,9 +2926,10 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
-           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
+           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
+           'estado_sistema']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
-           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn']
+           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos']
 
 

@@ -63,6 +63,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `narrador.py` | Narrador para el jurado: proceso aparte que escucha `Estado` y publica una frase por evento relevante en el flujo `Narracion` (Claude, con plantillas de respaldo). |
 | `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
+| `estado_sistema.py` | Revisión previa del sistema (casco, flujos LSL, procesos, ACK, laptop, disco, API y git) y la franja en vivo de `tablero.py --estado-sistema`; cada falla con su solución en una línea. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
 
 ## Qué tiene de nuevo
@@ -352,6 +353,33 @@ python orquestador.py real --puerto COM4 --preentrenado
 ```
 
 Con `--preentrenado`, la calibración de MI ajusta el clasificador con los ensayos de las otras personas más los del piloto (cada uno pesa como 20 de los otros) y usa los 8 canales, sin elegir entre C3/Cz/C4 y los 8. La BA que reporta el CP2 sigue siendo de validación cruzada sobre los ensayos del piloto, y el mínimo de 36 ensayos no cambia: bajarlo (`--min_mi`) acorta la calibración, pero el estimado con pocos ensayos vuelve a ser optimista (ver «la calibración secuencial inflaba la exactitud»).
+
+## Estado del sistema: revisión previa y franja en vivo (`estado_sistema.py`)
+
+Apagado por defecto y fuera del lazo de control. Un solo comando revisa, antes de empezar, lo que suele fallar a media demo, y dice qué hacer con cada falla en una línea:
+
+```bash
+python estado_sistema.py                 # revisión previa (unos 15 s; no mueve la órtesis)
+python estado_sistema.py --puerto COM4   # además mide la latencia del ACK con 10 movimientos
+python estado_sistema.py --sin-api       # no llama a la API: solo mira que haya llave
+python tablero.py --estado-sistema       # la misma revisión cada 10 s, en una franja del tablero
+python puente_lsl.py --placa unicorn --estado   # el puente deja la batería y la validez del casco para la revisión
+```
+
+| Revisión | Qué mira | Falla si |
+|---|---|---|
+| `bateria`, `validez`, `perdidas`, `canales` | El casco: batería, muestras válidas, muestras perdidas por contador en los últimos 5 s y calidad por canal (la del CP1) | batería < 15 % (aviso < 30 %), pérdidas ≥ 5 % (aviso ≥ 1 %), un canal plano, saturado o ruidoso |
+| `flujos`, `fuentes_eeg`, `flujos_repetidos`, `tasas` | Los flujos LSL de la red y las muestras por segundo que de verdad llegan | no hay EEG, **hay dos fuentes de EEG a la vez**, hay dos `Estado` / `Marcadores` / `Paso`, o llega menos del 75 % de la tasa nominal |
+| `procesos` | Puente, gemelo, orquestador, tablero, narrador y LabRecorder vivos, con su PID | puente y gemelo a la vez, o dos orquestadores (aviso si LabRecorder no está abierto) |
+| `ack` | Latencia del ACK con los umbrales del CP1; en el tablero, con los últimos 40 pasos del lazo | MAD > 15 ms, p95 > 60 ms o más de 10 % sin ACK |
+| `cargador`, `suspension`, `tapa` | La laptop: con cargador y sin suspensión por inactividad | está con batería o se suspende sola |
+| `disco` | Espacio libre donde se graba | < 1 GB (aviso < 5 GB) |
+| `env`, `api` | La llave en `.env` y una llamada mínima a la API | hay llave pero la llamada falla (sin llave solo avisa: la IA usa plantillas y reglas) |
+| `git` | Rama, versión (`git describe`) y cambios sin commit | solo avisa |
+
+El programa termina con código 1 si hay alguna falla. La batería y la validez del casco van en el flujo de la app UnicornLSL, pero no en el flujo `EEG` del puente: con `--estado`, `puente_lsl.py` las escribe cada 5 s en `resultados/estado_puente.json`. Las pérdidas se cuentan igual con las dos fuentes, por los huecos de la hora de cada muestra (que sale del contador del casco).
+
+**Probado sin hardware:** con el gemelo (en los dos formatos), con la placa sintética de BrainFlow, con la órtesis simulada y con la API simulada. Con el Unicorn, con la órtesis real y con una llamada real a la API, no.
 
 ## Resiliencia: el lazo que no se cae
 
