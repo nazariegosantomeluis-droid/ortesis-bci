@@ -2863,6 +2863,387 @@ def parpadeos_cruzan_bloques():
     return f'parpadeo de {int((forma > 1.0).sum())} muestras en bloques de 5; en vivo, maximo en Fz ({pp[fz]:.0f} uV pico a pico)'
 
 
+# ------------------------------------------------------------ modo demo automatico (demo.py)
+class _ProcesosFalsos:
+    """Hace de demo.Procesos sin lanzar nada: anota que se pidio, en que orden, y si se cerro."""
+
+    def __init__(self, carpeta, mueren=()):
+        from pathlib import Path
+        self.carpeta, self.pedidos, self.mueren, self.cerrado = Path(carpeta), [], set(mueren), False
+
+    def lanzar(self, nombre, script, args):
+        self.pedidos.append((nombre, script, list(args)))
+
+    def vivo(self, nombre):
+        return nombre not in self.mueren
+
+    def cola(self, nombre, lineas=12):
+        return f'cola de {nombre}'
+
+    def cerrar_todos(self, espera_s=8.0):
+        self.cerrado = True
+        return {n: 'limpio' for n, _, _ in self.pedidos}
+
+
+@prueba
+def demo_comandos():
+    """Los comandos de cada plan: puros, sin banderas que el piloto no pidio, y con banderas que existen."""
+    import demo
+    a = demo.argumentos(['lanzar', '--plan', 'casco', '--ortesis-sim', '--serie', 'UN-2019.05.51', '--narrador', '--copiloto', '--idioma', 'en'])
+    cmd = demo.comandos('casco', a, ahora=lambda: 0)
+    assert cmd['fuente'][0] == 'puente_lsl.py' and cmd['fuente'][1][:4] == ['--placa', 'unicorn', '--serie', 'UN-2019.05.51']
+    assert '--grabar' in cmd['fuente'][1] and cmd['fuente'][1][-1].endswith('.csv')
+    assert cmd['tablero'] == ('tablero.py', ['--copiloto', '--narrador']) and cmd['narrador'] == ('narrador.py', ['--idioma', 'en'])
+    assert cmd['orquestador'] == ('orquestador.py', ['real', '--ortesis-sim'])
+    # la ortesis real lleva su puerto; sin tablero ni narrador no hay esos procesos
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--puerto', 'COM7', '--sin-tablero'])
+    cmd = demo.comandos('gemelo', a)
+    assert cmd['fuente'] == ('cerebro_sintetico.py', []) and 'tablero' not in cmd and 'narrador' not in cmd
+    assert cmd['orquestador'] == ('orquestador.py', ['real', '--puerto', 'COM7'])
+    # la app UnicornLSL es la fuente: no se lanza ningun puente
+    a = demo.argumentos(['lanzar', '--plan', 'unicornlsl', '--ortesis-sim', '--eeg-nombre', 'UN-1'])
+    cmd = demo.comandos('unicornlsl', a)
+    assert 'fuente' not in cmd and cmd['orquestador'][1] == ['real', '--ortesis-sim', '--fuente', 'unicornlsl', '--eeg-nombre', 'UN-1']
+    # lo de tras `--` llega tal cual al orquestador; sin extras, nada de --forzar ni --saltar-calibracion
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-sim', '--', '--sham', '--preentrenado'])
+    assert a.extras == ['--sham', '--preentrenado']
+    assert demo.comandos('gemelo', a, a.extras)['orquestador'][1][-2:] == ['--sham', '--preentrenado']
+    for plan in demo.PLANES:
+        a = demo.argumentos(['lanzar', '--plan', plan, '--ortesis-sim', '--narrador'])
+        todo = [x for _, args in demo.comandos(plan, a).values() for x in args]
+        assert '--forzar' not in todo and '--saltar-calibracion' not in todo, plan
+    # sin abreviaturas: `--ortesis` es del orquestador, no una forma corta de --ortesis-sim
+    a = demo.argumentos(['lanzar', '--ortesis', 'x'])
+    assert not a.ortesis_sim and a.extras == ['--ortesis', 'x']
+    try:
+        demo.comandos('otro', a)
+        raise AssertionError('un plan desconocido debia fallar')
+    except ValueError:
+        pass
+    # el cierre limpio pasa por `demo.py hijo`, que corre el script del proyecto
+    argv = demo.argv_de('orquestador.py', ['real'])
+    assert argv[1].endswith('demo.py') and argv[2:] == ['hijo', 'orquestador.py', 'real']
+    # contrato con los demas scripts: las banderas que demo.py usa existen en ellos
+    esperadas = {'puente_lsl.py': ['--placa', '--serie', '--grabar'], 'orquestador.py': ['--ortesis-sim', '--puerto', '--fuente', '--eeg-nombre'],
+                 'tablero.py': ['--copiloto', '--narrador', '--flechas'], 'narrador.py': ['--idioma'],
+                 'repetir_sesion.py': ['--ultima', '--velocidad', '--puerto']}
+    for script, banderas in esperadas.items():
+        texto = (config.RAIZ / script).read_text(encoding='utf-8')
+        for b in banderas:
+            assert f"'{b}'" in texto, f'{script} ya no tiene la bandera {b}, que demo.py usa'
+
+
+@prueba
+def demo_revisiones():
+    """Cada comprobacion del preflight, con git, importaciones, red y archivos falsos."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import demo
+    from verificar_unicorn import CRITICAS
+
+    def estados(revs):
+        return {r['clave']: r['estado'] for r in revs}
+
+    def git_falso(describe='v-demo', sucio='', fetch=0, nuevos='0'):
+        def git(*args, **kw):
+            return {'describe': (0, describe), 'status': (0, sucio), 'fetch': (fetch, ''), 'rev-list': (0, nuevos)}.get(args[0], (1, ''))
+        return git
+    assert estados(demo.revisar_codigo(git_falso())) == {'version': 'OK', 'cambios': 'OK', 'origin': 'OK'}
+    assert estados(demo.revisar_codigo(git_falso(describe='v-demo-26-gabc')))['version'] == 'AVISO'
+    assert estados(demo.revisar_codigo(git_falso(sucio=' M orquestador.py')))['cambios'] == 'AVISO'
+    assert estados(demo.revisar_codigo(git_falso(fetch=1)))['origin'] == 'AVISO'
+    nuevo = demo.revisar_codigo(git_falso(nuevos='3'))[2]
+    assert nuevo['estado'] == 'AVISO' and '3 commit' in nuevo['texto'] and 'Luis' in nuevo['que_hacer']
+    assert demo.revisar_codigo(lambda *a, **k: (1, ''))[0]['estado'] == 'AVISO'
+
+    vistos = []
+
+    def importar(nombre):
+        vistos.append(nombre)
+        if nombre == 'brainflow':
+            raise OSError('no carga la DLL')
+    r = demo.revisar_dependencias('gemelo', True, True, importar)[0]
+    assert r['estado'] == 'OK' and not {'brainflow', 'serial', 'pyqtgraph'} & set(vistos)
+    vistos.clear()
+    r = demo.revisar_dependencias('casco', False, False, importar)[0]
+    assert r['estado'] == 'FALLA' and 'brainflow (OSError)' in r['texto'] and {'serial', 'pyqtgraph'} <= set(vistos) and r['que_hacer']
+
+    def flujo(nombre, tipo='EEG', host='laptop'):
+        return {'name': nombre, 'type': tipo, 'host': host}
+    assert estados(demo.revisar_flujos('gemelo', lambda: [flujo('Otro', 'X')])) == {'flujo_eeg': 'OK'}
+    r = demo.revisar_flujos('gemelo', lambda: [flujo('EEG', host='compa')])[0]
+    assert r['estado'] == 'FALLA' and 'compa' in r['texto']
+    assert estados(demo.revisar_flujos('gemelo', lambda: [flujo('Paso', 'Paso')]))['flujos_orquestador'] == 'FALLA'
+    assert estados(demo.revisar_flujos('unicornlsl', lambda: []))['app_unicornlsl'] == 'FALLA'
+    assert estados(demo.revisar_flujos('unicornlsl', lambda: [flujo('UN-1', 'Data')]))['app_unicornlsl'] == 'OK'
+
+    def sin_red():
+        raise RuntimeError('sin liblsl')
+    assert demo.revisar_flujos('casco', sin_red)[0]['estado'] == 'FALLA'
+
+    assert demo.revisar_puerto('COM4', True)[0]['estado'] == 'OK'
+    assert demo.revisar_puerto('com4', False, lambda: ['COM3', 'COM4'])[0]['estado'] == 'OK'
+    r = demo.revisar_puerto('COM4', False, lambda: ['COM3'])[0]
+    assert r['estado'] == 'FALLA' and 'COM3' in r['texto']
+    assert demo.revisar_puerto('COM4', False, sin_red)[0]['estado'] == 'AVISO'
+
+    with tempfile.TemporaryDirectory() as d:
+        carpeta, ahora = Path(d), (lambda: 1_000_000.0)
+
+        def guardar(nombre, datos):
+            (carpeta / nombre).write_text(json.dumps(datos), encoding='utf-8')
+
+        def unicorn(fuente, mala=None, hace_h=1.0):
+            return {'t': ahora() - hace_h * 3600,
+                    'por_fuente': {fuente: [{'clave': k, 'estado': 'FALLA' if k == mala else 'OK', 'texto': ''} for k in CRITICAS]}}
+        assert estados(demo.revisar_verificaciones('casco', True, carpeta, ahora)) == {'verif_casco': 'AVISO'}          # no hay archivo
+        guardar('verificacion_unicorn.json', unicorn('brainflow'))
+        assert estados(demo.revisar_verificaciones('casco', True, carpeta, ahora)) == {'verif_casco': 'OK'}
+        assert estados(demo.revisar_verificaciones('unicornlsl', True, carpeta, ahora)) == {'verif_casco': 'AVISO'}     # solo probo brainflow
+        guardar('verificacion_unicorn.json', unicorn('brainflow', mala='contador'))
+        r = demo.revisar_verificaciones('casco', True, carpeta, ahora)[0]
+        assert r['estado'] == 'FALLA' and 'contador' in r['texto']
+        guardar('verificacion_unicorn.json', unicorn('lsl', hace_h=5.0))
+        assert 'hace 5.0 h' in demo.revisar_verificaciones('unicornlsl', True, carpeta, ahora)[0]['texto']
+        assert demo.revisar_verificaciones('gemelo', True, carpeta, ahora) == []                                         # sin casco ni ortesis
+
+        def ortesis(veredicto, simulada=False, hace_h=1.0):
+            guardar('verificacion_ortesis.json', {'t': ahora() - hace_h * 3600, 'simulada': simulada, 'veredicto': veredicto})
+            return demo.revisar_verificaciones('gemelo', False, carpeta, ahora)[0]
+        assert ortesis('OK: latencia mecanica mediana 90 ms')['estado'] == 'OK'
+        assert ortesis('AVISO: el inicio se vio en menos del 80 %')['estado'] == 'AVISO'
+        assert ortesis('FALLA: no se vio el inicio del movimiento')['estado'] == 'FALLA'
+        assert ortesis('OK: simulada', simulada=True)['estado'] == 'AVISO'
+        assert ortesis('OK: vieja', hace_h=9.0)['estado'] == 'AVISO'
+
+        assert demo.revisar_plan_b(carpeta / 'no_existe')[0]['estado'] == 'AVISO'
+        assert demo.revisar_plan_b(carpeta)[0]['estado'] == 'AVISO'
+        (carpeta / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        r = demo.revisar_plan_b(carpeta)[0]
+        assert r['estado'] == 'OK' and 'sesion_real_20261004_100000' in r['texto']
+        # el plan B de una sesion simulada no vale como respaldo de la demo
+        (carpeta / ('sesion_sim_20261004_110000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        assert '1 sesion(es)' in demo.revisar_plan_b(carpeta)[0]['texto']
+
+        assert demo.revisar_disco(carpeta, lambda ruta: type('U', (), {'free': 10 * 10 ** 9})())[0]['estado'] == 'OK'
+        r = demo.revisar_disco(carpeta, lambda ruta: type('U', (), {'free': 100 * 10 ** 6})())[0]
+        assert r['estado'] == 'FALLA' and r['que_hacer']
+
+    # la llave de la API: sin red y sin llave el preflight no se cae
+    assert demo.revisar_llave()[0]['clave'] == 'api'
+
+    # el informe: solo muestra "que hacer" cuando algo no esta OK, y dice si se puede seguir
+    lineas = []
+    seguir = demo.imprimir_revisiones([demo.rev('a', demo.OK, 'bien', 'no se ve'), demo.rev('b', demo.AVISO, 'regular', 'se ve')], lineas.append)
+    assert seguir and 'no se ve' not in '\n'.join(lineas) and 'se ve' in '\n'.join(lineas) and '1 OK, 1 aviso(s), 0 falla(s)' in lineas[-1]
+    assert not demo.imprimir_revisiones([demo.rev('c', demo.FALLA, 'mal')], lambda s: None)
+
+
+@prueba
+def demo_limpiar_modelos():
+    """--limpiar-modelos mueve (no borra), deja el decoder preentrenado y el aviso de modelos viejos desaparece."""
+    import tempfile
+    from pathlib import Path
+
+    import demo
+    with tempfile.TemporaryDirectory() as d:
+        modelos, estado = Path(d) / 'modelos', Path(d) / 'estado_sesion.json'
+        modelos.mkdir()
+        for nombre in ('decoder_mi.pkl', 'detector_errp.pkl', 'detector_errp_datos.npz', config.DECODER_PREENTRENADO, 'LEEME.txt'):
+            (modelos / nombre).write_text(nombre, encoding='utf-8')
+        estado.write_text('{}', encoding='utf-8')
+        r = demo.revisar_modelos(modelos, ahora=lambda: time.time() + 7200)[0]
+        assert r['estado'] == 'AVISO' and '3 archivo' in r['texto'] and 'hace 2.0 h' in r['texto']   # el preentrenado no cuenta
+        destino, movidos = demo.limpiar_modelos(modelos, estado, ahora=lambda: 1_000_000.0)
+        assert sorted(movidos) == ['decoder_mi.pkl', 'detector_errp.pkl', 'detector_errp_datos.npz', 'estado_sesion.json']
+        for nombre in movidos:
+            assert (destino / nombre).exists(), f'{nombre} se perdio en lugar de moverse'
+        assert destino.parent.name == '_anteriores' and not estado.exists()
+        assert sorted(p.name for p in modelos.glob('*') if p.is_file()) == ['LEEME.txt', config.DECODER_PREENTRENADO]
+        assert demo.revisar_modelos(modelos)[0]['estado'] == 'OK'
+        assert demo.limpiar_modelos(modelos, estado) == (None, [])                                   # segunda vez: nada que mover
+        assert demo.limpiar_modelos(Path(d) / 'no_existe', estado) == (None, [])
+        # lo movido no cuenta como modelo viejo aunque este dentro de modelos/
+        assert demo.revisar_modelos(modelos)[0]['estado'] == 'OK'
+
+
+@prueba
+def demo_esperar_flujo():
+    """Esperar el flujo EEG: aparece, se agota el tiempo, o el proceso muere (y se ve su cola)."""
+    import demo
+    t = [0.0]
+
+    def dormir(s):
+        t[0] += s
+    llamadas = []
+
+    def aparece_a_la_tercera():
+        llamadas.append(1)
+        return [{'name': 'EEG', 'type': 'EEG', 'host': 'h'}] if len(llamadas) >= 3 else []
+    procesos = _ProcesosFalsos('x')
+    assert demo.esperar_flujo('EEG', aparece_a_la_tercera, procesos, 'fuente', 30.0, dormir, lambda: t[0]) is True
+    assert len(llamadas) == 3 and t[0] == 2.0
+    try:
+        demo.esperar_flujo('EEG', lambda: [], procesos, 'fuente', 5.0, dormir, lambda: t[0])
+        raise AssertionError('debia agotar el tiempo')
+    except demo.ErrorDemo as e:
+        assert 'no aparecio el flujo EEG en 5 s' in str(e) and 'cola de fuente' in str(e)
+    try:
+        demo.esperar_flujo('EEG', lambda: [], _ProcesosFalsos('x', mueren=['fuente']), 'fuente', 30.0, dormir, lambda: t[0])
+        raise AssertionError('debia avisar que el proceso murio')
+    except demo.ErrorDemo as e:
+        assert 'se cerro antes de publicar' in str(e) and 'cola de fuente' in str(e)
+
+
+@prueba
+def demo_procesos():
+    """Procesos de verdad: cierre limpio por PID (el script ve su KeyboardInterrupt), el terco se termina, el que ya salio se anota."""
+    import tempfile
+    from pathlib import Path
+
+    import demo
+    limpio = 'import time\nprint("INFO ruido", flush=True)\nprint("listo", flush=True)\ntry:\n    while True:\n        time.sleep(0.1)\nexcept KeyboardInterrupt:\n    print("cerrado limpio", flush=True)\n'
+    terco = ('import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\n'
+             'if hasattr(signal, "SIGBREAK"):\n    signal.signal(signal.SIGBREAK, signal.SIG_IGN)\n'
+             'print("listo", flush=True)\nwhile True:\n    time.sleep(0.1)\n')
+    corto = 'print("listo", flush=True)\n'
+
+    def esperar_log(procesos, nombre, texto, segundos=40):
+        t_fin = time.time() + segundos
+        while time.time() < t_fin:
+            if texto in procesos.cola(nombre):
+                return
+            time.sleep(0.2)
+        raise AssertionError(f'{nombre} no escribio {texto!r}: ' + procesos.cola(nombre))
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        for nombre, codigo in (('limpio', limpio), ('terco', terco), ('corto', corto)):
+            (d / f'{nombre}.py').write_text(codigo, encoding='utf-8')
+        a = demo.Procesos(d / 'logs_a')
+        pl = a.lanzar('limpio', str(d / 'limpio.py'), [])
+        pc = a.lanzar('corto', str(d / 'corto.py'), [])
+        esperar_log(a, 'limpio', 'listo')
+        esperar_log(a, 'corto', 'listo')
+        assert 'ruido' not in a.cola('limpio') and a.vivo('limpio') and not a.vivo('nadie')
+        pc.wait(timeout=30)
+        cierre = a.cerrar_todos(espera_s=30.0)
+        assert cierre == {'limpio': 'limpio', 'corto': 'ya habia salido (0)'}, cierre
+        assert pl.poll() is not None and pc.poll() is not None and a.hijos == {}
+        assert 'cerrado limpio' in (d / 'logs_a' / 'limpio.log').read_text(encoding='utf-8')
+        b = demo.Procesos(d / 'logs_b')
+        pt = b.lanzar('terco', str(d / 'terco.py'), [])
+        esperar_log(b, 'terco', 'listo')
+        assert b.cerrar_todos(espera_s=1.0) == {'terco': 'terminate'} and pt.poll() is not None
+
+
+@prueba
+def demo_lanzar_simulado():
+    """lanzar y planb con procesos falsos: el orden, las paradas del preflight, los extras, el cierre y la bitacora."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import demo
+    bien, mal = [demo.rev('x', demo.OK, 'bien')], [demo.rev('y', demo.FALLA, 'mal', 'arreglalo')]
+    eeg = lambda: [{'name': 'EEG', 'type': 'EEG', 'host': 'h'}]
+    with tempfile.TemporaryDirectory() as d:
+        res, lineas, foreground = Path(d), [], []
+
+        def correr(codigo=0, error=None):
+            def f(argv):
+                foreground.append(argv)
+                if error:
+                    raise error
+                return codigo
+            return f
+
+        def lanzar(argv, extras=None, preflight=bien, procesos=None, **kw):
+            a = demo.argumentos(['lanzar', *argv])
+            procesos = procesos or _ProcesosFalsos(res / 'logs')
+            foreground.clear()
+            lineas.clear()
+            kw.setdefault('correr_foreground', correr())
+            codigo = demo.lanzar(a, a.extras if extras is None else extras, salida=lineas.append, procesos=procesos, resolver=eeg,
+                                 hacer_preflight=lambda a: preflight, resultados=res, dormir=lambda s: None, **kw)
+            return codigo, procesos
+        bitacoras = lambda: sorted(res.glob('demo_*.json'))
+        # una FALLA detiene todo: nada se lanza y queda anotado
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], preflight=mal)
+        assert codigo == 2 and not p.pedidos and not foreground and not p.cerrado
+        assert json.loads(bitacoras()[-1].read_text(encoding='utf-8'))['salida'] == 'detenido por el preflight'
+        # con --ignorar-fallas sigue, y la bitacora lo dice
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim', '--ignorar-fallas'], preflight=mal)
+        assert codigo == 0 and len(foreground) == 1 and json.loads(bitacoras()[-1].read_text(encoding='utf-8'))['ignoro_fallas'] is True
+        # el camino normal: fuente, luego narrador y tablero, luego el orquestador en primer plano
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim', '--narrador'], extras=['--sham', '--preentrenado'])
+        assert codigo == 0 and [n for n, _, _ in p.pedidos] == ['fuente', 'narrador', 'tablero'] and p.cerrado
+        argv = foreground[0]
+        assert argv[2:5] == ['hijo', 'orquestador.py', 'real'] and argv[-2:] == ['--sham', '--preentrenado']
+        assert '--forzar' not in argv and '--saltar-calibracion' not in argv
+        b = json.loads(bitacoras()[-1].read_text(encoding='utf-8'))
+        assert b['plan'] == 'gemelo' and b['extras_orquestador'] == ['--sham', '--preentrenado'] and b['codigo_orquestador'] == 0
+        assert b['cierre_de_procesos'] == {'fuente': 'limpio', 'narrador': 'limpio', 'tablero': 'limpio'} and b['comandos']['orquestador'][0] == 'orquestador.py'
+        assert 'Bitacora' in lineas[-1] and any('gemelo digital, no una persona' in l for l in lineas)
+        # el codigo de salida del orquestador es el de la demo (un CP en NO GO se ve, no se esconde)
+        assert lanzar(['--plan', 'gemelo', '--ortesis-sim', '--sin-tablero'], correr_foreground=correr(codigo=1))[0] == 1
+        # Ctrl+C: 130, y los procesos de fondo se cierran igual
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(error=KeyboardInterrupt()))
+        assert codigo == 130 and p.cerrado
+        # la fuente muere antes de publicar EEG: error claro, el orquestador no arranca, se cierra todo
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], procesos=_ProcesosFalsos(res / 'logs', mueren=['fuente']))
+        assert codigo == 3 and not foreground and p.cerrado and any('cola de fuente' in l for l in lineas)
+        # un tablero que se cierra al arrancar no detiene la sesion: avisa y sigue
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], procesos=_ProcesosFalsos(res / 'logs', mueren=['tablero']))
+        assert codigo == 0 and len(foreground) == 1 and any('AVISO: tablero se cerro' in l for l in lineas)
+        # con la app UnicornLSL no hay fuente que lanzar ni flujo que esperar
+        codigo, p = lanzar(['--plan', 'unicornlsl', '--ortesis-sim', '--sin-tablero'])
+        assert codigo == 0 and p.pedidos == [] and foreground[0][-2:] == ['--fuente', 'unicornlsl']
+        assert len(bitacoras()) >= 6                                                                       # ninguna se pisa
+
+        # plan B: sin sesion grabada no abre nada; con una, tablero y repetir_sesion --ultima
+        a = demo.argumentos(['planb', '--ortesis-sim'])
+        vacia = res / 'vacia'
+        vacia.mkdir()
+        p = _ProcesosFalsos(res / 'logs')
+        assert demo.planb(a, salida=lineas.append, resultados=vacia, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 1
+        assert p.pedidos == [] and 'No hay plan B' in lineas[-1]
+        (res / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        foreground.clear()
+        assert demo.planb(a, salida=lineas.append, resultados=res, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 0
+        assert p.pedidos == [('tablero', 'tablero.py', [])] and p.cerrado
+        assert foreground[0][3:6] == ['repetir_sesion.py', '--ultima', '--velocidad'] and '--puerto' not in foreground[0]
+        foreground.clear()
+        demo.planb(demo.argumentos(['planb', '--puerto', 'COM9']), salida=lineas.append, resultados=res, procesos=_ProcesosFalsos(res / 'l2'),
+                   dormir=lambda s: None, correr_foreground=correr())
+        assert foreground[0][-2:] == ['--puerto', 'COM9']
+
+
+@prueba
+def demo_gemelo_en_vivo():
+    """Con LSL de verdad: demo.Procesos lanza el gemelo, espera su flujo EEG, el preflight lo ve y se cierra por PID."""
+    import tempfile
+    from pathlib import Path
+
+    import demo
+    antes = [f for f in demo._resolver_lsl(1.0) if f['name'] == 'EEG']
+    assert not antes, 'hay un flujo EEG ajeno en la red; cierralo antes de probar'
+    with tempfile.TemporaryDirectory() as d:
+        procesos = demo.Procesos(Path(d))
+        try:
+            p = procesos.lanzar('fuente', 'cerebro_sintetico.py', [])
+            demo.esperar_flujo('EEG', demo._resolver_lsl, procesos, 'fuente', 60.0)
+            visto = demo.revisar_flujos('gemelo')[0]
+            assert visto['clave'] == 'flujo_eeg' and visto['estado'] == 'FALLA', visto        # un segundo EEG se rechazaria
+        finally:
+            cierre = procesos.cerrar_todos(espera_s=15.0)
+        assert cierre['fuente'] == 'limpio' and p.poll() is not None, cierre
+    despues = demo.revisar_flujos('gemelo')[0]
+    assert despues['estado'] == 'OK', despues
+    return 'gemelo lanzado, visto y cerrado por PID'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -2875,9 +3256,10 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
-           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
+           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
+           'demo_comandos', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
-           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn']
+           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos']
 
 
