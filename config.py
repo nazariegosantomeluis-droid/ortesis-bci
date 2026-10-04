@@ -307,6 +307,9 @@ ESTADO_SESION_JSON = RESULTADOS / 'estado_sesion.json'
 SUFIJO_ESTADO = '_estado.jsonl'
 # modelos calibrados hace mas que esto: aviso al cargarlos (pueden ser de otro piloto o del gemelo)
 MODELOS_EDAD_AVISO_H = 6.0
+# decoder de MI pre-entrenado con otras personas (estudios/transferencia_physionet.py modelo)
+DECODER_PREENTRENADO = 'decoder_preentrenado.pkl'
+PREENTRENADO_PESO_PROPIO = 20.0         # cada ensayo del piloto pesa como 20 de otras personas
 
 # ============================ IA (copiloto, co-investigador y narrador) ============================
 # Reglas en ia.py. Todo esto esta apagado por defecto y nada corre dentro del lazo de control.

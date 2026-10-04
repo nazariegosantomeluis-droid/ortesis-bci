@@ -9,3 +9,4 @@ pyqtgraph
 PyQt5
 pyserial
 anthropic
+mne

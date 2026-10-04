@@ -36,7 +36,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 51/51 pruebas pasaron
+python pruebas.py                    # debe decir 52/52 pruebas pasaron
 ```
 
 ## Archivos
@@ -302,6 +302,39 @@ python tablero.py --narrador          # franja con la última frase
 
 Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas, contra una sesión del simulador en vivo por LSL. **Sin probar con la API real.**
 
+## Transferencia desde PhysioNet: arrancar la calibración con un decoder pre-entrenado (`--preentrenado`)
+
+¿Cuántos ensayos de calibración de imaginación motora ahorra empezar con un decoder entrenado con otras personas? Se midió con la **EEG Motor Movement/Imagery Database** (Schalk et al. 2004; PhysioNet, vía `mne.datasets.eegbci`): «mano derecha imaginada» contra «reposo» (corridas 4, 8 y 12), con los 8 canales del Unicorn remuestreados a 250 Hz y la misma ventana y banda del lazo. El decoder es el del proyecto (covarianzas → recentrado riemanniano → espacio tangente → regresión logística). El recentrado es lo que permite transferir: cada persona queda centrada en la identidad, así que un clasificador ajustado con otras se le aplica tal cual; la persona nueva solo aporta su centro, que sale de EEG **sin etiquetas** (su minuto de reposo, o sus propios ensayos).
+
+Dejando una persona fuera cada vez (40 personas), calibrando con los primeros *n* ensayos de sus corridas 4 y 8 y probando siempre en su corrida 12 (`python estudios/transferencia_physionet.py`; media ± error estándar):
+
+| Ensayos propios | Desde cero (hoy) | Pre-entrenado, solo recentrado | Pre-entrenado + ensayos propios | Diferencia con desde cero |
+|---|---|---|---|---|
+| 0 | — | **0.623 ± 0.021** | — | — |
+| 4 | 0.610 ± 0.024 | 0.635 ± 0.021 | 0.655 ± 0.021 | +0.044 ± 0.023 |
+| 8 | 0.646 ± 0.024 | 0.658 ± 0.021 | 0.689 ± 0.022 | +0.042 ± 0.023 |
+| 12 | 0.666 ± 0.026 | 0.658 ± 0.023 | **0.704 ± 0.020** | +0.037 ± 0.021 |
+| 16 | 0.678 ± 0.027 | 0.662 ± 0.022 | 0.706 ± 0.022 | +0.028 ± 0.023 |
+| 20 | 0.678 ± 0.025 | 0.661 ± 0.022 | 0.703 ± 0.022 | +0.025 ± 0.020 |
+| 24 | 0.697 ± 0.025 | 0.667 ± 0.023 | 0.707 ± 0.024 | +0.010 ± 0.020 |
+| 28 | 0.706 ± 0.023 | 0.663 ± 0.024 | 0.716 ± 0.026 | +0.009 ± 0.020 |
+
+![Transferencia desde PhysioNet](docs/figuras/transferencia_physionet.png)
+
+**Lo que dice, sin adornos.** Funciona, pero ayuda poco. Sin un solo ensayo propio el decoder pre-entrenado ya decide con BA 0.62, lo que desde cero pide 8 ensayos. Con 12 ensayos propios llega a 0.70, lo que desde cero pide 28: **ahorra unos 16 ensayos, cerca de minuto y medio de calibración**. La ventaja es de unos 0.04 de BA con 4 a 12 ensayos (menos de dos errores estándar en cada punto) y desaparece hacia los 28. No es un atajo para saltarse la calibración: es un mejor punto de partida cuando hay pocos ensayos.
+
+**Lo que no dice.** Son personas reales, pero no el piloto, ni el Unicorn (ahí son electrodos de gel de un equipo de 64 canales), ni la tarea exacta del proyecto (allí el «reposo» es el descanso entre ensayos, no «imagina que abres y relajas»). En el gemelo el decoder de PhysioNet, sin ensayos propios, da BA 0.79 en 8 sujetos (0.70 a 0.86): solo dice que el patrón aprendido de personas es el que programamos en el gemelo.
+
+**Cómo se usa.** Apagado por defecto. El modelo no va en el repositorio (`modelos/` está en `.gitignore`): se genera una vez, con conexión.
+
+```bash
+python estudios/transferencia_physionet.py           # descarga 40 personas (~350 MB, lento) y mide
+python estudios/transferencia_physionet.py modelo    # guarda modelos/decoder_preentrenado.pkl
+python orquestador.py real --puerto COM4 --preentrenado
+```
+
+Con `--preentrenado`, la calibración de MI ajusta el clasificador con los ensayos de las otras personas más los del piloto (cada uno pesa como 20 de los otros) y usa los 8 canales, sin elegir entre C3/Cz/C4 y los 8. La BA que reporta el CP2 sigue siendo de validación cruzada sobre los ensayos del piloto, y el mínimo de 36 ensayos no cambia: bajarlo (`--min_mi`) acorta la calibración, pero el estimado con pocos ensayos vuelve a ser optimista (ver «la calibración secuencial inflaba la exactitud»).
+
 ## Resiliencia: el lazo que no se cae
 
 Si se desconecta el dongle, se reinicia el ESP32, se congela LSL o llega una época corrupta, el sistema lo detecta, se protege, se recupera solo y no pierde la sesión.
@@ -480,6 +513,7 @@ Están en `docs/figuras/` y cada una se regenera con su estudio. Todas son del s
 | Figura | Qué muestra | Cómo se regenera |
 |---|---|---|
 | `control_negativo.png` | **El resultado central.** Sin la evidencia del ErrP el agente no se recupera de la perturbación (1 de 16 sesiones); con ella sí (10 a 16 de 16), con tres calidades de detector y los topes del recorrido. | `python estudios/paso_sin_movimiento.py` (unos 8 minutos; `informe` rehace la tabla y la figura con lo ya corrido) |
+| `transferencia_physionet.png` | BA de un decoder desde cero, pre-entrenado con otras personas y pre-entrenado más ensayos propios, según los ensayos de calibración (EEGMMIDB, 40 personas). | `python estudios/transferencia_physionet.py` (descarga lenta la primera vez; `informe` rehace la tabla y la figura) |
 | `curva_robustez.png` | Error tras perturbar y tiempo de recuperación según la BA del detector (0.65 a 0.85). Simulador rápido: no modela los topes del recorrido. | `python estudios/curva_robustez.py` |
 | `potencia_iic.png` | Cuántos movimientos ajenos pide el IIC para un intervalo de ±0.2 y para un Spearman significativo. | `python estudios/potencia_iic.py` |
 | `agente_lento.png` | Figura técnica: por qué el agente era lento y por qué se descartó la corrección del prior. | `python estudios/agente_lento.py informe` |

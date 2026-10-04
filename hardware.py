@@ -737,6 +737,50 @@ class DecoderIM:
         self.w0, self.c0 = clf.coef_[0].copy(), float(clf.intercept_[0])
         return self
 
+    def ajustar_desde(self, pre, X=None, y=None, reposo=None):
+        """Arranca del decoder pre-entrenado con otras personas (estudios/transferencia_physionet.py;
+        pre = {'Z': rasgos, 'y': etiquetas, 'canales'}). El recentrado alinea a las personas: cada
+        una queda centrada en la identidad, asi que el clasificador de otras se aplica tal cual.
+          sin ensayos propios  el clasificador es el de las otras personas y el centro sale de EEG
+                               sin etiquetas del piloto (`reposo`: ventanas de la revision de senal)
+          con ensayos propios  el centro es el de esos ensayos y el clasificador se ajusta con todo,
+                               pesando cada ensayo propio PREENTRENADO_PESO_PROPIO veces
+        self.ba y self.pred_cv son de validacion cruzada sobre los ensayos PROPIOS (nan sin ellos).
+        Usa todos los canales del pre-entrenado, sin eleccion."""
+        from pyriemann.estimation import Covariances
+        from pyriemann.tangentspace import TangentSpace
+        from pyriemann.utils.base import invsqrtm
+        from pyriemann.utils.mean import mean_riemann
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import StratifiedKFold
+        propios = X is not None and len(X) > 0
+        self.canales, self.eleccion = list(range(len(pre['canales']))), 'pre-entrenado'
+        self.cov = Covariances('oas')
+        C = self.cov.fit_transform(np.asarray(X if propios else reposo)[:, self.canales])
+        self.M = mean_riemann(C)
+        self.ts = TangentSpace(metric='riemann')
+        self.ts.reference_ = np.eye(C.shape[1])               # el espacio tangente de las otras personas
+        Zf, yf = np.asarray(pre['Z'], dtype=float), np.asarray(pre['y'])
+        lr = lambda: LogisticRegression(max_iter=2000)
+        self.y_cal, self.pred_cv, self.ba = np.array([], dtype=int), None, float('nan')
+        if not propios:
+            clf = lr().fit(Zf, yf)
+        else:
+            y = np.asarray(y)
+            Mi = invsqrtm(self.M)
+            Z = self.ts.transform(np.array([self._blanquear(c, Mi) for c in C]))
+            ajuste = lambda ent: lr().fit(np.vstack([Zf, Z[ent]]), np.r_[yf, y[ent]],
+                                          sample_weight=np.r_[np.ones(len(yf)), np.full(len(ent), config.PREENTRENADO_PESO_PROPIO)])
+            self.pred_cv = np.zeros(len(y), dtype=int)
+            k = int(min(5, np.bincount(y, minlength=2).min()))
+            for ent, pru in StratifiedKFold(max(k, 2), shuffle=True, random_state=0).split(Z, y):
+                self.pred_cv[pru] = ajuste(ent).predict(Z[pru])
+            self.y_cal, self.ba = y, exactitud_balanceada(y, self.pred_cv)
+            clf = ajuste(np.arange(len(y)))
+        self.puntajes = {self.eleccion: self.ba}
+        self.w0, self.c0 = clf.coef_[0].copy(), float(clf.intercept_[0])
+        return self
+
     def phi(self, x, actualizar_centro=True):
         """Rasgos de una ventana (canales x muestras), o None si la ventana no es finita."""
         from pyriemann.utils.base import invsqrtm

@@ -129,6 +129,15 @@ El sistema aprende en tres escalas de tiempo:
 - Las frases llevan acentos dentro de `narrador.py` (las lee el jurado); la consola imprime con `errors='replace'`.
 - La recuperación se cuenta en filas desde la perturbación y en segundos nominales (`CICLO_S`), no en pasos válidos como `EVALUACION`: con pausas en medio da algo más.
 
+**5. Transferencia con PhysioNet (3 de octubre, noche; personas reales de EEGMMIDB).**
+
+- **Resultado: funciona, pero ayuda poco.** 40 personas, dejando-una-fuera, prueba en otra corrida. Sin ensayos propios BA 0.623 ± 0.021; con 12 propios 0.704 ± 0.020 contra 0.666 ± 0.026 desde cero; con 28, 0.716 contra 0.706. Ahorra unos 16 ensayos (minuto y medio) para llegar a BA 0.70. La ventaja con pocos ensayos es de +0.04, menos de dos errores estándar.
+- Diseño de la medición: se calibra con los primeros *n* ensayos de las corridas 4 y 8 y se prueba siempre en la corrida 12, para que el estimado incluya el paso del tiempo. Clases balanceadas (tantos reposos como manos derechas por corrida). Con *n* = 0 el centro de la persona sale de su corrida 1 (un minuto de reposo con ojos abiertos), que hace el papel de la revisión de señal del CP1.
+- Se usaron 40 personas y no las 106: PhysioNet limita la descarga (~35 min para 160 archivos). Las personas 88, 92 y 100 se excluyen siempre (otra frecuencia de muestreo).
+- El peso de los ensayos propios (20) se fijó antes de ver los resultados y no se ajustó contra la corrida de prueba.
+- `--preentrenado` usa los 8 canales sin elegir, y **no baja el mínimo de 36 ensayos** del CP2: con menos, el estimado vuelve a inflarse. Quien quiera acortar la calibración lo decide con `--min_mi`.
+- Con `--preentrenado` y `--saltar-calibracion` no hay nada que hacer: el decoder guardado ya incluye lo aprendido. El arranque sin ningún ensayo propio (`DecoderIM.ajustar_desde(pre, reposo=...)`) existe y está probado, pero el orquestador no lo ofrece: saltarse la calibración de MI cambiaría el CP2, y eso lo decide Luis.
+
 ---
 
 ## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black

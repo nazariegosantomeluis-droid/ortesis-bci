@@ -1368,6 +1368,42 @@ def modelos_hardware():
 
 
 @prueba
+def decoder_preentrenado():
+    """El decoder de MI puede arrancar de uno pre-entrenado con OTROS sujetos (DecoderIM.ajustar_desde):
+    sin ensayos propios ya decide (el piloto solo aporta su centro, de EEG sin etiquetas), y con pocos
+    ensayos propios no queda peor que calibrar desde cero. Aqui los otros sujetos son del gemelo, asi
+    que solo se prueba el mecanismo; lo medido con personas esta en estudios/transferencia_physionet.py."""
+    import os
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import orquestador
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import transferencia_physionet as tp
+    Z, y = zip(*[(tp.tangente(X)[0], yy) for X, yy in (cs.sesion_mi(40, semilla=s) for s in range(1, 6))])
+    pre = {'Z': np.vstack(Z).astype(np.float32), 'y': np.concatenate(y), 'canales': config.CANALES_EEG, 'personas': 5,
+           'origen': 'gemelo (prueba)'}
+    cero, propio, afinado = [], [], []
+    for s in (9, 10, 11, 12):
+        X, yy = cs.sesion_mi(100, semilla=s)
+        Xc, yc, Xp, yp = X[:16], yy[:16], X[40:], yy[40:]
+        ba = lambda d: hw.exactitud_balanceada(yp, np.array([int(d.w0 @ d.phi(x, actualizar_centro=False) + d.c0 > 0) for x in Xp]))
+        d0 = hw.DecoderIM().ajustar_desde(pre, reposo=X[:20])                      # ni una etiqueta del sujeto
+        assert d0.pred_cv is None and np.isnan(d0.ba) and d0.w0.shape == (36,) and d0.eleccion == 'pre-entrenado'
+        d16 = hw.DecoderIM().ajustar_desde(pre, Xc, yc)
+        assert len(d16.pred_cv) == 16 and 0 <= d16.ba <= 1 and d16.phi(np.full_like(Xp[0], np.nan)) is None
+        cero.append(ba(d0)); afinado.append(ba(d16)); propio.append(ba(hw.DecoderIM().ajustar(Xc, yc, config.candidatos('decoder'))))
+    assert np.mean(cero) > 0.75 and np.mean(afinado) > np.mean(propio) - 0.03, (cero, propio, afinado)
+    # la calibracion real lo usa con --preentrenado; el modelo se guarda y se carga como los demas
+    assert orquestador.argumentos(['real', '--preentrenado']).preentrenado and not orquestador.argumentos(['real']).preentrenado
+    nombre = 'decoder_preentrenado_prueba.pkl'
+    hw.guardar(pre, nombre)
+    assert hw.cargar(nombre)['personas'] == 5
+    os.remove(config.MODELOS / nombre)
+    return (f'gemelo, 4 sujetos nuevos: sin ensayos propios BA {np.mean(cero):.2f}; con 16 ensayos, desde cero '
+            f'{np.mean(propio):.2f} y pre-entrenado + propios {np.mean(afinado):.2f}')
+
+
+@prueba
 def detector_umbral_anidado():
     """El umbral de Neyman-Pearson se elige dentro de cada pliegue (validacion anidada): la BA
     que reporta la calibracion coincide con la de epocas nuevas. Verifica que no hay sesgo; con
@@ -2655,7 +2691,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
-           'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
+           'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn']

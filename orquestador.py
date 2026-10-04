@@ -485,6 +485,10 @@ class BackendReal:
     def calibrar_mi(self, orq):
         rng = np.random.default_rng()
         X, y = [], []
+        pre = None
+        if getattr(self.a, 'preentrenado', False):   # arranca del decoder de otras personas (PhysioNet)
+            pre = self.hw.cargar(config.DECODER_PREENTRENADO)
+            aviso(f"Calibracion de MI desde el decoder pre-entrenado ({pre['personas']} personas; {pre['origen']}).")
         for k in range(self.a.ensayos_mi):
             clase = 1 - y[-1] if (k % 2 and y) else int(rng.permutation([0, 1])[0])   # pares balanceados
 
@@ -507,7 +511,8 @@ class BackendReal:
                 y.append(clase)
             n = k + 1
             if (n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi) and self._ajustable(y):
-                self.decoder = self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos('decoder'))
+                self.decoder = (self.hw.DecoderIM().ajustar_desde(pre, np.array(X), np.array(y)) if pre is not None
+                                else self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos('decoder')))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
                                              config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
                 if r != 'seguir':
@@ -1468,6 +1473,8 @@ def argumentos(argv=None):
                     help='usa los modelos guardados (decoder y detector) de la ultima calibracion')
     ap.add_argument('--solo-errp', dest='solo_errp', action='store_true',
                     help='usa el decoder de MI guardado y repite solo la calibracion de ErrP (tras un CP3 NO GO)')
+    ap.add_argument('--preentrenado', action='store_true',
+                    help='la calibracion de MI arranca del decoder pre-entrenado con PhysioNet (modelos/decoder_preentrenado.pkl)')
     ap.add_argument('--control-reposo', dest='control_reposo', action='store_true',
                     help='tras calibrar, la ortesis se mueve sola con el piloto en reposo: p(t) no debe seguirla (~2 min)')
     ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
