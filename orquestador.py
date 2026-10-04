@@ -381,6 +381,18 @@ class BackendSim:
         pass
 
 
+def crear_ortesis(hw, a):
+    """La ortesis del backend real: simulada, por Wi-Fi (--ortesis-udp) o por USB. La de Wi-Fi se crea con
+    el reloj de LSL (pylsl.local_clock), el mismo que estampa el EEG: time.monotonic no lo es, y en Windows
+    tiene ~15 ms de resolucion."""
+    if a.ortesis_sim:
+        return hw.OrtesisSimulada()
+    if getattr(a, 'ortesis_udp', None):
+        from pylsl import local_clock
+        return hw.OrtesisUDP(a.ortesis_udp, getattr(a, 'udp_puerto', config.PUERTO_ORTESIS_UDP), reloj=local_clock)
+    return hw.OrtesisSerial(a.puerto)
+
+
 class BackendReal:
     """EEG por LSL + ortesis por USB (o simulada) + modelos de hardware.py."""
 
@@ -391,7 +403,7 @@ class BackendReal:
         self.eeg = hw.EntradaEEG(fuente=getattr(a, 'fuente', 'puente'), nombre=getattr(a, 'eeg_nombre', None),
                                  tipo=getattr(a, 'eeg_tipo', None))
         # el caos solo afecta a la ortesis simulada y se activa con activar_caos()
-        self.ortesis = hw.OrtesisSimulada() if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
+        self.ortesis = crear_ortesis(hw, a)
         self.activar_caos('calibracion')
         self.angulo = 0.5
         self.decoder = self.detector = None
@@ -1520,6 +1532,10 @@ def argumentos(argv=None):
     # real
     ap.add_argument('--puerto', default=config.PUERTO_ORTESIS)
     ap.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true')
+    ap.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP',
+                    help='ortesis por Wi-Fi (firmware 1.2 de la ESP32): su IP (sin valor, la de fabrica '
+                         f'{config.IP_ORTESIS_UDP}); en lugar de --puerto. Sin placa: python ortesis_udp_sim.py y --ortesis-udp 127.0.0.1')
+    ap.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
     ap.add_argument('--fuente', choices=sorted(config.FUENTES_EEG), default='puente',
                     help='de donde viene el EEG: puente (puente_lsl.py o el gemelo) o unicornlsl (la app de g.tec)')
     ap.add_argument('--eeg-nombre', dest='eeg_nombre', default=None,
@@ -1555,6 +1571,8 @@ def argumentos(argv=None):
     ap.add_argument('--p_error', type=float, default=0.3)
     ap.add_argument('--seg_revision', type=float, default=10.0)
     a = ap.parse_args(argv)
+    if a.ortesis_sim and a.ortesis_udp:
+        ap.error('--ortesis-sim y --ortesis-udp son excluyentes')
     sim = a.backend == 'sim'
     a.pasos_estatico = a.pasos_estatico or (60 if sim else 30)
     a.pasos_adaptativo = a.pasos_adaptativo or (300 if sim else 120)
@@ -1615,13 +1633,16 @@ def correr(orq, a):
 
 def argumentos_reanudados(inst, a):
     """Los argumentos de la sesion guardada. De la linea de comandos solo se toma lo que
-    puede cambiar tras un cierre inesperado: --ciclo, --puerto y --ortesis-sim."""
+    puede cambiar tras un cierre inesperado: --ciclo, --puerto, --ortesis-sim y --ortesis-udp."""
     if inst['args']['backend'] != a.backend:
         aviso(f"La sesion guardada es '{inst['args']['backend']}', no '{a.backend}'.")
         sys.exit(2)
     r = argparse.Namespace(**inst['args'])
     r.reanudar, r.saltar_calibracion = True, True
     r.puerto, r.ortesis_sim = a.puerto, a.ortesis_sim or r.ortesis_sim
+    r.ortesis_udp, r.udp_puerto = a.ortesis_udp, a.udp_puerto
+    if a.ortesis_udp:
+        r.ortesis_sim = False
     if a.ciclo_cli is not None:
         r.ciclo = a.ciclo_cli
     return r

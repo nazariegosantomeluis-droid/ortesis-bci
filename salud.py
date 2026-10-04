@@ -179,7 +179,7 @@ class Vigilante:
 
     Lecturas que recibe actualizar() (las que falten no cambian su semaforo):
       eeg      = {'edad_s', 'tasa_hz', 'canales': {electrodo: motivo}}
-      ortesis  = {'puerto_ok', 'acks_perdidos', 'latencia_ms'}
+      ortesis  = {'puerto_ok', 'acks_perdidos', 'latencia_ms'} (y, por Wi-Fi, 'paro' y 'bloqueo')
       reloj_ms = deriva del retraso del EEG contra su linea base
       detector = {'fiabilidad', 'congelado', 'epocas'}
       alfa     = potencia alfa occipital (semaforo PILOTO)
@@ -260,10 +260,14 @@ class Vigilante:
     def _ortesis(self, o):
         if not o['puerto_ok']:
             return self._poner('ortesis', R, 'puerto caido')
+        if o.get('paro'):                                   # Wi-Fi: el paro de emergencia de la ortesis esta oprimido
+            return self._poner('ortesis', R, 'paro de emergencia oprimido')
         if o['acks_perdidos'] >= self.u['acks_rojo']:
             return self._poner('ortesis', R, f"{o['acks_perdidos']} ACK perdidos seguidos")
         if o['acks_perdidos'] >= self.u['acks_amarillo']:
             return self._poner('ortesis', A, 'ACK perdido')
+        if o.get('bloqueo'):                                # Wi-Fi: la corriente de los servos paso del limite
+            return self._poner('ortesis', A, 'bloqueo por corriente: la ortesis limita el cierre')
         if o['latencia_ms'] >= self.u['latencia_pico_ms']:
             return self._poner('ortesis', A, f"latencia {o['latencia_ms']:.0f} ms")
         self._poner('ortesis', V, '')

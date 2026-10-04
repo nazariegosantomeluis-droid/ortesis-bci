@@ -2194,6 +2194,100 @@ class _ESP32Falso:
 
 
 @prueba
+def ortesis_udp():
+    """OrtesisUDP (Wi-Fi) contra el firmware simulado en localhost, sin placa: el t_ack queda en el reloj
+    de LSL (pylsl.local_clock) aunque la ESP32 tenga otro origen y deriva, los latidos no tocan el seq de
+    los pasos, un ACK perdido no bloquea, y el paro de emergencia pone la ortesis en ROJO."""
+    import argparse
+    import math
+    import numpy as np
+    from pylsl import local_clock
+    import hardware
+    import orquestador
+    import ortesis_udp_sim as sim
+    from salud import Vigilante
+    # el estimador de inicio por rampa, con telemetria a 10 Hz y un servo a 692 unidades/s
+    vel, inicio = 692.0, 1_000_000 + 37_000
+    tele = [(1_000_000 + 100_000 * k, 500.0 + max(0.0, (1_000_000 + 100_000 * k - inicio) / 1e6) * vel) for k in range(-1, 4)]
+    est = hardware.inicio_por_rampa(tele, 1_000_000, vel)
+    assert abs(est - inicio) < 1.0, (est, inicio)                       # exacto con rampa constante
+    assert abs(hardware.inicio_por_telemetria(tele, 1_000_000) - inicio) > 20_000      # la interpolacion lineal lo adelanta
+    assert hardware.inicio_por_rampa(tele[:2], 1_000_000, vel) is None   # sin movimiento visible
+    fw = sim.FirmwareSimulado(puerto=0, origen_ms=7_654_321).iniciar()     # su reloj en ms no se parece al de LSL
+    try:
+        # el backend crea la ortesis de Wi-Fi con el reloj de LSL, no con time.monotonic
+        por_defecto = hardware.OrtesisUDP('127.0.0.1', fw.puerto)
+        assert por_defecto._clock is local_clock                                          # tambien por defecto
+        por_defecto.cerrar()
+        a = argparse.Namespace(ortesis_sim=False, ortesis_udp='127.0.0.1', udp_puerto=fw.puerto, puerto='COMX')
+        o = orquestador.crear_ortesis(hardware, a)
+        assert isinstance(o, hardware.OrtesisUDP) and o._clock is local_clock and o._clock is not time.monotonic
+        assert o.conectada()
+        time.sleep(1.0)                                                                    # varios latidos: reloj sincronizado
+        desvios, rtts = [], []
+        for k in range(8):
+            antes = local_clock()
+            seq, t_ack, rtt = o.mover(0.3 if k % 2 else 0.6)
+            despues = local_clock()
+            assert seq == k + 1, seq                                                       # los latidos numeran aparte
+            assert antes - 0.005 <= t_ack <= despues + 0.005, (k, antes, t_ack, despues)    # en el reloj de LSL
+            assert o.metodo == 'ack', o.metodo
+            assert 0 <= rtt < 100 and abs(rtt - (despues - antes) * 1000) < 5
+            desvios.append(t_ack - (antes + despues) / 2); rtts.append(rtt)
+            time.sleep(0.3)
+        assert fw.vigilancia is False and sum(1 for s_, _ in fw.recibidos if s_ and s_ > config.UDP_SEQ_LATIDO) > 10
+        assert max(abs(d) for d in desvios) < 0.025, desvios         # ACK en el ciclo de 20 ms de la ESP32
+        # inicio del movimiento por telemetria: cerca del que aplico el firmware (su ciclo es de 20 ms); con el
+        # servo quieto (en el lazo los pasos van a ~2 s, y a 90 grados/s un paso de 0.3 dura 0.4 s)
+        time.sleep(1.5)
+        seq, t_ack, _ = o.mover(0.9)
+        t0, como = o.inicio_movimiento(seq, t_ack)
+        lat = hardware.latencia_mecanica_simulada(seq, 0)
+        assert como in ("telemetria", "ack+latencia") and t_ack <= t0 <= t_ack + 0.5, (como, t0 - t_ack)
+        if como == 'telemetria':
+            assert abs(t0 - (t_ack + lat)) < 0.06, (t0 - t_ack, lat)
+        # el mismo cliente con OTRO reloj (el de LSL mas 5000 s): el t_ack sale en ese reloj
+        otro = lambda: local_clock() + 5000.0
+        fw2 = sim.FirmwareSimulado(puerto=0, origen_ms=42).iniciar()
+        try:
+            o2 = hardware.OrtesisUDP('127.0.0.1', fw2.puerto, reloj=otro)
+            time.sleep(0.8)
+            antes = otro(); seq2, t2, _ = o2.mover(0.5); despues = otro()
+            assert antes - 0.005 <= t2 <= despues + 0.005, (antes, t2, despues)
+            o2.cerrar()
+        finally:
+            fw2.detener()
+        # ACK perdido: sin ACK, no se cuelga y el siguiente paso funciona
+        fw.perder_acks.add(o.seq + 1)
+        t = time.time(); seq3, t_ack3, rtt3 = o.mover(0.4)
+        assert t_ack3 is None and math.isnan(rtt3) and o.acks_perdidos == 1 and time.time() - t < 0.5
+        assert o.mover(0.5)[1] is not None and o.acks_perdidos == 0 and o.seq == seq3 + 1
+        # paro de emergencia: el Vigilante lo pone en ROJO con su motivo
+        v = Vigilante()
+        bien = {'edad_s': 0.02, 'tasa_hz': 250.0, 'canales': {}}
+        v.actualizar(0.0, eeg=bien, ortesis=o.lecturas(), reloj_ms=0.0)
+        assert v.colores['ortesis'] == config.VERDE, v.detalle
+        fw.paro = True
+        time.sleep(0.4)
+        v.actualizar(1.0, eeg=bien, ortesis=o.lecturas(), reloj_ms=0.0)
+        assert o.lecturas()['paro'] and v.colores['ortesis'] == config.ROJO and 'paro' in v.detalle['ortesis']
+        fw.paro = False
+        v2 = Vigilante()
+        v2.actualizar(0.0, eeg=bien, ortesis=dict(o.lecturas(), paro=False, bloqueo=True), reloj_ms=0.0)
+        assert v2.colores['ortesis'] == config.AMARILLO and 'bloqueo' in v2.detalle['ortesis']
+        o.cerrar()
+    finally:
+        fw.detener()
+    # sin placa: no se cuelga; sin telemetria la ortesis cuenta como desconectada
+    muerto = hardware.OrtesisUDP('127.0.0.1', 9, esperar_telemetria_s=0.2)
+    t = time.time(); seq, t_ack, _ = muerto.mover(0.5)
+    assert t_ack is None and not muerto.conectada() and muerto.lecturas()['puerto_ok'] is False and time.time() - t < 0.5
+    muerto.cerrar()
+    return (f'reloj de LSL (desvio del ACK {max(abs(d) for d in desvios) * 1000:.0f} ms, RTT {np.median(rtts):.0f} ms); '
+            f'seq de pasos sin saltos; ACK perdido sin bloqueo; paro en ROJO; sin placa no se cuelga')
+
+
+@prueba
 def ortesis_serial_reconecta():
     """OrtesisSerial contra un ESP32 de mentira: lineas corruptas, ACK perdido, puerto caido y reapertura."""
     import hardware as hw
@@ -3598,7 +3692,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
-           'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
+           'ortesis_serial_reconecta', 'ortesis_udp', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
            'demo_comandos', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

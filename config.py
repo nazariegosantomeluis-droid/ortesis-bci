@@ -227,6 +227,22 @@ LATENCIA_MECANICA_SIM_MS = (30.0, 150.0)   # la de la ortesis simulada (y la que
 # ESP32 -> PC:  "A,<seq>,<t_us>\n"      ACK al aplicar el primer pulso
 #               "T,<t_us>,<angulo>,<fsr>\n"   telemetria a 50 Hz
 
+# ============================ Ortesis (Wi-Fi, UDP) ============================
+# Firmware 1.2 de la ESP32 (red propia «Adaptrode»): JSON por UDP. Alternativa al USB: orquestador.py --ortesis-udp.
+IP_ORTESIS_UDP     = '192.168.4.1'
+PUERTO_ORTESIS_UDP = 8888
+# PC -> ESP32:  {"seq": 12, "cierre": 0.35, "pulgar": 0.35, "p": 0.5}   (fracciones 0 abierta, 1 cerrada)
+# ESP32 -> PC:  {"ack": 12, "t_ms": 532118}   ACK al llegar un seq nuevo, con el reloj de la ESP32 (ms)
+#               telemetria cada 100 ms: {"seq", "cierre", "pulgar", "i_ma", "fuerza", "paro", "bloqueo",
+#               "vigilancia", "ang", "msg", "ver", "t_ms"}
+UDP_LATIDO_S        = 0.1       # el firmware abre la mano si pasan 0.5 s sin ordenes: la PC repite el estado cada 100 ms
+UDP_ESPERA_ACK_S    = 0.3       # un ACK que tarda mas cuenta como perdido (el mismo plazo que por USB)
+UDP_TELEMETRIA_VIVA_S = 1.0     # sin telemetria en este tiempo, la ortesis cuenta como desconectada
+UDP_SEQ_LATIDO      = 1_000_000_000   # los latidos numeran aparte (desde aqui): seq de los pasos sigue de uno en uno
+UDP_VEL_MAX_GRADOS_S = 90.0     # velocidad del servo en el firmware (CFG['vel_max']); la telemetria es lenta y se extrapola con ella
+UDP_RECORRIDO_DEDOS_GRADOS = 130.0   # abierta 20, cerrada 150 de fabrica (la telemetria informa los vigentes en 'ang')
+UDP_MUESTRAS_RELOJ  = 200       # pares (hora ESP32, hora de la PC) para convertir relojes: ~20 s de latidos
+
 # ============================ Salud ============================
 # piloto: alfa occipital contra su linea base (somnolencia, ojos cerrados o desconexion de la
 # tarea). Solo avisa: no pausa, no excluye pasos y no cuenta en la escalera de degradacion.
