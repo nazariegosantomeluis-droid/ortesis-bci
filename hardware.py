@@ -457,7 +457,6 @@ class _OrtesisBase:
 
     def __init__(self):
         self.seq = 0
-        self.latencias_ms = deque(maxlen=200)
         self.telemetria = {}
         self.acks_perdidos = 0            # consecutivos
         self.puerto_ok = True
@@ -467,12 +466,6 @@ class _OrtesisBase:
         self._reloj_esp = RelojEsp32()
         self.latencias_mecanicas = deque(maxlen=100)   # s entre el ACK y el inicio real
 
-    def jitter(self):
-        lat = np.array(self.latencias_ms)
-        if lat.size < 2:
-            return float('nan'), float('nan')
-        return float(lat.mean()), float(lat.std())
-
     def lecturas(self):
         """Lo que el Vigilante necesita de la ortesis."""
         return {'puerto_ok': self.puerto_ok, 'acks_perdidos': self.acks_perdidos,
@@ -480,7 +473,6 @@ class _OrtesisBase:
 
     def _con_ack(self, seq, t_envio, t_ack):
         lat = (t_ack - t_envio) * 1000
-        self.latencias_ms.append(lat)
         self.acks_perdidos, self.ultima_latencia = 0, lat
         return seq, t_ack, lat
 
