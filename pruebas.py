@@ -1119,6 +1119,52 @@ def narrador_jurado():
 
 # ------------------------------------------------------------ tablero
 @prueba
+def tablero_flechas():
+    """--flechas: la contribucion de cada ErrP al cambio de beta (tamano y direccion), sin pantalla;
+    el reinicio de beta entre bloques del control causal no cuenta como flecha, y en el ciego queda oculto."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from pyqtgraph.Qt import QtWidgets
+    import tablero
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    paso = {'tipo': 'paso', 'estado': 'LAZO_ADAPTATIVO', 'meta': 1, 'angulo': 0.5, 'p_crudo': 0.6, 'b': 0.5,
+            'p_prima': 0.6, 'P_hat': 0.7, 'error': 1, 'error_sombra': 1, 'sd_beta': 0.5, 'youden': 0.6,
+            'fiabilidad': 1.0, 'congelado': False, 'cambio': '', 'latencia_ms': 5.0, 'perturbado': False,
+            'salud': {'eeg': 'VERDE', 'ortesis': 'VERDE', 'reloj': 'VERDE', 'detector': 'VERDE'}}
+    # la funcion pura
+    a = {**paso, 'paso': 1, 'beta': 0.0, 'bloque': None}
+    assert tablero.contribucion_beta(None, a) == 0.0 and tablero.contribucion_beta(0.0, a, None) == 0.0
+    assert abs(tablero.contribucion_beta(0.0, {**a, 'paso': 2, 'beta': 0.4}, a) - 0.4) < 1e-12
+    assert abs(tablero.contribucion_beta(0.4, {**a, 'paso': 3, 'beta': 0.1}, {**a, 'paso': 2}) + 0.3) < 1e-12
+    assert tablero.contribucion_beta(0.4, {**a, 'paso': 1, 'beta': 0.0}, {**a, 'paso': 9}) == 0.0          # sesion nueva
+    assert tablero.contribucion_beta(1.2, {**a, 'paso': 5, 'beta': 0.0, 'bloque': 'B'}, {**a, 'paso': 4, 'bloque': 'A'}) == 0.0
+    # el tablero
+    t = tablero.Tablero(flechas=True)
+    sin = tablero.Tablero()
+    try:
+        t.timer.stop(); sin.timer.stop()
+        assert len(t.p) == 6 and len(sin.p) == 5 and not hasattr(sin, 'lbl_flecha')        # apagado por defecto
+        betas = [(0.0, True), (0.5, True), (0.3, True), (0.3, False), (-0.2, True)]
+        for i, (b, det) in enumerate(betas, 1):
+            t._procesar({**paso, 'paso': i, 'beta': b, 'detectado': det})
+        t._dibujar()
+        assert np.allclose(list(t.d['db']), [0.0, 0.5, -0.2, 0.0, -0.5]), list(t.d['db'])
+        assert 'RELAJAR' in t.lbl_flecha.text() and '-0.50' in t.lbl_flecha.text(), t.lbl_flecha.text()
+        assert len(t.c_puntas.data) == 3                                                    # 3 flechas: los pasos con cambio
+        # control causal ciego: sin flechas hasta revelar
+        t._procesar({'tipo': 'bloque_sham', 'letra': 'A', 'nombre': 'sham', 'pasos': 80, 'fuente': 'nula'})
+        t._procesar({**paso, 'paso': 6, 'beta': -0.3, 'detectado': False, 'bloque': 'A'})
+        t._dibujar()
+        assert 'oculto' in t.p[5].titleLabel.text and len(t.c_puntas.data) == 0
+        t.btn_sham.setChecked(True)
+        t._dibujar()
+        assert 'oculto' not in t.p[5].titleLabel.text and len(t.c_puntas.data) > 0
+    finally:
+        t.close(); sin.close()
+    return 'flechas con tamano y direccion; ciego en el control causal; apagado por defecto'
+
+
+@prueba
 def tablero_salud():
     """El tablero (sin pantalla) pinta los cuatro semaforos y PAUSA_SEGURA en rojo con el electrodo."""
     import os
@@ -2759,7 +2805,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
