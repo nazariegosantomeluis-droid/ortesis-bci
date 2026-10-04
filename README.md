@@ -229,6 +229,28 @@ El **«sham ciego»** lo confirma por el otro lado. Recibe `p_errp` sacados al a
 
 La conclusión para el control: el contraste limpio no es «ErrP ordenados contra desordenados», sino **«con la evidencia del ErrP contra sin ella»**. El sham permutado sigue disponible para mostrarlo (`--sham-fuente recientes`); el ciego se descartó para el lazo y queda en el estudio.
 
+### Prior de error por paso: la frontera del sham ciego (EXPLORATORIO, apagado por defecto)
+
+Hipótesis (4 de octubre): el sham ciego se recupera 7 de 16 porque, con el agente muy seguro y equivocado, `P_hat` promedia el **prior global** de error y el gradiente empuja `beta` sin información real. Se probó dar a cada paso como prior el error que el propio agente predice, `1 − max(p', 1 − p')`, con un piso ε (`ConfigAgente.prior_por_paso` y `piso_prior`; en `config`, `PRIOR_POR_PASO = False` y `PISO_PRIOR_PASO = 0.05`; ε = `None` es la tasa global, el prior global vivo del agente). **El valor por defecto no cambió: pendiente de que Luis lo apruebe.**
+
+Medido en el gemelo sin LSL (`python estudios/prior_por_paso.py`: 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10, detector actual). **Es el gemelo, no una persona.**
+
+| ε | Real se recupera | Sham ciego se recupera | Sham − real, ciego (IC 90 %) | Control negativo: sin ErrP, recupera en 2 min |
+|---|---|---|---|---|
+| sin la bandera (prior global) | 16/16 | 7/16 | +0.126 [+0.095, +0.156] | 3/16 |
+| 0 | 16/16 | 1/16 | +0.170 [+0.140, +0.196] | 0/16 |
+| 0.05 | 16/16 | 2/16 | +0.183 [+0.154, +0.210] | 0/16 |
+| **0.10** | 16/16 | 2/16 | +0.158 [+0.127, +0.191] | 0/16 |
+| 0.15 | 16/16 | 4/16 | +0.152 [+0.124, +0.179] | 0/16 |
+| 0.20 | 16/16 | 7/16 | +0.140 [+0.100, +0.179] | 8/16 |
+| tasa global | 16/16 | 11/16 | +0.109 [+0.074, +0.145] | 16/16 |
+
+- **La frontera está entre ε = 0.10 y 0.15:** con ε ≤ 0.10 se cumple el criterio de `TAREAS.md` también con el sham ciego (real ≥ 12, sham ≤ 3, intervalo sin el 0) y el control negativo da 0 de 16. Con 0.15 el ciego llega a 4 de 16 (justo fuera). Desde 0.20 el piso vuelve a mezclar el prior global y el control negativo falla (8 de 16, y 16 de 16 con la tasa global): **la tasa global como piso está descartada.**
+- **El control negativo es obligatorio** (`CLAUDE.md`): se midió en el lazo de `estudios/agente_lento.py` (todo paso visible, sin topes), con el agente recibiendo siempre la tasa base (LLR = 0). Sin la bandera dio 3 de 16 (la referencia del README decía 4 de 16: varía entre corridas). Con la bandera y ε ≤ 0.15, 0 de 16. Con el sham `nula` del orquestador (el de la demo) el sham se recupera 0 de 16 con ε ≤ 0.20.
+- **Costo con detectores peores** (ε entre 0 y 0.10): con el detector de ayer el real se recupera 12 a 15 de 16 (sin la bandera, 15 de 16) y el sham ciego 0 a 1 de 16 (antes 5); con el débil el real baja de 11 a 9–10 de 16 con ε ≤ 0.05 y queda en 10 a 12 de 16 con 0.10 (ese detector ya no cumplía el criterio). Con ε = 0.10 el bloque real queda a una sesión o menos de la base en los tres detectores. Las diferencias de 1 a 2 sesiones sobre 16 no se distinguen del azar.
+- **Qué dice esto del mecanismo:** consistente con la hipótesis, pero no la prueba. Con ε bajo, un ErrP en una decisión muy segura del agente se lee como probable falsa alarma y empuja poco; solo un ErrP que sigue llegando con la perturbación (el real) la contrarresta. Queda sin medir si el costo de ε bajo aparece con una persona (el ErrP real puede ser más ruidoso que el del gemelo).
+- Recomendación (no aplicada): si se enciende para la final, **ε = 0.10**, y entonces el ciego (`--sham-fuente calibracion`, hoy solo en `estudios/sham_gemelo.py`) podría competir con `nula`. Ninguna de las dos cosas está en el orquestador todavía.
+
 ### Lo que una sola sesión puede mostrar
 
 Tras la perturbación quedan 70 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.3 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 2 de 12 en el sham (`pruebas.py`, `orquestador_sham`).

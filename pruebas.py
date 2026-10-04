@@ -207,6 +207,41 @@ def agente_basico():
 
 
 @prueba
+def prior_por_paso():
+    """Prior de error por paso (experimental, apagado): el error que el agente predice, con un piso."""
+    from agente_errp import AgenteErrP, ConfigAgente
+    assert config.PRIOR_POR_PASO is False and ConfigAgente().prior_por_paso is False     # apagado por defecto
+    kw = dict(salida_detector='calibrada', p_error_calibracion=0.3)
+    phi = np.array([6.0])                                    # decoder muy seguro: p' ~ 0.998, error predicho ~ 0.002
+
+    def p_hat(**c):
+        ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, **c))
+        d = ag.decidir(phi)
+        return ag.actualizar(0.9, False, 1.0)['P_hat'], d.p_prima, ag
+    base, p_prima, _ = p_hat()
+    assert p_prima > 0.99
+    for piso, esperado in ((0.0, 0.0), (0.05, 0.05), (0.10, 0.10), (None, 0.2)):         # None: la tasa global (prior 0.2)
+        ph, _, ag = p_hat(prior_por_paso=True, piso_prior=piso)
+        prior = max(1 - max(p_prima, 1 - p_prima), esperado)
+        assert abs(ag.prior_del_paso() - ag.prior) < 1e-12                               # sin paso pendiente: el global
+        llr = np.log(0.9 / 0.1) - np.log(0.3 / 0.7)
+        previsto = float(1 / (1 + np.exp(-(np.log(max(prior, 1e-6) / (1 - max(prior, 1e-6))) + llr))))
+        assert abs(ph - previsto) < 1e-6, (piso, ph, previsto)
+        assert ph <= base + 1e-12                                                                 # seguro y con prior bajo: duda menos del paso
+    # con un paso dudoso (p' ~ 0.5) el error predicho (0.5) pasa por encima del piso
+    ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, prior_por_paso=True, piso_prior=0.05))
+    d = ag.decidir(np.array([0.0]))
+    assert abs(ag.prior_del_paso(d) - 0.5) < 1e-9
+    for malo in (-0.1, 0.5):
+        try:
+            ConfigAgente(prior_por_paso=True, piso_prior=malo)
+            raise AssertionError('debio rechazar el piso')
+        except ValueError:
+            pass
+    return 'apagado por defecto; con epsilon 0, 0.05, 0.10 y tasa global el prior de cada paso es el error predicho con piso'
+
+
+@prueba
 def p_hat_refleja_errp():
     """P_hat dice lo que vio el detector aunque el agente no este aprendiendo (bloque estatico,
     aprendizaje congelado, reloj en ROJO). Antes, con salida calibrada, quedaba igual al prior."""
@@ -2794,13 +2829,47 @@ def lazo_real_caos():
     return f"{pausas} pausas, todas reanudadas; {linea('excluidos del analisis')}; {linea('[CP4]')}"
 
 
+@prueba
+def parpadeos_cruzan_bloques():
+    """En vivo el gemelo genera bloques de ~20 ms (5 muestras) y un parpadeo dura 0.3 s: tiene
+    que seguir de un bloque al otro. Antes se recortaba al bloque y casi no habia parpadeos."""
+    import cerebro_sintetico as cs
+    fz = config.CANALES_EEG.index('Fz')
+
+    def correr(parpadeo):
+        cer, t, xs = cs.Cerebro(cs._args(parpadeos=0.0, semilla=3)), 0.0, []
+        if parpadeo:
+            cer.parpadeos_vivos.append(0.5)          # un parpadeo que empieza a los 0.5 s
+        for _ in range(100):                          # 2 s en bloques de 5 muestras
+            x, t = cs._bloque(cer, t, 0.02)
+            assert x.shape[1] == 5
+            xs.append(x)
+        return np.hstack(xs)
+    # misma realizacion con y sin el parpadeo: la diferencia es el parpadeo solo
+    d = correr(True) - correr(False)
+    forma = np.abs(d[fz])
+    assert 100 < forma.max() < 160, forma.max()                       # ~120 uV en Fz (la mezcla entre electrodos lo ajusta)
+    assert 65 <= (forma > 1.0).sum() <= 80, (forma > 1.0).sum()       # ~0.3 s a 250 Hz, no 5 muestras
+    assert np.abs(d[fz]).max() > 3 * np.abs(d[config.CANALES_EEG.index('Oz')]).max()   # frontal
+    assert len(cs.Cerebro(cs._args()).parpadeos_vivos) == 0
+    # con la tasa de verdad, en bloques de 5 muestras, los parpadeos aparecen y son maximos en Fz
+    import hardware as hw
+    cer, t, xs = cs.Cerebro(cs._args(parpadeos=0.6, semilla=1)), 0.0, []
+    for _ in range(1000):                             # 20 s
+        x, t = cs._bloque(cer, t, 0.02)
+        xs.append(x)
+    pp = np.ptp(hw.filtrar(np.hstack(xs), (1.0, 10.0), cs.FS), axis=1)
+    assert int(np.argmax(pp)) == fz and pp[fz] > 80, pp.round(0)
+    return f'parpadeo de {int((forma > 1.0).sum())} muestras en bloques de 5; en vivo, maximo en Fz ({pp[fz]:.0f} uV pico a pico)'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
-           'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
+           'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
