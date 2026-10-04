@@ -2,6 +2,18 @@
 
 Órtesis de mano controlada por imaginación motora, con un agente que se corrige solo usando el **potencial de error (ErrP)** del cerebro como recompensa.
 
+## Tres escalas de aprendizaje
+
+El sistema aprende en tres escalas de tiempo, y en las tres la última palabra sobre lo que cambia la tiene una regla explícita o una persona:
+
+| Escala | Quién aprende | Cada cuánto | De qué aprende | Estado |
+|---|---|---|---|---|
+| Rápida | El **agente bayesiano** (`agente_errp.py`) | cada paso (~2 s) | Del ErrP del piloto: corrige el sesgo del decoder | En la demo |
+| Media | El **detector co-adaptativo** (`hardware.DetectorCoadaptativo`) | cada ~20 pasos | De las épocas del propio lazo: se re-entrena y se prueba en sombra antes de entrar | En la demo |
+| Lenta | **Claude como co-investigador** (`ia.py`) | entre bloques y entre sesiones | De un resumen agregado del bloque: propone continuar, pausar, ajustar un parámetro o recalibrar | Apagado por defecto |
+
+La escala lenta nunca toca el lazo de control: recibe solo métricas agregadas y anónimas (nunca EEG crudo), su propuesta se valida contra rangos seguros en `config.py` y **nada cambia sin que una persona la apruebe**. Sin llave o sin conexión, las mismas decisiones salen de reglas deterministas.
+
 ## Hardware
 
 El casco de la demo es un **g.tec Unicorn Hybrid Black**: 8 canales de EEG a 250 Hz por Bluetooth, más acelerómetro y giroscopio de 3 ejes, batería, contador de muestras e indicador de validez. El contrato (`config.py`) usa su montaje y le da un papel a cada sensor:
@@ -24,7 +36,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 47/47 pruebas pasaron
+python pruebas.py                    # debe decir 49/49 pruebas pasaron
 ```
 
 ## Archivos
@@ -45,6 +57,8 @@ python pruebas.py                    # debe decir 47/47 pruebas pasaron
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
 | `repetir_sesion.py` | Plan B: repite en el tablero, y si se quiere en la órtesis, una sesión grabada (`resultados/sesion_..._estado.jsonl`). |
 | `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
+| `ia.py` | Lo común a toda la IA: llave desde `.env`, lo que puede salir hacia la API (`sanear`), preguntas con herramientas, y el esquema, la validación y las reglas deterministas de las propuestas. Nada de esto corre dentro del lazo. |
+| `copiloto.py` | Copiloto clínico: preguntas sobre una sesión respondidas con herramientas sobre su CSV, e informe entre sesiones. |
 | `tablero.py` | Tablero en vivo de 5 paneles, con cuatro semáforos en la cabecera (EEG, órtesis, detector y piloto), el aviso AUTOMATICO de los movimientos ajenos y una línea con el IIC. |
 | `ver_flujos.py` | Diagnóstico: qué flujos LSL hay en la red y qué publican. |
 | `pruebas.py` | Pruebas automáticas sin hardware. |
@@ -212,6 +226,36 @@ python orquestador.py real --puerto COM4 --control-reposo      # también con --
 ```
 
 Medido en el gemelo sin LSL (EXPLORATORIO; `pruebas.py`, prueba `controles_especificidad`, 6 sujetos): con el piloto en reposo pasa en 6 de 6 (AUC 0.34 a 0.64); si el piloto imagina lo que hace la órtesis, se detecta en 6 de 6 (AUC 0.84 a 0.96). Con `p` independiente de la dirección da falsa alarma en ~5 % de las veces, como corresponde. **Falta probarlo con el casco: el gemelo no tiene ruido de servos, que es justo lo que este control busca.**
+
+## Copiloto clínico (`copiloto.py`)
+
+Preguntas en lenguaje natural sobre una sesión, respondidas **solo con sus datos**. El copiloto no ve el EEG: consulta cinco herramientas que leen el CSV de la sesión y su registro `_estado.jsonl` (eventos del flujo `Estado`, checkpoints y marcadores):
+
+| Herramienta | Qué devuelve |
+|---|---|
+| `resumen_sesion()` | Pasos, error del agente y de la sombra por bloque, recuperación, excluidos, BA viva, congelamientos, cambios y checkpoints. |
+| `eventos(desde, hasta, tipo)` | Pausas (con su causa), congelamientos, cambios detectados, perturbaciones, checkpoints y cambios de semáforo. |
+| `metrica(nombre, bloque)` | Error con intervalos y la diferencia sombra − agente, tiempo de recuperación, BA viva, fiabilidad, latencia del ACK, excluidos por motivo, alfa occipital y errores sin ErrP según el tamaño del paso. |
+| `pasos(desde, hasta, columnas)` | Filas puntuales del CSV, 40 como máximo por llamada. |
+| `comparar_sesiones(rutas)` | Las cifras clave de esta sesión junto a las de otras (por defecto, la anterior). |
+
+Toda respuesta cita los pasos y los valores que usó. Si el dato no existe, la herramienta lo dice («no hay dato: …») y el copiloto lo repite; nunca estima.
+
+```bash
+python copiloto.py --ultima "¿cuánto tardó en recuperarse tras la perturbación?"
+python copiloto.py --sesion resultados/sesion_real_....csv          # modo interactivo
+python tablero.py --copiloto                                        # caja de preguntas en el tablero
+python copiloto.py --ultima --informe                               # informe entre sesiones
+python copiloto.py --ultima --decidir aprobar                       # la propuesta la decide una persona
+```
+
+**Con y sin IA.** Con la llave en un archivo `.env` (`ANTHROPIC_API_KEY=...`; está en `.gitignore`) responde Claude (`claude-opus-5-5`) llamando a esas herramientas. Sin llave, sin conexión, o si la API falla o declina, responden plantillas deterministas sobre las mismas herramientas, y la respuesta lo dice. Las seis preguntas de prueba se responden de las dos formas: por qué se congeló el aprendizaje en el paso N, cuánto tardó en recuperarse, si el agente le ganó a la sombra y con qué certeza, si hubo señales de fatiga, cuántos pasos se excluyeron y por qué, y cómo se compara con la sesión anterior.
+
+**Informe entre sesiones.** `--informe` compara la sesión con las anteriores (las tres previas del mismo tipo, o `--anteriores`) y escribe cuatro Markdown junto al CSV: para el terapeuta (cifras, tabla comparativa y propuesta) y para el paciente (lenguaje sencillo), en español y en inglés, con dos figuras. Las cifras siempre salen del código; con IA, Claude escribe solo el párrafo de interpretación. El informe incluye una **propuesta para la próxima sesión** en JSON, con el mismo esquema y los mismos rangos seguros que el co-investigador; queda pendiente en `sesion_..._propuestas.jsonl` hasta que una persona la apruebe o la rechace.
+
+**Qué sale hacia la API.** Solo lo que devuelven las herramientas, y todo pasa por `ia.sanear`: quita las carpetas de las rutas (llevan el nombre de usuario de la máquina) y se niega a enviar una lista de más de 200 números, que sería una señal cruda. Los archivos de sesión no tienen nombres de personas.
+
+**Sin probar con la API real:** el 3 de octubre no había llave en la máquina. Todo está probado con una API simulada (`pruebas.py`: `copiloto_herramientas` y `copiloto_api_simulada`); la primera llamada real hay que hacerla antes de encenderlo en la final.
 
 ## Resiliencia: el lazo que no se cae
 

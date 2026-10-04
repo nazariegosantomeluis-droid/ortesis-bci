@@ -8,3 +8,4 @@ pyriemann
 pyqtgraph
 PyQt5
 pyserial
+anthropic

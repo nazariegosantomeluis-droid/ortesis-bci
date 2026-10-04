@@ -306,3 +306,35 @@ ESTADO_SESION_JSON = RESULTADOS / 'estado_sesion.json'
 SUFIJO_ESTADO = '_estado.jsonl'
 # modelos calibrados hace mas que esto: aviso al cargarlos (pueden ser de otro piloto o del gemelo)
 MODELOS_EDAD_AVISO_H = 6.0
+
+# ============================ IA (copiloto, co-investigador y narrador) ============================
+# Reglas en ia.py. Todo esto esta apagado por defecto y nada corre dentro del lazo de control.
+ARCHIVO_ENV = RAIZ / '.env'             # ANTHROPIC_API_KEY=...  (en .gitignore)
+IA_MODELO = 'claude-opus-5-5'           # modelo vigente al 3 de octubre de 2026 (guia oficial de la API)
+IA_ESFUERZO = 'medium'                  # output_config.effort: low | medium | high | xhigh | max
+IA_MAX_TOKENS = 16000
+IA_TIEMPO_MAX_S = 60.0                  # por peticion; el narrador usa uno mucho mas corto
+IA_MAX_VUELTAS = 8                      # peticiones de herramientas por pregunta
+IA_MAX_LISTA = 200                      # una lista de numeros mas larga no se envia: seria una senal cruda
+COPILOTO_MAX_FILAS = 40                 # filas del CSV que devuelve la herramienta pasos() de una vez
+PASO_CHICO = 0.15                       # |delta| menor que esto es un paso "chico" (pasos sin ErrP por tamano)
+# Propuestas (co-investigador entre bloques y proxima sesion del copiloto): esquema fijo en
+# ia.ESQUEMA_PROPUESTA. Un parametro que no esta aqui no se puede proponer, y un valor fuera de su
+# rango se rechaza antes de mostrarselo a nadie. Nada se aplica sin la aprobacion de una persona.
+ACCIONES_PROPUESTA = ('continuar', 'pausa', 'ajustar_parametro', 'recalibrar')
+PARAMETROS_PROPUESTA = {
+    'paso_visible': (0.05, 0.12),       # ConfigAgente.paso_visible: el paso minimo que se le muestra al piloto
+    'paso_max':     (0.15, 0.35),       # ConfigAgente.paso_max: nunca mas de un tercio del recorrido por paso
+    'ganancia':     (0.15, 0.45),       # ConfigAgente.ganancia
+    'ajenos_cada':  (0, 20),            # movimientos ajenos de la Tarea 2 (0 = ninguno)
+    'pausa_s':      (30, 300),          # solo para la accion 'pausa': descanso con la ortesis abierta
+}
+PROPUESTA_MAX_JUSTIFICACION = 600
+SUFIJO_PROPUESTAS = '_propuestas.jsonl'  # junto al CSV: cada propuesta, su decision y su efecto
+# umbrales de las reglas deterministas (ia.propuesta_por_reglas), las que se usan sin API
+REGLAS_PROPUESTA = {
+    'pasos_min': 30,                    # con menos pasos validos no se propone nada
+    'excluidos_max': 0.25, 'pausa_s': 60,
+    'ba_recalibrar': 0.60, 'congelado_max': 0.5,
+    'errores_min': 8, 'dif_sin_errp': 0.25, 'paso_visible_incremento': 0.02,
+}

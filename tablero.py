@@ -13,7 +13,11 @@ En la cabecera, tres semaforos de salud (EEG, ortesis, detector; gris = el detec
 aun calienta). En PAUSA_SEGURA el estado se pone en rojo y dice el motivo y, si es
 un electrodo, cual falla y por que.
 
+Con --copiloto, una caja de texto para preguntarle al copiloto clinico (copiloto.py) sobre la
+sesion mas reciente; responde en otro hilo, sin detener el tablero.
+
 Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
+      python tablero.py --copiloto          (con la caja de preguntas)
       python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
 """
 import argparse
@@ -37,7 +41,7 @@ VENTANA = 20     # para el error movil
 
 
 class Tablero(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, copiloto=False):
         super().__init__()
         self.setWindowTitle('ortesis-bci · Tablero')
         self.resize(1200, 900)
@@ -78,6 +82,17 @@ class Tablero(QtWidgets.QWidget):
         fila.addWidget(self.btn_sham)
         lay.addLayout(fila)
         self.sham_bloque, self.sham_comparacion = None, None
+        # copiloto clinico (--copiloto): una pregunta sobre la sesion mas reciente, respondida en otro hilo
+        self._respuesta, self._pensando = None, False
+        if copiloto:
+            self.caja = QtWidgets.QLineEdit()
+            self.caja.setPlaceholderText('Pregunta al copiloto sobre la sesion y pulsa Enter')
+            self.caja.returnPressed.connect(self._preguntar)
+            self.lbl_copiloto = QtWidgets.QLabel('')
+            self.lbl_copiloto.setWordWrap(True)
+            self.lbl_copiloto.setStyleSheet('font-size:12px; padding:2px 4px;')
+            lay.addWidget(self.caja)
+            lay.addWidget(self.lbl_copiloto)
 
         self.g = pg.GraphicsLayoutWidget()
         lay.addWidget(self.g)
@@ -135,7 +150,31 @@ class Tablero(QtWidgets.QWidget):
                 self._buscando = False
         threading.Thread(target=buscar, daemon=True).start()
 
+    def _preguntar(self):
+        q = self.caja.text().strip()
+        if q and not self._pensando:
+            self._pensando = True
+            self.lbl_copiloto.setText('El copiloto esta consultando la sesion...')
+            threading.Thread(target=self._responder, args=(q,), daemon=True).start()
+
+    def _responder(self, q):
+        """En otro hilo: no toca la ventana, deja la respuesta para _mostrar_respuesta()."""
+        try:
+            import copiloto
+            import ia
+            ruta = max(config.RESULTADOS.glob('sesion_*.csv'), key=lambda p: p.stat().st_mtime)
+            txt, origen, _ = copiloto.responder(copiloto.Sesion(ruta), q, ia.cliente())
+            self._respuesta = f'[{ruta.name} · {origen}] {txt}'
+        except Exception as e:                   # sin sesiones, CSV a medias...: nunca tumba el tablero
+            self._respuesta = f'El copiloto no pudo responder: {e}'
+
+    def _mostrar_respuesta(self):
+        if self._respuesta is not None:
+            self.lbl_copiloto.setText(self._respuesta)
+            self._respuesta, self._pensando = None, False
+
     def _actualizar(self):
+        self._mostrar_respuesta()
         if self.inlet is None:
             if self._encontrado is not None:
                 self.inlet = self._encontrado
@@ -290,9 +329,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--captura', help='guarda una imagen del tablero y sale')
     ap.add_argument('--segundos', type=float, default=15)
+    ap.add_argument('--copiloto', action='store_true', help='caja de preguntas al copiloto clinico')
     a = ap.parse_args()
     app = QtWidgets.QApplication(sys.argv)
-    t = Tablero()
+    t = Tablero(copiloto=a.copiloto)
     t.show()
     if a.captura:
         def salir():

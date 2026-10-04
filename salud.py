@@ -200,6 +200,7 @@ class Vigilante:
         self._canal_malo = False
         self._t_verde = None
         self._alfa_t0, self._alfa_base, self._alfa_linea = None, [], None
+        self.alfa_rel = None             # ultimo alfa occipital contra su linea base (None: aun calienta)
 
     def actualizar(self, t, eeg=None, ortesis=None, reloj_ms=None, detector=None, alfa=None):
         """Devuelve los cambios de color [(subsistema, color)], para publicarlos como marcador."""
@@ -252,7 +253,7 @@ class Vigilante:
             return
         if self._alfa_linea is None:
             self._alfa_linea = float(np.median(self._alfa_base)) if self._alfa_base else alfa
-        r = alfa / self._alfa_linea
+        r = self.alfa_rel = alfa / self._alfa_linea
         self._poner('piloto', self._nivel(r, 'piloto_amarillo', 'piloto_rojo'),
                     f'alfa occipital x{r:.1f} de su linea base (somnolencia u ojos cerrados?)')
 

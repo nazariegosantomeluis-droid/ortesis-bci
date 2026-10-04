@@ -6,3 +6,4 @@ modelos/*.pkl
 *.xdf
 .superpowers/
 modelos/*.npz
+.env

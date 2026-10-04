@@ -31,8 +31,10 @@ Windows + Git Bash + Python 3.11 en `.venv` (`source .venv/Scripts/activate`). D
 | `puente_lsl.py` | BrainFlow → LSL (`--placa unicorn --serie <num>`, sintética, playback, Cyton): flujos `EEG` e `IMU` con hora por contador y registro de huecos de Bluetooth. |
 | `verificar_unicorn.py` | Verificación del casco real en menos de 5 minutos (orden de canales, unidades, contador, IMU, batería, validez) con veredicto de qué fuente usar. |
 | `embodiment.py` | Tarea 2 mínima (EXPLORATORIO): `amplitud_n1` (N1 visual en PO7/Oz/PO8) e `IndiceEmbodiment` (IIC = d de Cohen de la N1 de movimientos ajenos contra propios correctos, intervalo bootstrap y tendencia). Los movimientos ajenos (1 de cada 10 pasos del lazo adaptativo, anunciados y hacia la meta) los hace `Orquestador.paso_ajeno`; el gemelo atenúa la N1 propia con `--embodiment`. |
+| `ia.py` | Lo común a toda la IA (apagada por defecto, nunca dentro del lazo): `cargar_env`/`cliente` (llave `ANTHROPIC_API_KEY` desde `.env`; `None` sin llave), `sanear` (lo único que sale hacia la API: sin rutas ni listas largas de números), `conversar` (lazo manual de herramientas con `config.IA_MODELO`), `pedir_json` (salida estructurada), `ESQUEMA_PROPUESTA`, `validar_propuesta` (rangos seguros de `config.PARAMETROS_PROPUESTA`), `propuesta_por_reglas` y `proponer` (API si responde algo válido; si no, reglas). |
+| `copiloto.py` | Copiloto clínico: `Sesion` (CSV + `_estado.jsonl`: eventos, checkpoints y marcadores) con las herramientas `resumen_sesion`, `eventos_de`, `metrica`, `pasos` y `comparar_sesiones`; `responder` (Claude con herramientas, o `responder_reglas` por plantillas); `informe` (4 Markdown, figuras y propuesta para la próxima sesión); registro de propuestas, decisiones y efectos en `sesion_..._propuestas.jsonl`. |
 | `repetir_sesion.py` | Plan B: vuelve a publicar en el flujo `Estado` lo que una sesión grabó en `resultados/sesion_..._estado.jsonl` (`config.SUFIJO_ESTADO`; lo escribe `Salidas.estado`), al ritmo original o más rápido; con `--puerto` la órtesis repite los ángulos. |
-| `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). |
+| `tablero.py` | Tablero pyqtgraph de 5 paneles que escucha el flujo `Estado` (JSON por paso). Con `--sham`, línea del control causal y botón *Revelar bloques*; con `--copiloto`, caja de preguntas al copiloto (responde en otro hilo). |
 | `ver_flujos.py`, `pruebas.py` | Diagnóstico LSL y pruebas automáticas. |
 
 Flujo del domingo: `puente_lsl.py` (o `cerebro_sintetico.py`) → LSL `EEG` → `orquestador.py` → órtesis por USB (protocolo `M`/`A`/`T` en `config.py`) y flujos `Marcadores`, `Paso`, `Estado` → `tablero.py` y LabRecorder.
@@ -57,6 +59,8 @@ python estudios/paso_sin_movimiento.py    # control negativo con los topes del r
 python orquestador.py real --ortesis-sim --sham   # control causal: bloque real contra bloque sham (60 pasos cada uno)
 python estudios/sham_gemelo.py            # criterio de aceptacion de --sham en el gemelo (~2 min)
 python orquestador.py real --ortesis-sim --control-reposo   # tras calibrar: la ortesis se mueve sola y p(t) no debe seguirla
+python copiloto.py --ultima "cuanto tardo en recuperarse?"   # copiloto clinico (sin llave: plantillas); --informe, --decidir
+python tablero.py --copiloto              # tablero con la caja de preguntas al copiloto
 ```
 
 ## Cosas que muerden
@@ -71,6 +75,8 @@ python orquestador.py real --ortesis-sim --control-reposo   # tras calibrar: la 
 - **Todo cambio al aprendizaje del agente debe pasar el control negativo** (`estudios/agente_lento.py`, variantes `CONTROL sin evidencia del ErrP`, y el detector sin información en su `simulador()`): si el agente se recupera sin la evidencia del ErrP, lo está moviendo el supuesto de metas balanceadas y no el ErrP. "Subir el prior de error a 0.5 al detectar un cambio" acelera mucho y falla ese control: descartado el 3 de octubre.
 - **El sham que permuta los `p_errp` no es un control válido para este agente** (3 de octubre, `estudios/sham_gemelo.py`): conserva la tasa de ErrP y, con las decisiones cargadas a un lado tras la perturbación, la tasa sola ya dice hacia dónde corregir (el sham se recupera en 11 de 16). Por eso `config.SHAM_ERRP_FUENTE = 'nula'`. Con el sham sin evidencia beta aún sube algo (el prior de error empuja las decisiones muy seguras): es el 1 de 16 del control negativo.
 - **El piloto no debe ver la consola del orquestador al final de una sesión `--sham`:** `EVALUACION` dice cuál bloque fue cuál. Durante los bloques la consola, el flujo `Estado` de cada paso y el tablero solo dicen «A» y «B».
+- **La IA nunca se ha llamado de verdad** (3 de octubre: sin llave en la máquina). Todo lo de `ia.py` está probado con la API simulada de `pruebas.py` (`ApiSimulada`). `claude-opus-5-5` rechaza con un 400 `tool_choice` forzado, `thinking: disabled`, `budget_tokens` y `temperature`: no agregarlos. Las pruebas de la IA deben seguir pasando sin red y sin llave.
+- **El `_estado.jsonl` ahora también lleva marcadores** (líneas `{'t', 'marcador'}` además de `{'t', 'evento'}`): quien lo lea debe saltarse las que no le tocan, como `repetir_sesion.leer`.
 - **Los trabajos largos en segundo plano necesitan mantener despierto el equipo** (`SetThreadExecutionState`): la laptop se suspende por inactividad y deja la corrida a medias.
 - **No correr estudios pesados en paralelo con `pruebas.py`:** numpy y scikit-learn usan todos los núcleos y se estorban; `seleccion_canales_vistas` pasó de segundos a 30 min así.
 

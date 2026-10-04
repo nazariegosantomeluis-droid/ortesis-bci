@@ -29,7 +29,8 @@ def leer(ruta):
         for linea in f:
             if linea.strip():
                 d = json.loads(linea)
-                eventos.append((d['t'], d['evento']))
+                if 'evento' in d:                 # las lineas de marcadores no se repiten
+                    eventos.append((d['t'], d['evento']))
     return eventos
 
 

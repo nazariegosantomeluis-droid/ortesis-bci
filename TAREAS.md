@@ -99,6 +99,17 @@ El sistema aprende en tres escalas de tiempo:
   - *Control de reposo:* integrado al orquestador (`--control-reposo`, tras calibrar o con `--saltar-calibracion`), sin parar y volver a arrancar la sesión. Prueba de Mann-Whitney en lugar de un intervalo bootstrap de la AUC, y la ventana termina 0.9 s tras el movimiento (lo que pasa en el lazo) en lugar de 1.5 s. Gemelo: pasa 6 de 6 en reposo y detecta 6 de 6 cuando el piloto sigue a la órtesis. Sin probar con el casco.
   - Su rama `origin/b1-b2-sham-errp` queda intacta.
 
+**2. Copiloto clínico (3 de octubre, noche).**
+
+- **Sin probar con la API real: no había llave en la máquina.** Todo se probó con una API simulada. Antes de encenderlo en la final hay que hacer una llamada real (`python copiloto.py --ultima "..."` con el `.env` puesto).
+- Modelo y API verificados en la guía oficial vigente: `claude-opus-5-5`, lazo manual de herramientas sobre `messages.create`, salida estructurada con `output_config.format` para las propuestas. Ese modelo rechaza el uso forzado de herramientas, el pensamiento desactivado y `temperature`; no se envían. Esfuerzo `medium` (`config.IA_ESFUERZO`).
+- No se activó el parámetro `fallbacks` (reintento del servidor en otro modelo si la API declina): es beta y no se pudo probar sin llave. Si la API declina, falla o tarda, responden las plantillas y la respuesta lo dice.
+- Las cifras del informe siempre salen del código; la IA solo escribe el párrafo de interpretación. Así el informe no puede traer un número inventado.
+- «Mismo piloto»: los archivos de sesión son anónimos, así que el informe compara con las tres sesiones previas del mismo tipo (o las de `--anteriores`) y lo dice.
+- La decisión sobre la propuesta de la próxima sesión solo queda registrada (`--decidir`); no cambia nada en el código ni en `config`. Aplicarla al arrancar la sesión siguiente no se implementó: nadie lo pidió todavía.
+- El registro `_estado.jsonl` ahora guarda también los marcadores; el flujo `Estado` de cada paso lleva `detectado` (si el detector marcó ErrP) y `alfa` (alfa occipital relativa). Las sesiones grabadas antes no los tienen: el copiloto lo dice («no hay dato») o aproxima la detección con `P_hat > 0.5` y lo avisa.
+- Los textos del informe llevan acentos dentro de `copiloto.py`: van a archivos Markdown, no a la consola.
+
 ---
 
 ## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black

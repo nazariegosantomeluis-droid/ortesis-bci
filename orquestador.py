@@ -84,7 +84,8 @@ class Salidas:
 
     def registrar_en(self, ruta):
         """Desde ahora cada evento de Estado tambien se guarda en ruta, con su hora, para poder
-        repetir la sesion en el tablero (repetir_sesion.py)."""
+        repetir la sesion en el tablero (repetir_sesion.py). Tambien cada marcador ({'t', 'marcador'}),
+        para el copiloto."""
         self.registro = open(ruta, 'a', encoding='utf-8')
 
     def cerrar(self):
@@ -94,16 +95,21 @@ class Salidas:
 
     def marcador(self, texto, t=None):
         self.marcadores.append(texto)
-        self.marc.push_sample([texto], t if t is not None else local_clock())
+        t = t if t is not None else local_clock()
+        self.marc.push_sample([texto], t)
+        self._registrar({'t': round(t, 3), 'marcador': texto})
 
     def publicar_paso(self, dec):
         self.paso.push_sample([dec.p_prima, float(dec.direccion), dec.delta])
 
     def estado(self, **datos):
         self.est.push_sample([json.dumps(datos, default=float)])
+        self._registrar({'t': round(local_clock(), 3), 'evento': datos})
+
+    def _registrar(self, linea):
         if self.registro is not None:              # un fallo al grabar nunca detiene el lazo
             try:
-                self.registro.write(json.dumps({'t': round(local_clock(), 3), 'evento': datos}, default=float) + '\n')
+                self.registro.write(json.dumps(linea, default=float) + '\n')
                 self.registro.flush()
             except (OSError, ValueError):
                 self.registro = None
@@ -1016,7 +1022,8 @@ class Orquestador:
             fiabilidad=fiab, congelado=congelado, cambio=info['cambio'],
             latencia_ms=None if not np.isfinite(lat) else lat,
             perturbado=self.desplazamiento != 0, salud=self.vigilante.colores, excluido=excluido,
-            ajeno=False, iic=self.iic, bloque=self._letra_sham())
+            ajeno=False, iic=self.iic, bloque=self._letra_sham(),
+            detectado=detectado if np.isfinite(p_errp) else None, alfa=self.vigilante.alfa_rel)
 
         self.b.fin_paso()
         espera = self.a.ciclo - (time.perf_counter() - t0)

@@ -823,6 +823,195 @@ def controles_especificidad():
             f"si el piloto sigue a la ortesis (AUC {min(aucs[True]):.2f} a {max(aucs[True]):.2f})")
 
 
+# ------------------------------------------------------------ IA: API simulada
+class ApiSimulada:
+    """La API de mensajes, de mentira: devuelve en orden las respuestas del guion (o lo que devuelva
+    cada funcion del guion al recibir la peticion) y guarda las peticiones para revisarlas."""
+
+    def __init__(self, *guion):
+        self.guion, self.peticiones, self.messages = list(guion), [], self
+
+    def create(self, **kw):
+        self.peticiones.append(kw)
+        r = self.guion.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r(kw) if callable(r) else r
+
+
+def _resp(*bloques, fin='end_turn'):
+    import types
+    return types.SimpleNamespace(stop_reason=fin, content=[
+        types.SimpleNamespace(type='text', text=b) if isinstance(b, str)
+        else types.SimpleNamespace(type='tool_use', name=b[0], input=b[1], id=f'tu_{k}') for k, b in enumerate(bloques)])
+
+
+def _sesion_copiloto():
+    import copiloto
+    import orquestador
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '4', '--pasos_estatico', '20', '--caos', '3',
+                                '--falla_detector'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    orquestador.correr(orq, a)
+    return orq, copiloto.Sesion(orq.ruta_csv)
+
+
+@prueba
+def copiloto_herramientas():
+    """Las herramientas del copiloto devuelven las cifras de la sesion (las mismas de EVALUACION), con
+    los pasos que usaron; si el dato no existe lo dicen; las seis preguntas de TAREAS.md se responden
+    con plantillas, sin API."""
+    import json
+    import copiloto
+    orq, s = _sesion_copiloto()
+    r = s.metrica('error', 'tras_perturbacion')
+    assert (r['error_agente'], r['error_sombra']) == (orq.error_post['agente'], orq.error_post['sombra'])
+    assert tuple(r['ic90_agente']) == tuple(orq.error_post['ic_agente']) and r['pasos'][0] == orq.t_perturbacion + 1
+    rec = s.metrica('recuperacion')[0]
+    assert rec['paso_perturbacion'] == orq.t_perturbacion + 1 and rec.get('pasos') == orq.error_post['pasos']
+    exc = s.metrica('excluidos')
+    assert {m: d['n'] for m, d in exc['por_motivo'].items()} == orq.excluidos and exc['excluidos'] == sum(orq.excluidos.values())
+    assert all(orq.filas[p - 1]['excluido'] == m for m, d in exc['por_motivo'].items() for p in d['pasos'])
+    res = s.resumen_sesion()
+    assert res['pasos_validos'] == len(orq.filas) - exc['excluidos'] and res['sin_movimiento'] == orq.sin_movimiento
+    assert res['bloques']['estatico']['n'] + res['bloques']['adaptativo']['n'] == res['pasos_validos']
+    assert any('CP4' in c for c in res['checkpoints'])
+    # eventos: la falla del detector congela el aprendizaje; cada fila de pausa es un evento con su causa
+    cong = s.eventos_de(tipo='congelamiento')
+    congeladas = [f['paso'] for f in s.filas if f['estado'] == 'APRENDIZAJE_CONGELADO']
+    assert cong and cong[0]['paso'] == congeladas[0] and max(e['hasta_paso'] for e in cong) >= congeladas[-1]
+    pausas = s.eventos_de(tipo='pausa')
+    assert len(pausas) == sum(str(f['excluido']).startswith('pausa:') for f in s.filas) > 0
+    assert [e['paso'] for e in s.eventos_de(tipo='perturbacion')] == [orq.t_perturbacion + 1]
+    assert all(40 <= e['paso'] <= 60 for e in s.eventos_de(40, 60)) and s.eventos_de(tipo='semaforo')
+    ba = s.metrica('ba_viva')
+    assert ba['en_el_paso'] == s.filas_de()[-1]['paso'] and abs(ba['ba_viva'] - (orq.confianza.sens + orq.confianza.espec) / 2) < 0.01
+    fi = s.metrica('fiabilidad', 'adaptativo')
+    assert fi['pasos_congelados'] == len([p for p in congeladas if not s.filas[p - 1]['excluido']]) and fi['minima'] == 0.0
+    sp = s.metrica('sin_errp_por_paso')
+    assert sp['chico']['errores'] + sp['grande']['errores'] > 20 and sp['nota'] == 'deteccion registrada por paso'
+    # filas puntuales con limite; lo que no existe se dice, lo mal pedido falla con un mensaje claro
+    f = s.pasos(1, 200, ['beta', 'excluido'])
+    assert len(f['filas']) == config.COPILOTO_MAX_FILAS and f['truncado'] and set(f['filas'][0]) == {'paso', 'beta', 'excluido'}
+    assert s.pasos(5)['filas'][0]['paso'] == 5 and copiloto.SIN_DATO in s.pasos(9000)['motivo']
+    assert copiloto.SIN_DATO in s.metrica('alfa')['motivo'] and copiloto.SIN_DATO in s.metrica('error', 'sham')['motivo']
+    for mala in (lambda: s.metrica('felicidad'), lambda: s.metrica('error', 'otro'), lambda: s.pasos(1, 2, ['eeg_crudo']),
+                 lambda: s.eventos_de(tipo='fiesta')):
+        try:
+            mala()
+            raise AssertionError('acepto una peticion invalida')
+        except ValueError:
+            pass
+    comp = s.comparar_sesiones()
+    assert comp['sesiones'][-1]['sesion'] == s.ruta.name and len(comp['sesiones']) == 2
+    assert copiloto.SIN_DATO in s.comparar_sesiones(['no_existe.csv'])['motivo']
+    json.dumps(copiloto.ia.sanear(res))                             # todo lo que sale es JSON
+    # las seis preguntas, por plantillas
+    n = congeladas[len(congeladas) // 2]
+    t = {q: copiloto.responder(s, q)[0] for q in (
+        f'por que se congelo el aprendizaje en el paso {n}?', 'cuanto tardo en recuperarse tras la perturbacion?',
+        'el agente le gano a la sombra y con que certeza?', 'hubo senales de fatiga?',
+        'cuantos pasos se excluyeron y por que?', 'como se compara con la sesion anterior?',
+        'por que se congelo el aprendizaje en el paso 5?', 'por que se congelo en el paso 99999?')}
+    r1, r2, r3, r4, r5, r6, r7, r8 = t.values()
+    assert f'paso {n} cae en un congelamiento' in r1 and 'sens viva' in r1 and 'falsas alarmas' in r1, r1
+    assert f'paso {orq.t_perturbacion + 1}' in r2 and ('se recupero en' in r2 or 'NO se recupero' in r2), r2
+    assert f"agente {orq.error_post['agente']:.2f}" in r3 and 'sombra - agente' in r3 and ('certeza' in r3), r3
+    assert copiloto.SIN_DATO in r4 and 'fatiga' in r4, r4
+    assert f"{exc['excluidos']} de {len(orq.filas)}" in r5 and all(m in r5 for m in orq.excluidos), r5
+    assert s.ruta.name in r6 and 'error_agente' in r6, r6
+    assert 'no estaba congelado' in r7 and copiloto.SIN_DATO in r8
+    return (f"cifras iguales a EVALUACION (agente {orq.error_post['agente']:.2f}, sombra {orq.error_post['sombra']:.2f}); "
+            f"{len(cong)} congelamientos, {len(pausas)} pausas; 6 preguntas respondidas con sus pasos; lo que falta dice '{copiloto.SIN_DATO}'")
+
+
+@prueba
+def copiloto_api_simulada():
+    """Con la API simulada: el copiloto usa las herramientas y devuelve lo que diga el modelo; una
+    pregunta sin datos produce 'no hay dato'; si la API falla o declina responden las plantillas; a
+    la API no sale ni una ruta ni una senal cruda; una propuesta fuera de rango se rechaza; el
+    informe deja la propuesta pendiente de una persona."""
+    import json
+    import copiloto
+    import ia
+    _, s = _sesion_copiloto()
+    eco = lambda kw: _resp('Respuesta: ' + ' / '.join(b['content'] for b in kw['messages'][-1]['content']))
+    api = ApiSimulada(_resp(('metrica', {'nombre': 'alfa'}), ('eventos', {'tipo': 'congelamiento'}),
+                            ('metrica', {'nombre': 'felicidad'}), fin='tool_use'), eco)
+    txt, origen, usadas = copiloto.responder(s, 'hubo senales de fatiga?', api)
+    assert origen == 'api' and copiloto.SIN_DATO in txt and 'aprendizaje congelado del paso' in txt, txt
+    assert [u[0] for u in usadas] == ['metrica', 'eventos', 'metrica']
+    p1, p2 = api.peticiones
+    assert p1['model'] == config.IA_MODELO == 'claude-opus-5-5' and len(p1['tools']) == 5 and copiloto.SIN_DATO in p1['system']
+    assert 'tool_choice' not in p1 and 'thinking' not in p1 and 'temperature' not in p1     # el modelo los rechaza
+    resultados = p2['messages'][-1]['content']
+    assert [r['is_error'] for r in resultados] == [False, False, True] and len(p2['messages']) == 3
+    enviado = json.dumps([p['messages'] for p in api.peticiones], default=lambda o: o.__dict__)
+    assert str(config.RAIZ.parent) not in enviado and 'Users' not in enviado, 'salio una ruta de la maquina'
+    # la API falla, declina o da vueltas sin fin: plantillas, y se dice
+    for guion in ([ConnectionError('sin red')], [_resp(fin='refusal')], [_resp(('pasos', {'desde': 1}), fin='tool_use')] * 20):
+        txt, origen, _ = copiloto.responder(s, 'cuantos pasos se excluyeron y por que?', ApiSimulada(*guion))
+        assert origen == 'reglas' and 'Se excluyeron' in txt and 'la IA no respondio' in txt, txt
+    # sanear: ni senales crudas ni rutas
+    try:
+        ia.sanear({'eeg': [0.1] * 1000})
+        raise AssertionError('dejo pasar una senal cruda')
+    except ValueError:
+        pass
+    assert ia.sanear({'ruta': str(s.ruta), 'p': s.ruta, 'x': float('nan')}) == {'ruta': s.ruta.name, 'p': s.ruta.name, 'x': None}
+    # propuestas: esquema fijo y rangos seguros
+    buena = {'accion': 'ajustar_parametro', 'parametro': 'paso_visible', 'valor': 0.1, 'justificacion': 'los pasos chicos no se ven'}
+    casos = {'valida': (buena, True), 'fuera de rango': ({**buena, 'parametro': 'paso_max', 'valor': 0.9}, False),
+             'parametro prohibido': ({**buena, 'parametro': 'beta_max'}, False), 'sin valor': ({**buena, 'valor': None}, False),
+             'accion inventada': ({**buena, 'accion': 'apagar'}, False), 'campo de mas': ({**buena, 'extra': 1}, False),
+             'continuar con valor': ({**buena, 'accion': 'continuar'}, False), 'pausa larga': ({**buena, 'accion': 'pausa', 'parametro': 'pausa_s', 'valor': 9000}, False),
+             'pausa': ({**buena, 'accion': 'pausa', 'parametro': 'pausa_s', 'valor': 60}, True),
+             'recalibrar': ({'accion': 'recalibrar', 'parametro': None, 'valor': None, 'justificacion': 'BA viva 0.55'}, True),
+             'valor no numerico': ({**buena, 'valor': 'mucho'}, False), 'sin justificacion': ({**buena, 'justificacion': ' '}, False)}
+    for nombre, (p, esperado) in casos.items():
+        assert ia.validar_propuesta(p)[0] is esperado, (nombre, ia.validar_propuesta(p))
+    resumen = copiloto.resumen_para_propuesta(s, 'adaptativo')
+    assert resumen['pasos'] == len(s.filas_de('adaptativo')) and 0 < resumen['fraccion_congelado'] < 1
+    r = ia.proponer(resumen, ApiSimulada(_resp(json.dumps(casos['fuera de rango'][0]))))
+    assert r['origen'] == 'reglas' and r['valida'] and 'fuera del rango seguro' in r['rechazada_api']['motivo'], r
+    api = ApiSimulada(_resp(json.dumps(buena)))
+    r = ia.proponer(resumen, api)
+    assert r['origen'] == 'api' and r['propuesta'] == buena and api.peticiones[0]['output_config']['format']['type'] == 'json_schema'
+    assert json.loads(api.peticiones[0]['messages'][0]['content'])['pasos'] == resumen['pasos']
+    assert ia.proponer(resumen, ApiSimulada(TimeoutError('lenta')))['origen'] == 'reglas'
+    reglas = ia.propuesta_por_reglas
+    assert reglas({'pasos': 5})['accion'] == 'continuar' and reglas({'pasos': 90, 'alfa_rel': 2.0})['accion'] == 'pausa'
+    assert reglas({'pasos': 90, 'ba_viva': 0.52})['accion'] == 'recalibrar'
+    assert reglas({'pasos': 90, 'fraccion_excluidos': 0.4, 'excluidos': {'pausa:eeg': 30}})['accion'] == 'pausa'
+    chico = reglas({'pasos': 90, 'ba_viva': 0.8, 'sin_errp_por_paso': {'chico': {'errores': 12, 'sin_errp': 0.7},
+                                                                       'grande': {'errores': 10, 'sin_errp': 0.2}}})
+    assert chico['parametro'] == 'paso_visible' and chico['valor'] == 0.1
+    for p in (reglas({'pasos': 90, 'alfa_rel': 2.0}), chico, reglas({'pasos': 90, 'ba_viva': 0.9})):
+        assert ia.validar_propuesta(p) == (True, ''), p
+    # informe: cuatro Markdown, figuras y una propuesta que espera a una persona
+    copiloto.ruta_propuestas(s.ruta).unlink(missing_ok=True)
+    interp = {k: f'INTERPRETACION {k}' for k in copiloto.ESQUEMA_INTERPRETACION['required']}
+    api = ApiSimulada(_resp(json.dumps(interp)), _resp(json.dumps({**buena, 'valor': 5})))
+    inf = copiloto.informe(s, cli=api)
+    md = [p for p in inf['archivos'] if p.suffix == '.md']
+    assert len(md) == 4 and all(p.exists() and p.stat().st_size > 200 for p in inf['archivos']) and inf['origen_texto'] == 'api'
+    for p in md:
+        txt = p.read_text(encoding='utf-8')
+        assert 'INTERPRETACION ' + '_'.join(p.stem.split('_')[-2:]) in txt, p.name
+        assert ('"accion"' in txt) == ('terapeuta' in p.name) and '_fig_sesion.png' in txt
+    assert 'Requiere la aprobación' in md[0].read_text(encoding='utf-8') and 'Requires approval' in md[1].read_text(encoding='utf-8')
+    assert inf['propuesta']['origen'] == 'reglas' and inf['propuesta']['rechazada_api']         # la de la API (valor 5) no paso
+    pend = copiloto.pendiente(s.ruta, 'proxima_sesion')
+    assert pend and pend['id'] == inf['propuesta']['id'] and copiloto.main(['--sesion', str(s.ruta), '--decidir', 'rechazar']) == 0
+    assert copiloto.pendiente(s.ruta) is None
+    registros = [l['registro'] for l in copiloto.leer_propuestas(s.ruta)]
+    assert registros == ['propuesta', 'decision', 'efecto'] and copiloto.leer_propuestas(s.ruta)[1]['decision'] == 'rechazada'
+    sin = copiloto.informe(s, cli=None)
+    assert sin['origen_texto'] == 'reglas' and 'movimientos' in sin['archivos'][2].read_text(encoding='utf-8')
+    return ('herramientas por la API simulada, "no hay dato" cuando falta, plantillas si la API falla, nada crudo sale, '
+            '12 propuestas validadas contra los rangos, informe en 4 Markdown con propuesta pendiente')
+
+
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
@@ -887,6 +1076,17 @@ def tablero_salud():
         t.btn_sham.setChecked(True)
         txt = t.lbl_sham.text()
         assert 'Bloque A = SHAM' in txt and 'Bloque B = REAL' in txt and 'sham - real +0.14' in txt, txt
+        assert not hasattr(t, 'caja')                             # la caja del copiloto solo con --copiloto
+        t2 = tablero.Tablero(copiloto=True)
+        try:
+            t2.timer.stop()
+            t2._responder('cuantos pasos se excluyeron y por que?')   # lo que corre el otro hilo
+            assert t2.lbl_copiloto.text() == ''
+            t2._mostrar_respuesta()
+            assert 'sesion_' in t2.lbl_copiloto.text() and ('excluyeron' in t2.lbl_copiloto.text()
+                                                            or 'no pudo responder' in t2.lbl_copiloto.text())
+        finally:
+            t2.close()
     finally:
         t.close()
     return 'cuatro semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa; IIC y AUTOMATICO'
@@ -2310,7 +2510,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
