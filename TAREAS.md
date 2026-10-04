@@ -111,7 +111,8 @@ Pedido por Luis: (1) `estado_sistema.py` con revisión previa y franja en vivo e
 **Hallazgos**
 
 - PhysioNet (40 personas reales, corridas del mismo día): la memoria sin ensayos de hoy rinde lo que 12 ensayos desde cero (0.689 contra 0.689); con 12, +0.026 ± 0.015. Ahorra al menos 12 ensayos, que es lo más que esos datos dejan medir.
-- Gemelo: el CP3 con memoria no infla (reportaría 0.81 contra 0.82 real con 40 épocas).
+- Gemelo: el CP3 con memoria no infla (reportaría 0.80 contra 0.80 real con 40 épocas). Las cifras del gemelo se midieron dos veces, antes y después de traer el arreglo de los parpadeos de `main` (PR #6): cambian en el segundo decimal (ErrP con 40 épocas, memoria 0.82 → 0.80) y las del README son las de después.
+- **Los PR #3 (limpieza) y #6 (parpadeos del gemelo) los fusionó juan-ML22 en `main`** el domingo a las 12:41 y 13:35, no Luis. Se trajeron a esta rama, como pide la regla de la sesión, con dos conflictos resueltos conservando los dos lados (los parpadeos nuevos más la ganancia por sesión en el gemelo; las pruebas de los dos en `pruebas.py`).
 - Heredar la `beta` no aporta nada medible en el gemelo (es ruido de ±0.15 logits), y heredar la `beta` final sería dañino.
 - Una memoria que no es del mismo piloto estorba (CP3 0.58 en una corrida contra el gemelo con épocas ajenas), y el CP3 lo detecta porque se mide solo con las épocas de hoy.
 
