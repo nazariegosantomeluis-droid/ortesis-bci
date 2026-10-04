@@ -708,19 +708,21 @@ def main(argv=None):
     ap.add_argument('--sin-ia', dest='sin_ia', action='store_true', help='solo plantillas, aunque haya llave')
     ap.add_argument('--informe', action='store_true', help='informe entre sesiones (Markdown) con propuesta')
     ap.add_argument('--anteriores', nargs='*', help='CSV de las sesiones anteriores (por defecto, las 3 previas)')
-    ap.add_argument('--decidir', choices=['aprobar', 'rechazar'], help='decide la propuesta pendiente para la proxima sesion')
+    ap.add_argument('--decidir', choices=['aprobar', 'rechazar'],
+                    help='decide la propuesta pendiente de la sesion (entre bloques, o la de la proxima sesion)')
     a = ap.parse_args(argv)
     if not a.sesion and not a.ultima:
         ap.error('indica --sesion <csv> o --ultima')
     s = Sesion(a.sesion or ultima())
     cli = None if a.sin_ia else ia.cliente()
     if a.decidir:
-        p = pendiente(s.ruta, 'proxima_sesion')
+        p = pendiente(s.ruta)
         if p is None:
-            print('No hay una propuesta pendiente para la proxima sesion (genera el informe primero).')
+            print('No hay una propuesta pendiente en esta sesion.')
             return 1
-        decidir(s.ruta, p['id'], a.decidir == 'aprobar',
-                efecto='queda anotada para la proxima sesion; nada cambio en el codigo ni en la configuracion')
+        # la de la proxima sesion solo se anota; el efecto de una entre bloques lo registra el orquestador
+        decidir(s.ruta, p['id'], a.decidir == 'aprobar', efecto='queda anotada para la proxima sesion; nada cambio '
+                'en el codigo ni en la configuracion' if p['momento'] == 'proxima_sesion' else None)
         print(f"Propuesta {p['id']} {'APROBADA' if a.decidir == 'aprobar' else 'RECHAZADA'}: {json.dumps(p['propuesta'], ensure_ascii=False)}")
         return 0
     if a.informe:

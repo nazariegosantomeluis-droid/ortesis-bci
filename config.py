@@ -330,6 +330,9 @@ PARAMETROS_PROPUESTA = {
     'pausa_s':      (30, 300),          # solo para la accion 'pausa': descanso con la ortesis abierta
 }
 PROPUESTA_MAX_JUSTIFICACION = 600
+# co-investigador entre bloques (orquestador.py --coinvestigador)
+COINVESTIGADOR_API_S = 20.0             # lo mas que se espera a la API antes de usar las reglas
+COINVESTIGADOR_ESPERA_S = 60.0          # lo mas que se espera la decision del operador; sin decision, nada cambia
 SUFIJO_PROPUESTAS = '_propuestas.jsonl'  # junto al CSV: cada propuesta, su decision y su efecto
 # umbrales de las reglas deterministas (ia.propuesta_por_reglas), las que se usan sin API
 REGLAS_PROPUESTA = {

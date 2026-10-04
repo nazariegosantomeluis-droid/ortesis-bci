@@ -36,7 +36,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 49/49 pruebas pasaron
+python pruebas.py                    # debe decir 50/50 pruebas pasaron
 ```
 
 ## Archivos
@@ -256,6 +256,34 @@ python copiloto.py --ultima --decidir aprobar                       # la propues
 **Qué sale hacia la API.** Solo lo que devuelven las herramientas, y todo pasa por `ia.sanear`: quita las carpetas de las rutas (llevan el nombre de usuario de la máquina) y se niega a enviar una lista de más de 200 números, que sería una señal cruda. Los archivos de sesión no tienen nombres de personas.
 
 **Sin probar con la API real:** el 3 de octubre no había llave en la máquina. Todo está probado con una API simulada (`pruebas.py`: `copiloto_herramientas` y `copiloto_api_simulada`); la primera llamada real hay que hacerla antes de encenderlo en la final.
+
+## Co-investigador entre bloques (`--coinvestigador`)
+
+La escala lenta del aprendizaje. Al terminar cada bloque, el orquestador:
+
+1. **Resume el bloque** en cifras agregadas (`copiloto.resumen_para_propuesta`): exactitud, error contra la sombra con el intervalo de la diferencia, BA viva, fiabilidad media y fracción del bloque con el aprendizaje congelado, excluidos por motivo, alfa occipital, pasos sin movimiento y errores que pasaron sin ErrP según el tamaño del paso.
+2. **Pide una propuesta** a Claude con esquema fijo (`ia.ESQUEMA_PROPUESTA`): una acción (`continuar`, `pausa`, `ajustar_parametro` o `recalibrar`), un parámetro y un valor si aplica, y una justificación breve. Sin llave, sin conexión o si la API tarda más de 20 s, propone un conjunto de reglas deterministas (`ia.propuesta_por_reglas`) con el mismo esquema.
+3. **La valida** contra los rangos seguros de `config.PARAMETROS_PROPUESTA`. Una propuesta de la API que no cumple el esquema o se sale del rango se descarta (queda registrada con el motivo) y deciden las reglas.
+4. **Se la muestra al operador** en el tablero, con los botones **Aprobar** y **Rechazar** (también vale `python copiloto.py --sesion <csv> --decidir aprobar` desde otra terminal). Espera la decisión hasta 60 s.
+5. **Aplica el efecto solo si se aprobó**, y registra propuesta, decisión y efecto en `sesion_..._propuestas.jsonl`.
+
+| Parámetro ajustable | Rango seguro | Qué es |
+|---|---|---|
+| `paso_visible` | 0.05 a 0.12 | El paso mínimo que se le muestra al piloto. |
+| `paso_max` | 0.15 a 0.35 | El paso máximo: nunca más de un tercio del recorrido. |
+| `ganancia` | 0.15 a 0.45 | Cuánto crece el paso con la confianza del decoder. |
+| `ajenos_cada` | 0 a 20 | Movimientos ajenos de la Tarea 2 (0 = ninguno). |
+| `pausa_s` (solo en `pausa`) | 30 a 300 s | Descanso con la órtesis abierta. |
+
+**Lo que no puede pasar.** Nada cambia sin una aprobación: rechazada, o sin decisión a tiempo, la sesión sigue igual. No hay parámetros del aprendizaje del agente (prior, varianza, umbrales de cambio) en la lista. Entre los dos bloques del control causal no se ajusta nada aunque se apruebe (cambiaría las condiciones de la comparación), y ahí el resumen y el tablero solo dicen «bloque A» o «bloque B». `recalibrar` aprobado termina la sesión en orden y dice cómo relanzarla (`--solo-errp`). Tras el último bloque la propuesta se registra sin esperar decisión. La consulta ocurre entre bloques: dentro de un paso del lazo no corre nada de la IA.
+
+```bash
+python orquestador.py real --puerto COM4 --coinvestigador
+```
+
+Las reglas deterministas, en orden: pocos pasos válidos (< 30) → continuar; más de 25 % de filas excluidas → pausa para revisar el casco y la órtesis; alfa occipital ≥ 1.5 veces su línea base → pausa; BA viva < 0.60 o más de la mitad del bloque congelado → recalibrar; errores con pasos chicos que pasan sin ErrP 25 puntos más que con pasos grandes → subir `paso_visible` 0.02; si no, continuar. Los umbrales están en `config.REGLAS_PROPUESTA` y **no están validados con personas**.
+
+Probado en el simulador con la API simulada (`pruebas.py`, `coinvestigador_entre_bloques`): aprobada, `paso_visible` pasa de 0.08 a 0.10 y el lazo lo usa desde el bloque siguiente; rechazada o sin decisión, nada cambia; una propuesta de `paso_max = 0.95` se descarta. **Sin probar con la API real.**
 
 ## Resiliencia: el lazo que no se cae
 

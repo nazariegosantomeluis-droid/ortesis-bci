@@ -110,6 +110,16 @@ El sistema aprende en tres escalas de tiempo:
 - El registro `_estado.jsonl` ahora guarda también los marcadores; el flujo `Estado` de cada paso lleva `detectado` (si el detector marcó ErrP) y `alfa` (alfa occipital relativa). Las sesiones grabadas antes no los tienen: el copiloto lo dice («no hay dato») o aproxima la detección con `P_hat > 0.5` y lo avisa.
 - Los textos del informe llevan acentos dentro de `copiloto.py`: van a archivos Markdown, no a la consola.
 
+**3. Co-investigador entre bloques (3 de octubre, noche).**
+
+- La decisión del operador viaja por archivo (`sesion_..._propuestas.jsonl`), no por un flujo LSL nuevo: el tablero y el orquestador corren en la misma máquina, el registro hace falta de todos modos y así también se puede decidir desde otra terminal. El evento `propuesta` del flujo `Estado` lleva el nombre del CSV para que el tablero sepa dónde escribir.
+- Parámetros ajustables: solo los pasos (`paso_visible`, `paso_max`, `ganancia`) y `ajenos_cada`, con rangos en `config`. **Ninguno del aprendizaje del agente**: cambiarlos pide pasar el control negativo.
+- `recalibrar` aprobado no recalibra dentro de la sesión (la máquina de estados no vuelve a `CAL_ERRP`): termina la sesión en orden y dice que se relance con `--solo-errp`.
+- Tras el último bloque la propuesta se registra y se muestra, pero no se espera decisión (no retrasa `EVALUACION`).
+- En una sesión `--sham`, un ajuste aprobado entre los bloques A y B no se aplica, y el resumen que sale hacia la API dice «bloque A/B», no cuál es.
+- Las reglas deterministas y sus umbrales (`config.REGLAS_PROPUESTA`) son de criterio propio, sin validar con personas.
+- Sin decisión en 60 s (`--coinvestigador-espera`), nada cambia y queda registrado como `sin_decision`. Durante esa espera el orquestador no revisa la salud; la órtesis queda donde estaba.
+
 ---
 
 ## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black

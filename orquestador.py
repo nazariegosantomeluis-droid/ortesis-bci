@@ -13,6 +13,7 @@ Uso
 
   python orquestador.py real --puerto COM4 --reanudar   continua la sesion tras un cierre inesperado
   python orquestador.py real --puerto COM4 --sham       control causal: bloque real contra bloque sham
+  python orquestador.py real --puerto COM4 --coinvestigador   entre bloques, una propuesta que aprueba una persona
 
 Antes de 'real': puente_lsl.py corriendo y LabRecorder grabando.
 
@@ -782,6 +783,8 @@ class Orquestador:
         self.sin_movimiento = 0                      # pasos que no movieron la ortesis (lo llena evaluar())
         # control causal (--sham): orden de los bloques, cual va y donde se perturbo cada uno
         self.sham, self.senal_sham, self.comparacion_sham = None, None, None
+        # co-investigador entre bloques (--coinvestigador): parametros ajustados con aprobacion humana
+        self.ajustes, self.cliente_ia, self.al_proponer = {}, False, None
         if getattr(a, 'sham', False):
             orden = a.sham_orden.split('-') if a.sham_orden else random.SystemRandom().sample(config.BLOQUES_SHAM, 2)
             self.sham = {'orden': orden, 'fuente': a.sham_fuente, 'actual': None, 'bloques': {}}
@@ -838,6 +841,9 @@ class Orquestador:
         self.angulo, self.desplazamiento = inst['angulo'], inst['desplazamiento']
         self.t_perturbacion, self.beta_pre, self.prog = inst['t_perturbacion'], inst['beta_pre'], inst['prog']
         self.sham = inst.get('sham')
+        self.ajustes = inst.get('ajustes', {})
+        for param, valor in self.ajustes.items():        # lo que una persona aprobo antes del cierre
+            setattr(self.agente.cfg, param, valor)
         if inst.get('senal_sham'):
             self.senal_sham = SenalSham(self.sham['fuente']).desde_dict(inst['senal_sham'])
         aviso(f"Sesion REANUDADA en el paso {inst['paso']} ({self.fsm.estado}), beta {self.agente.beta:+.3f}. "
@@ -865,7 +871,7 @@ class Orquestador:
                 't_perturbacion': self.t_perturbacion, 'beta_pre': self.beta_pre, 'prog': self.prog,
                 'agente': self.agente.a_dict(), 'confianza': self.confianza.a_dict(),
                 'preparacion': self.preparacion, 'backend': self.b.instantanea(), 'sham': self.sham,
-                'senal_sham': self.senal_sham.a_dict() if self.senal_sham else None}
+                'senal_sham': self.senal_sham.a_dict() if self.senal_sham else None, 'ajustes': self.ajustes}
 
     def guardar(self, terminada=False):
         guardar_instantanea(config.ESTADO_SESION_JSON, self.instantanea(terminada))
@@ -1057,6 +1063,91 @@ class Orquestador:
                             fuente=self.sham['fuente'])
         self.bloque(nombre, n_pasos, aprender=True, perturbar_en=config.SHAM_ERRP_PERTURBAR_EN)
         self.sham['actual'] = None
+
+    # ---------------- co-investigador entre bloques (--coinvestigador) ----------------
+    def coinvestigador(self, bloque, ultimo=False):
+        """Al terminar un bloque: resumen agregado -> propuesta (de Claude, o de las reglas si no hay
+        API) -> validacion contra los rangos seguros -> el operador aprueba o rechaza en el tablero
+        (o con copiloto.py --decidir) -> efecto. Todo queda en sesion_..._propuestas.jsonl. Sin una
+        aprobacion nada cambia. Corre entre bloques, nunca dentro de un paso, y nunca lanza.
+        Devuelve False si la sesion debe terminar aqui (se aprobo recalibrar)."""
+        if not getattr(self.a, 'coinvestigador', False):
+            return True
+        import copiloto                              # solo aqui: el lazo no importa nada de la IA
+        import ia
+        try:
+            cfg = self.agente.cfg
+            resumen = copiloto.resumen_para_propuesta(copiloto.Sesion(self.ruta_csv), bloque)
+            resumen.update(paso_visible=cfg.paso_visible, paso_max=cfg.paso_max, ganancia=cfg.ganancia,
+                           ajenos_cada=self.a.ajenos_cada, ultimo_bloque=ultimo)
+            if self.sham and bloque in config.BLOQUES_SHAM:      # ciego: ni la API ni el tablero saben cual es
+                resumen['bloque'] = f'bloque {self._letra_sham(bloque)}'
+            if self.cliente_ia is False:
+                self.cliente_ia = ia.cliente(config.COINVESTIGADOR_API_S)
+            p = copiloto.proponer_y_registrar(self.ruta_csv, resumen, f"tras:{resumen['bloque']}", self.cliente_ia)
+        except Exception as e:
+            aviso(f'  [co-investigador] no pudo proponer ({type(e).__name__}: {e}); la sesion sigue igual')
+            return True
+        prop, espera = p['propuesta'], 0.0 if ultimo or not p['valida'] else self.a.coinvestigador_espera
+        aviso(f"  [co-investigador, {p['origen']}] tras {resumen['bloque']}: {prop['accion']}"
+              + (f" {prop['parametro']} = {prop['valor']}" if prop['valor'] is not None else '')
+              + f". {prop['justificacion']}" + ('' if p['valida'] else f" (INVALIDA: {p['motivo']})"))
+        self.salidas.estado(tipo='propuesta', id=p['id'], csv=self.ruta_csv.name, bloque=resumen['bloque'],
+                            propuesta=prop, origen=p['origen'], valida=p['valida'], espera_s=espera)
+        if self.al_proponer is not None:
+            self.al_proponer(p)
+        if not p['valida']:
+            return True
+        if ultimo:
+            aviso('    era el ultimo bloque: queda registrada, sin efecto en esta sesion')
+            return True
+        aviso(f'    esperando la decision del operador (tablero, o copiloto.py --decidir) hasta {espera:.0f} s...')
+        decision, t_fin = None, time.time() + espera
+        while decision is None:
+            decision = next((l['decision'] for l in copiloto.leer_propuestas(self.ruta_csv)
+                             if l.get('registro') == 'decision' and l['id'] == p['id']), None)
+            if decision is None:
+                if time.time() >= t_fin:
+                    break
+                time.sleep(0.2)
+        sigue = True
+        if decision is None:
+            decision, efecto = 'sin_decision', 'nadie decidio a tiempo: nada cambio'
+            copiloto.registrar(self.ruta_csv, registro='decision', id=p['id'], decision=decision, por='tiempo agotado')
+        elif decision == 'aprobada':
+            efecto, sigue = self._aplicar(prop, bloque)
+        else:
+            efecto = 'rechazada: nada cambio'
+        copiloto.registrar(self.ruta_csv, registro='efecto', id=p['id'], efecto=efecto)
+        aviso(f'    decision: {decision}. Efecto: {efecto}')
+        self.salidas.estado(tipo='decision', id=p['id'], decision=decision, efecto=efecto)
+        return sigue
+
+    def _aplicar(self, prop, bloque):
+        """Aplica una propuesta APROBADA por una persona. Devuelve (efecto, la sesion sigue)."""
+        accion, param, valor = prop['accion'], prop['parametro'], prop['valor']
+        if accion == 'continuar':
+            return 'sin cambios', True
+        if accion == 'recalibrar':
+            return 'la sesion termina aqui; para recalibrar el detector, el mismo comando con --solo-errp', False
+        if accion == 'pausa':
+            self.b.posicion_segura()
+            self.angulo = config.POSICION_SEGURA
+            self.b.esperar(float(valor))
+            return f'pausa de {valor:.0f} s con la ortesis abierta', True
+        if self.sham and bloque in config.BLOQUES_SHAM:
+            return 'no aplicado: cambiaria las condiciones entre los dos bloques del control causal', True
+        if param == 'ajenos_cada':
+            antes, self.a.ajenos_cada = self.a.ajenos_cada, int(valor)
+            return f'ajenos_cada: {antes} -> {int(valor)}', True
+        cfg = self.agente.cfg
+        limites = {'paso_visible': cfg.paso_visible, 'paso_max': cfg.paso_max, param: float(valor)}
+        if limites['paso_visible'] > limites['paso_max']:
+            return 'no aplicado: el paso visible quedaria mayor que el paso maximo', True
+        antes = getattr(cfg, param)
+        setattr(cfg, param, float(valor))
+        self.ajustes[param] = float(valor)
+        return f'{param}: {antes} -> {float(valor)}', True
 
     def _iic_csv(self):
         return '' if self.iic['iic'] is None else round(self.iic['iic'], 3)
@@ -1346,6 +1437,10 @@ def argumentos(argv=None):
                     help='Tarea 2: un movimiento ajeno cada tantos pasos del lazo adaptativo (0 = ninguno)')
     ap.add_argument('--sin-cuestionario', dest='sin_cuestionario', action='store_true',
                     help='no hace el cuestionario de la Tarea 2 al terminar (real)')
+    ap.add_argument('--coinvestigador', action='store_true',
+                    help='entre bloques, una propuesta (de Claude o de reglas) que el operador aprueba o rechaza')
+    ap.add_argument('--coinvestigador-espera', dest='coinvestigador_espera', type=float,
+                    default=config.COINVESTIGADOR_ESPERA_S, help='segundos que se espera la decision del operador')
     ap.add_argument('--sham', action='store_true',
                     help='control causal: en lugar del bloque adaptativo, dos bloques (real y sham) en orden al azar')
     ap.add_argument('--sham-pasos', dest='sham_pasos', type=int, default=config.SHAM_ERRP_PASOS,
@@ -1400,22 +1495,28 @@ def argumentos(argv=None):
 def correr(orq, a):
     """La sesion completa. Pase lo que pase (incluido Ctrl+C dentro de una pausa segura)
     termina en EVALUACION, con el resumen impreso y el CSV cerrado."""
-    completa = False
+    completa, sigue = False, True
     try:
         if orq.preparar():
             if orq.prog is None or orq.prog['bloque'] == 'estatico':
                 aviso(f'Bloque LAZO_ESTATICO ({a.pasos_estatico} pasos)...')
                 orq.bloque('estatico', a.pasos_estatico, aprender=False)
                 orq.fsm.ir_a('LAZO_ADAPTATIVO')
-            if orq.sham:                            # control causal: los ya terminados no se repiten
+                sigue = orq.coinvestigador('estatico')
+            if not sigue:
+                pass                                # se aprobo recalibrar: la sesion termina aqui
+            elif orq.sham:                          # control causal: los ya terminados no se repiten
                 orden = orq.sham['orden']
                 hechos = orden.index(orq.prog['bloque']) if orq.prog and orq.prog['bloque'] in orden else 0
                 for nombre in orden[hechos:]:
                     orq.bloque_sham(nombre, a.sham_pasos)
+                    if not orq.coinvestigador(nombre, ultimo=nombre == orden[-1]):
+                        break
             else:
                 aviso(f'Bloque LAZO_ADAPTATIVO ({a.pasos_adaptativo} pasos)...')
                 orq.bloque('adaptativo', a.pasos_adaptativo, aprender=True,
                            perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3, ajenos=True)
+                orq.coinvestigador('adaptativo', ultimo=True)
             completa = True
         else:
             aviso('Detenido por NO GO. Que hacer en cada caso: docs/DOMINGO.md. Plan B: repetir una sesion '

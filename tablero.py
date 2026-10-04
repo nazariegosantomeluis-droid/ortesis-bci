@@ -16,6 +16,9 @@ un electrodo, cual falla y por que.
 Con --copiloto, una caja de texto para preguntarle al copiloto clinico (copiloto.py) sobre la
 sesion mas reciente; responde en otro hilo, sin detener el tablero.
 
+Con orquestador.py --coinvestigador, al terminar un bloque aparece la propuesta con los botones
+Aprobar y Rechazar: la decision se escribe en el registro de propuestas de la sesion.
+
 Uso:  python tablero.py                     (arrancalo antes o despues del orquestador)
       python tablero.py --copiloto          (con la caja de preguntas)
       python tablero.py --captura fig.png --segundos 20   (guarda una imagen y sale)
@@ -82,6 +85,19 @@ class Tablero(QtWidgets.QWidget):
         fila.addWidget(self.btn_sham)
         lay.addLayout(fila)
         self.sham_bloque, self.sham_comparacion = None, None
+        # co-investigador: la propuesta entre bloques, con Aprobar y Rechazar (nada cambia sin una persona)
+        fila = QtWidgets.QHBoxLayout()
+        self.lbl_propuesta = QtWidgets.QLabel('')
+        self.lbl_propuesta.setWordWrap(True)
+        self.lbl_propuesta.setStyleSheet('font-size:13px; padding:2px 4px;')
+        self.btn_aprobar, self.btn_rechazar = QtWidgets.QPushButton('Aprobar'), QtWidgets.QPushButton('Rechazar')
+        fila.addWidget(self.lbl_propuesta, 1)
+        for b, aprobar in ((self.btn_aprobar, True), (self.btn_rechazar, False)):
+            b.setVisible(False)
+            b.clicked.connect(lambda _, aprobar=aprobar: self._decidir(aprobar))
+            fila.addWidget(b)
+        lay.addLayout(fila)
+        self.propuesta = None
         # copiloto clinico (--copiloto): una pregunta sobre la sesion mas reciente, respondida en otro hilo
         self._respuesta, self._pensando = None, False
         if copiloto:
@@ -149,6 +165,15 @@ class Tablero(QtWidgets.QWidget):
             finally:
                 self._buscando = False
         threading.Thread(target=buscar, daemon=True).start()
+
+    def _decidir(self, aprobar):
+        """El operador decide: queda escrito en el registro de propuestas, que el orquestador esta leyendo."""
+        import copiloto
+        e = self.propuesta
+        copiloto.decidir(config.RESULTADOS / e['csv'], e['id'], aprobar, por='operador (tablero)')
+        for b in (self.btn_aprobar, self.btn_rechazar):
+            b.setVisible(False)
+        self.lbl_propuesta.setText(self.lbl_propuesta.text() + '  ->  ' + ('aprobada' if aprobar else 'rechazada') + '...')
 
     def _preguntar(self):
         q = self.caja.text().strip()
@@ -218,6 +243,21 @@ class Tablero(QtWidgets.QWidget):
             if tipo == 'ajeno':
                 self._cue(e['meta'])                             # vuelve la meta del ensayo
             self._iic(e['iic'])
+        elif tipo == 'propuesta':
+            self.propuesta = e
+            p = e['propuesta']
+            self.lbl_propuesta.setText(
+                f"Co-investigador ({'Claude' if e['origen'] == 'api' else 'reglas'}) tras {e['bloque']}: "
+                f"{p['accion'].replace('_', ' ').upper()}" + (f" {p['parametro']} = {p['valor']}" if p['valor'] is not None else '')
+                + f". {p['justificacion']}" + ('' if e['valida'] else ' [INVALIDA: no se puede aprobar]'))
+            for b in (self.btn_aprobar, self.btn_rechazar):
+                b.setVisible(bool(e['valida'] and e['espera_s'] > 0))
+        elif tipo == 'decision':
+            if self.propuesta and self.propuesta['id'] == e['id']:
+                self.lbl_propuesta.setText(self.lbl_propuesta.text().split('  ->  ')[0]
+                                           + f"  ->  {e['decision'].upper()}: {e['efecto']}")
+                for b in (self.btn_aprobar, self.btn_rechazar):
+                    b.setVisible(False)
         elif tipo == 'bloque_sham':
             self.sham_bloque, self.sham_comparacion = e, None
             self._sham()

@@ -1012,6 +1012,76 @@ def copiloto_api_simulada():
             '12 propuestas validadas contra los rangos, informe en 4 Markdown con propuesta pendiente')
 
 
+@prueba
+def coinvestigador_entre_bloques():
+    """--coinvestigador: al terminar cada bloque hay una propuesta registrada con su decision y su
+    efecto. Aprobada, cambia el parametro (dentro del rango seguro); rechazada o sin decision, nada
+    cambia; una propuesta de la API fuera de rango nunca llega al operador; recalibrar aprobado
+    termina la sesion en orden; entre los dos bloques del control causal no se ajusta nada."""
+    import json
+    import copiloto
+    import orquestador
+
+    def sesion(guion, decide, extra=()):
+        a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '2', '--pasos_estatico', '40', '--pasos_adaptativo',
+                                    '90', '--coinvestigador', '--coinvestigador-espera', '2', *extra])
+        orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+        orq.cliente_ia = ApiSimulada(*[_resp(json.dumps(g)) for g in guion]) if guion else None
+        eventos, estado = [], orq.salidas.estado
+        orq.salidas.estado = lambda **d: (eventos.append(d), estado(**d))[1]
+        if decide is not None:                      # como el boton del tablero: escribe la decision en el registro
+            orq.al_proponer = lambda p: eventos[-1]['espera_s'] > 0 and copiloto.decidir(orq.ruta_csv, p['id'], decide, por='prueba')
+        orquestador.correr(orq, a)
+        return orq, [l for l in copiloto.leer_propuestas(orq.ruta_csv)], eventos
+
+    p = lambda accion, parametro=None, valor=None: {'accion': accion, 'parametro': parametro, 'valor': valor,
+                                                   'justificacion': 'por las cifras del bloque'}
+    sube = p('ajustar_parametro', 'paso_visible', 0.1)
+    # aprobada: el parametro cambia para el bloque siguiente y todo queda registrado
+    orq, reg, ev = sesion([sube, p('continuar')], True)
+    assert orq.agente.cfg.paso_visible == 0.1 and orq.ajustes == {'paso_visible': 0.1} and len(orq.filas) == 130
+    assert [l['registro'] for l in reg] == ['propuesta', 'decision', 'efecto', 'propuesta'], [l['registro'] for l in reg]
+    assert reg[0]['origen'] == 'api' and reg[1]['decision'] == 'aprobada' and reg[2]['efecto'] == 'paso_visible: 0.08 -> 0.1'
+    r = reg[0]['resumen']
+    assert r['bloque'] == 'estatico' and r['pasos'] == 40 and {'exactitud', 'error_sombra', 'ba_viva', 'fiabilidad_media',
+                                                                'excluidos', 'alfa_rel', 'sin_errp_por_paso'} <= set(r)
+    chicos = [abs(float(f['delta'])) for f in orq.filas[40:] if not f['excluido'] and f['alineacion'] != config.SIN_MOVIMIENTO]
+    assert min(chicos) >= 0.1 - 1e-9 > config.PASO_VISIBLE, min(chicos)          # el efecto se ve en el lazo
+    tipos = [e['tipo'] for e in ev if e['tipo'] in ('propuesta', 'decision')]
+    assert tipos == ['propuesta', 'decision', 'propuesta'] and ev[[e['tipo'] for e in ev].index('propuesta')]['csv'] == orq.ruta_csv.name
+    enviado = json.loads(orq.cliente_ia.peticiones[0]['messages'][0]['content'])
+    assert enviado['pasos'] == 40 and 'Users' not in json.dumps(enviado)
+    # rechazada, y sin decision: nada cambia
+    for decide, decision in ((False, 'rechazada'), (None, 'sin_decision')):
+        orq, reg, _ = sesion([sube, p('continuar')], decide)
+        assert orq.agente.cfg.paso_visible == config.PASO_VISIBLE and not orq.ajustes and len(orq.filas) == 130
+        assert reg[1]['decision'] == decision and 'nada cambio' in reg[2]['efecto'], reg[1:3]
+    # la API propone algo fuera de rango: se descarta y deciden las reglas; sin API, reglas tambien
+    orq, reg, _ = sesion([p('ajustar_parametro', 'paso_max', 0.95), p('continuar')], True)
+    assert reg[0]['origen'] == 'reglas' and 'fuera del rango seguro' in reg[0]['rechazada_api']['motivo']
+    assert orq.agente.cfg.paso_max == config.PASO_MAX
+    orq, reg, _ = sesion(None, True)
+    assert [l['origen'] for l in reg if l['registro'] == 'propuesta'] == ['reglas', 'reglas'] and len(orq.filas) == 130
+    # recalibrar aprobado: la sesion termina en orden tras el bloque estatico; pausa aprobada: sigue
+    orq, reg, _ = sesion([p('recalibrar')], True)
+    assert len(orq.filas) == 40 and orq.fsm.estado == 'EVALUACION' and '--solo-errp' in reg[2]['efecto']
+    orq, reg, _ = sesion([p('pausa', 'pausa_s', 45), p('continuar')], True)
+    assert len(orq.filas) == 130 and reg[2]['efecto'].startswith('pausa de 45 s')
+    # paso visible mayor que el paso maximo: aprobado, pero incoherente -> no se aplica
+    orq, reg, _ = sesion([p('ajustar_parametro', 'paso_max', 0.15), sube, p('continuar')], True, ['--sham', '--sham-orden', 'real-sham'])
+    efectos = [l['efecto'] for l in reg if l['registro'] == 'efecto']
+    assert efectos[0] == 'paso_max: 0.3 -> 0.15' and 'control causal' in efectos[1], efectos       # entre A y B no se toca
+    bloques = [l['resumen']['bloque'] for l in reg if l['registro'] == 'propuesta']
+    assert bloques == ['estatico', 'bloque A', 'bloque B'], bloques                                 # el ciego se mantiene
+    # una sesion sin la bandera no propone nada ni crea el registro
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '20', '--pasos_adaptativo', '30'])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    orquestador.correr(orq, a)
+    assert not copiloto.ruta_propuestas(orq.ruta_csv).exists()
+    return ('aprobada: paso_visible 0.08 -> 0.10 y el lazo lo usa; rechazada o sin decision: nada cambia; fuera de rango: '
+            'descartada; recalibrar termina en orden; en el control causal se mantiene el ciego')
+
+
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
@@ -1077,6 +1147,25 @@ def tablero_salud():
         txt = t.lbl_sham.text()
         assert 'Bloque A = SHAM' in txt and 'Bloque B = REAL' in txt and 'sham - real +0.14' in txt, txt
         assert not hasattr(t, 'caja')                             # la caja del copiloto solo con --copiloto
+        # co-investigador: la propuesta con Aprobar y Rechazar; el boton escribe la decision en el registro
+        import copiloto
+        csv_prueba = config.RESULTADOS / 'sesion_sim_prueba_tablero.csv'
+        copiloto.ruta_propuestas(csv_prueba).unlink(missing_ok=True)
+        prop = {'accion': 'ajustar_parametro', 'parametro': 'paso_visible', 'valor': 0.1, 'justificacion': 'pasos chicos sin ErrP'}
+        assert t.btn_aprobar.isHidden() and t.btn_rechazar.isHidden()
+        t._procesar({'tipo': 'propuesta', 'id': 'tras:estatico#1', 'csv': csv_prueba.name, 'bloque': 'estatico',
+                     'propuesta': prop, 'origen': 'api', 'valida': True, 'espera_s': 60.0})
+        assert 'AJUSTAR PARAMETRO paso_visible = 0.1' in t.lbl_propuesta.text() and 'Claude' in t.lbl_propuesta.text()
+        assert not t.btn_aprobar.isHidden() and not t.btn_rechazar.isHidden()
+        t.btn_aprobar.click()
+        reg = copiloto.leer_propuestas(csv_prueba)
+        assert reg[-1]['decision'] == 'aprobada' and reg[-1]['id'] == 'tras:estatico#1' and t.btn_aprobar.isHidden()
+        t._procesar({'tipo': 'decision', 'id': 'tras:estatico#1', 'decision': 'aprobada', 'efecto': 'paso_visible: 0.08 -> 0.1'})
+        assert 'APROBADA: paso_visible: 0.08 -> 0.1' in t.lbl_propuesta.text()
+        t._procesar({'tipo': 'propuesta', 'id': 'x#2', 'csv': csv_prueba.name, 'bloque': 'adaptativo', 'propuesta': prop,
+                     'origen': 'reglas', 'valida': True, 'espera_s': 0.0})          # ultimo bloque: sin botones
+        assert t.btn_aprobar.isHidden() and 'reglas' in t.lbl_propuesta.text()
+        copiloto.ruta_propuestas(csv_prueba).unlink()
         t2 = tablero.Tablero(copiloto=True)
         try:
             t2.timer.stop()
@@ -2510,7 +2599,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
