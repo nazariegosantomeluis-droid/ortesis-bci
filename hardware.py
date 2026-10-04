@@ -676,7 +676,8 @@ class OrtesisUDP(_OrtesisBase):
     """
 
     def __init__(self, ip=config.IP_ORTESIS_UDP, puerto=config.PUERTO_ORTESIS_UDP, reloj=None,
-                 latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S, esperar_telemetria_s=2.0):
+                 latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S, esperar_telemetria_s=2.0,
+                 errp_latidos=config.UDP_ERRP_LATIDOS):
         super().__init__()
         if reloj is None:
             from pylsl import local_clock as reloj
@@ -688,6 +689,8 @@ class OrtesisUDP(_OrtesisBase):
         self._reloj_esp = RelojEsp32Wifi()
         self._enviados, self._acks = {}, {}
         self._seq_latido = config.UDP_SEQ_LATIDO
+        self.errp_latidos = errp_latidos         # cuantos latidos siguientes repiten el destello (0 = un solo datagrama)
+        self._errp_pendientes = 0
         self.t_tel, self.ultima_tel, self.paro, self.bloqueo = None, None, False, False
         self.metodo = ''                          # como salio el t_ack del ultimo mover: 'ack' o 'respaldo'
         self._cv = threading.Condition()
@@ -723,7 +726,10 @@ class OrtesisUDP(_OrtesisBase):
 
     def _latir(self):
         while self._vivo:
-            self._enviar(self._seq_aparte())
+            with self._cv:
+                repite = self._errp_pendientes > 0
+                self._errp_pendientes -= repite
+            self._enviar(self._seq_aparte(), {'errp': 1} if repite else None)
             time.sleep(self.latido_s)
 
     def _escuchar(self):
@@ -787,8 +793,12 @@ class OrtesisUDP(_OrtesisBase):
         self.estado['p'] = float(np.clip(p, 0.0, 1.0))
 
     def errp(self):
-        """Destello rojo del nervio de luz: el detector marco un ErrP. Un solo datagrama, sin esperar ACK
-        (si se pierde, se pierde el destello)."""
+        """Destello rojo del nervio de luz: el detector marco un ErrP. Sin esperar ACK. UDP pierde datagramas
+        (el Wi-Fi del evento), asi que ademas del envio inmediato, `errp` viaja en los siguientes
+        `errp_latidos` latidos (el firmware solo reinicia su destello de 300 ms con cada uno: dura hasta
+        ~0.3 s mas por cada repeticion). Un segundo ErrP antes de que acaben reinicia la cuenta."""
+        with self._cv:
+            self._errp_pendientes = self.errp_latidos
         self._enviar(self._seq_aparte(), {'errp': 1})
 
     def mover(self, fraccion, dur_ms=config.DURACION_PASO_MS):

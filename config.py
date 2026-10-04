@@ -238,6 +238,7 @@ PUERTO_ORTESIS_UDP = 8888
 UDP_LATIDO_S        = 0.1       # el firmware abre la mano si pasan 0.5 s sin ordenes: la PC repite el estado cada 100 ms
 UDP_ESPERA_ACK_S    = 0.3       # un ACK que tarda mas cuenta como perdido (el mismo plazo que por USB)
 UDP_TELEMETRIA_VIVA_S = 1.0     # sin telemetria en este tiempo, la ortesis cuenta como desconectada
+UDP_ERRP_LATIDOS    = 3         # el destello de ErrP es un datagrama: se repite en los 3 latidos siguientes (Wi-Fi con perdidas)
 UDP_SEQ_LATIDO      = 1_000_000_000   # los latidos numeran aparte (desde aqui): seq de los pasos sigue de uno en uno
 UDP_VEL_MAX_GRADOS_S = 90.0     # velocidad del servo en el firmware (CFG['vel_max']); la telemetria es lenta y se extrapola con ella
 UDP_RECORRIDO_DEDOS_GRADOS = 130.0   # abierta 20, cerrada 150 de fabrica (la telemetria informa los vigentes en 'ang')

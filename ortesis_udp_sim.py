@@ -42,7 +42,8 @@ class FirmwareSimulado:
         self.perder_acks = set()                         # seq cuyo ACK no se manda (pruebas)
         self.cliente, self.ultimo_cmd, self.ultimo_seq_ack, self.ultima_tel = None, None, None, 0.0
         self.recibidos, self.acks = [], []               # (seq, hora de llegada) y (seq, t_ms) para las pruebas
-        self.p, self.destellos = None, []                # nivel del nervio de luz y t_ms de cada destello rojo
+        self.p, self.destellos = None, []                # nivel del nervio de luz y hora de llegada de cada mensaje con errp
+        self.descartar = None                            # pruebas: funcion(mensaje) -> True si ese datagrama se pierde en el Wi-Fi
         self.angulos_aplicados = []                      # (t_ms en que la meta empezo a regir, meta, seq)
         self._vivo = False
 
@@ -64,12 +65,14 @@ class FirmwareSimulado:
                 m = json.loads(datos)
             except ValueError:
                 continue
+            if self.descartar is not None and self.descartar(m):
+                continue                                 # perdido antes de llegar: la ESP32 no se entera
             self.cliente, self.ultimo_cmd = direccion, ahora
             seq = m.get('seq')
             if 'p' in m:
                 self.p = float(m['p'])
             if m.get('errp'):
-                self.destellos.append(self.t_ms())
+                self.destellos.append(ahora)
             self.recibidos.append((seq, ahora))
             if 'cierre' in m:
                 meta = min(1.0, max(0.0, float(m['cierre'])))

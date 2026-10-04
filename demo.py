@@ -175,12 +175,19 @@ def _puertos():
     return [p.device for p in list_ports.comports()]
 
 
-def revisar_puerto(puerto, ortesis_sim, listar=_puertos, ortesis_udp=None, udp_puerto=config.PUERTO_ORTESIS_UDP):
+def es_local(ip):
+    """La ip de esta laptop: ahi la ortesis es el firmware simulado (ortesis_udp_sim.py)."""
+    return bool(ip) and (ip == 'localhost' or ip.startswith('127.'))
+
+
+def revisar_puerto(puerto, ortesis_sim, listar=_puertos, ortesis_udp=None, udp_puerto=config.PUERTO_ORTESIS_UDP, plan=None):
     if ortesis_sim:
         return [rev('puerto', OK, 'ortesis simulada: no hace falta puerto')]
     if ortesis_udp:
         # UDP no confirma nada hasta que la ESP32 contesta una orden: el orquestador espera su telemetria 2 s al crear la ortesis
-        if ortesis_udp.startswith('127.') or ortesis_udp == 'localhost':
+        if es_local(ortesis_udp) and plan == 'gemelo':
+            return [rev('puerto', OK, f'ortesis UDP en {ortesis_udp}:{udp_puerto}: demo.py lanzara ortesis_udp_sim.py (firmware simulado)')]
+        if es_local(ortesis_udp):
             return [rev('puerto', AVISO, f'ortesis UDP en {ortesis_udp}:{udp_puerto} (la de esta laptop)',
                         'Tiene que estar corriendo python ortesis_udp_sim.py (firmware simulado) en otra terminal.')]
         return [rev('puerto', AVISO, f'ortesis por Wi-Fi en {ortesis_udp}:{udp_puerto}: UDP no se puede comprobar sin mandarle una orden',
@@ -283,7 +290,7 @@ def preflight(a):
     out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero, ortesis_udp=a.ortesis_udp)
     out += revisar_modelos()
     out += revisar_flujos(a.plan)
-    out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto)
+    out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto, plan=a.plan)
     out += revisar_verificaciones(a.plan, a.ortesis_sim, ortesis_udp=a.ortesis_udp)
     out += revisar_llave()
     out += revisar_plan_b()
@@ -323,6 +330,8 @@ def comandos(plan, a, extras=(), ahora=time.time):
         cmd['fuente'] = ('puente_lsl.py', puente)
     elif plan == 'gemelo':
         cmd['fuente'] = ('cerebro_sintetico.py', [])
+    if plan == 'gemelo' and a.ortesis_udp and not a.ortesis_sim and es_local(a.ortesis_udp):
+        cmd['firmware'] = ('ortesis_udp_sim.py', ['--ip', a.ortesis_udp, '--puerto', str(a.udp_puerto)])   # la ESP32 simulada
     if not a.sin_tablero:
         t = (['--copiloto'] if a.copiloto else []) + (['--narrador'] if a.narrador else []) + (['--flechas'] if a.flechas else [])
         cmd['tablero'] = ('tablero.py', t)
@@ -472,6 +481,13 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
     antes = set(listar_resultados(resultados))
     codigo, cierre = 1, {}
     try:
+        if 'firmware' in cmd:                        # antes que el orquestador: este espera su telemetria al crear la ortesis
+            salida(f"  lanzando {cmd['firmware'][0]} (la ESP32 simulada en {a.ortesis_udp}:{a.udp_puerto})")
+            procesos.lanzar('firmware', *cmd['firmware'])
+            dormir(1.0)
+            if not procesos.vivo('firmware'):
+                raise ErrorDemo(f'ortesis_udp_sim.py se cerro al arrancar (¿otro ya escucha en {a.ortesis_udp}:{a.udp_puerto}?). '
+                                'Ultimas lineas:\n' + procesos.cola('firmware'))
         if 'fuente' in cmd:
             nombre, args = cmd['fuente']
             salida(f'  lanzando {nombre} (log en {procesos.carpeta})')
