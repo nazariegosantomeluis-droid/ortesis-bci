@@ -62,15 +62,16 @@ def p_cal(mod):
     return mod['p_cv']
 
 
-def sesion(mod, semilla, pasos=config.SHAM_ERRP_PASOS, fuente='recientes', perturbar_en=config.SHAM_ERRP_PERTURBAR_EN):
-    """Una sesion con --sham. Devuelve una fila por paso de los dos bloques adaptativos."""
+def sesion(mod, semilla, pasos=config.SHAM_ERRP_PASOS, fuente='recientes', perturbar_en=config.SHAM_ERRP_PERTURBAR_EN, **cfg_agente):
+    """Una sesion con --sham. Devuelve una fila por paso de los dos bloques adaptativos.
+    cfg_agente: campos extra de ConfigAgente (estudios/prior_por_paso.py)."""
     dec, det = copy.deepcopy(mod['dec']), mod['det']
     m = al.Mundo2(semilla)
     m.avanzar(4.0)
     rng = np.random.default_rng(semilla + 7)             # metas y latencias
     sens, espec = (float(np.clip(v, 0.51, 0.99)) for v in (det.sens, det.espec))
     ag = AgenteErrP(dec.w0, dec.c0, ConfigAgente(modo='bayes', sens=sens, espec=espec, salida_detector='calibrada',
-                                                 p_error_calibracion=det.p_error_cal))
+                                                 p_error_calibracion=det.p_error_cal, **cfg_agente))
     conf = ConfianzaDetector(sens, espec)
     orden_bloques = [str(v) for v in np.random.default_rng([semilla, 11]).permutation(config.BLOQUES_SHAM)]
     filas, angulo = [], config.PUNTO_MEDIO

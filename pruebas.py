@@ -207,6 +207,41 @@ def agente_basico():
 
 
 @prueba
+def prior_por_paso():
+    """Prior de error por paso (experimental, apagado): el error que el agente predice, con un piso."""
+    from agente_errp import AgenteErrP, ConfigAgente
+    assert config.PRIOR_POR_PASO is False and ConfigAgente().prior_por_paso is False     # apagado por defecto
+    kw = dict(salida_detector='calibrada', p_error_calibracion=0.3)
+    phi = np.array([6.0])                                    # decoder muy seguro: p' ~ 0.998, error predicho ~ 0.002
+
+    def p_hat(**c):
+        ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, **c))
+        d = ag.decidir(phi)
+        return ag.actualizar(0.9, False, 1.0)['P_hat'], d.p_prima, ag
+    base, p_prima, _ = p_hat()
+    assert p_prima > 0.99
+    for piso, esperado in ((0.0, 0.0), (0.05, 0.05), (0.10, 0.10), (None, 0.2)):         # None: la tasa global (prior 0.2)
+        ph, _, ag = p_hat(prior_por_paso=True, piso_prior=piso)
+        prior = max(1 - max(p_prima, 1 - p_prima), esperado)
+        assert abs(ag.prior_del_paso() - ag.prior) < 1e-12                               # sin paso pendiente: el global
+        llr = np.log(0.9 / 0.1) - np.log(0.3 / 0.7)
+        previsto = float(1 / (1 + np.exp(-(np.log(max(prior, 1e-6) / (1 - max(prior, 1e-6))) + llr))))
+        assert abs(ph - previsto) < 1e-6, (piso, ph, previsto)
+        assert ph <= base + 1e-12                                                                 # seguro y con prior bajo: duda menos del paso
+    # con un paso dudoso (p' ~ 0.5) el error predicho (0.5) pasa por encima del piso
+    ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, prior_por_paso=True, piso_prior=0.05))
+    d = ag.decidir(np.array([0.0]))
+    assert abs(ag.prior_del_paso(d) - 0.5) < 1e-9
+    for malo in (-0.1, 0.5):
+        try:
+            ConfigAgente(prior_por_paso=True, piso_prior=malo)
+            raise AssertionError('debio rechazar el piso')
+        except ValueError:
+            pass
+    return 'apagado por defecto; con epsilon 0, 0.05, 0.10 y tasa global el prior de cada paso es el error predicho con piso'
+
+
+@prueba
 def p_hat_refleja_errp():
     """P_hat dice lo que vio el detector aunque el agente no este aprendiendo (bloque estatico,
     aprendizaje congelado, reloj en ROJO). Antes, con salida calibrada, quedaba igual al prior."""
@@ -2752,7 +2787,7 @@ def lazo_real_caos():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'cierre_completo',
