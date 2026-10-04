@@ -213,6 +213,17 @@ El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia
 
 **Lo que una sola sesión puede mostrar.** Tras la perturbación quedan 50 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.2 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 0 de 12 en el sham (`pruebas.py`, `orquestador_sham`).
 
+**En vivo contra el gemelo, por LSL (4 sesiones reales completas con `--ortesis-sim`; pocas, y una sola calibración sirvió para tres de ellas).** El sham no se recuperó en ninguna. El bloque real se recuperó en 3 de 4:
+
+| Sesión | Pasos por bloque | Detector (CP3) | Bloque real | Bloque sham |
+|---|---|---|---|---|
+| 1 | 60 | BA 0.89, GO | **no se recuperó** en los 50 pasos tras perturbar (beta llegó a 1.44 de 1.86) | no se recuperó |
+| 2 | 80 | BA 0.72, NO GO (forzado) | se recuperó en 25 pasos (35 s) | no se recuperó |
+| 3 | 80 | el de la sesión 2 | se recuperó en 46 pasos (69 s) | no se recuperó |
+| 4 | 80 | el de la sesión 2 | se recuperó en 35 pasos (50 s) | no se recuperó |
+
+En la sesión 1 solo 15 de los 50 pasos tras perturbar tuvieron una época útil: 27 no movieron la órtesis (con un decoder muy seguro llega al tope en dos pasos) y 8 fueron artefacto. **Con 60 pasos por bloque el margen en vivo es justo** (la recuperación de la sesión 3, a los 46 pasos, habría entrado por cuatro pasos); con `--sham-pasos 80` quedan 70 pasos tras perturbar y los dos bloques duran unos 5.6 minutos a 2.1 s por paso. El valor por defecto sigue en 60: alargarlo lo decide Luis.
+
 **Crédito.** La idea de un bloque sham dentro de la sesión es de jusren (rama `b1-b2-sham-errp`). Su sham (`bloque_sham.py`) es otro control: con el piloto en reposo la órtesis se mueve sola y `p(t)` del decoder no debe seguirla. La implementación de `--sham` es distinta y propia. **Ojo con los nombres:** `bloque_sham.py` es el control de reposo de jusren; `orquestador.py --sham` es este control causal.
 
 ## Dos controles de especificidad (ideas de jusren)
