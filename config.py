@@ -127,11 +127,11 @@ BANDA_ERRP = (1.0, 10.0)
 
 # ============================ Agente ============================
 ETA_BETA  = 0.3              # solo para el modo 'fijo' (linea base)
-# Prior de error por paso (EXPERIMENTAL, apagado): en lugar del prior global que se actualiza con P_hat, cada
+# Prior de error por paso (encendido el 4 de octubre por decision de Luis, epsilon 0.10; README: control causal): en lugar del prior global que se actualiza con P_hat, cada
 # paso usa como prior el error que el propio agente predice, 1 - max(p', 1 - p'), con un piso.
 # PISO_PRIOR_PASO: un numero (epsilon) o None = la tasa global (el prior global vivo del agente).
-PRIOR_POR_PASO = False
-PISO_PRIOR_PASO = 0.05
+PRIOR_POR_PASO = True
+PISO_PRIOR_PASO = 0.10
 SENS      = 0.70             # por defecto, hasta que se calibre el detector
 ESPEC     = 0.90
 PASO_VISIBLE = 0.08          # fraccion del rango que el piloto percibe (medirlo con el piloto)

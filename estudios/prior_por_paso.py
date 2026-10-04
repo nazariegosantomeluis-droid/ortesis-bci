@@ -19,6 +19,7 @@ tasa base: LLR = 0). Si sin evidencia se recupera, lo mueve el prior y no el Err
 Uso: python estudios/prior_por_paso.py [sujetos] [repeticiones] [pasos] [regimen]
      python estudios/prior_por_paso.py informe
      python estudios/prior_por_paso.py control [sujetos] [repeticiones] [regimen]
+     python estudios/prior_por_paso.py velocidad      pasos hasta recuperarse del bloque real (mediana y p90), con lo ya corrido
 """
 import os
 os.environ.setdefault('OMP_NUM_THREADS', '1')
@@ -83,6 +84,49 @@ def control(sujetos, reps, reg, salida=print):
     return res
 
 
+def velocidad(filas):
+    """Pasos hasta recuperarse (beta al 70 % de la perturbacion) del bloque REAL, una cifra por sesion.
+    Una sesion que no se recupera en el bloque cuenta como infinito: si mas del 10 % no se recupera, el
+    percentil 90 es infinito (no se alcanza)."""
+    r = sg.por_sesion(filas, 'real')
+    v = np.array([x['rec'] if x['rec'] is not None else np.inf for x in r], dtype=float)
+    finito = np.where(np.isfinite(v), v, 1e9)         # np.quantile interpola mal con infinitos (inf - inf = nan)
+    p90 = float(np.quantile(finito, 0.9))
+    return {'n': len(v), 'recuperadas': int(np.isfinite(v).sum()), 'mediana': float(np.median(v)),
+            'p90': p90 if p90 < 1e8 else float('inf'), 'pasos': v}
+
+
+def comparar_velocidad(base, nuevo, semilla=0, remuestras=2000):
+    """Mediana de `nuevo` contra la de `base` (cociente) con intervalo del 90 % por remuestreo de sesiones."""
+    rng = np.random.default_rng(semilla)
+    b, n = base['pasos'], nuevo['pasos']
+    q = [np.median(n[rng.integers(len(n), size=len(n))]) / np.median(b[rng.integers(len(b), size=len(b))])
+         for _ in range(remuestras)]
+    return nuevo['mediana'] / base['mediana'], (float(np.quantile(q, 0.05)), float(np.quantile(q, 0.95)))
+
+
+def informe_velocidad(condicion='eps 0.10', salida=print):
+    """Lo ya corrido (corrida_actual_*.pkl): velocidad de recuperacion con la bandera contra sin ella."""
+    out = {}
+    for ruta in sorted(CACHE.glob('corrida_actual_*.pkl')):
+        d = pickle.loads(ruta.read_bytes())
+        salida(f"\nVelocidad de recuperacion, bloque real, {d['pasos']} pasos por bloque, {d['sujetos'] * d['reps']} sesiones del gemelo")
+        for fuente in FUENTES:
+            b, n = velocidad(d['filas']['base (prior global)', fuente]), velocidad(d['filas'][condicion, fuente])
+            cociente, ic = comparar_velocidad(b, n)
+            out[fuente] = (b, n, cociente, ic)
+            salida(f"  (sesiones de la corrida con sham '{fuente}') sin bandera: recuperan {b['recuperadas']}/{b['n']}, mediana "
+                   f"{b['mediana']:.1f} pasos, p90 {b['p90']:.1f} | {condicion}: {n['recuperadas']}/{n['n']}, mediana "
+                   f"{n['mediana']:.1f}, p90 {n['p90']:.1f} | mediana x{cociente:.2f} IC90 [{ic[0]:.2f}, {ic[1]:.2f}]")
+        todo = {k: np.concatenate([out[f][i]['pasos'] for f in FUENTES]) for k, i in (('base', 0), ('nuevo', 1))}
+        junto = {k: {'pasos': v, 'mediana': float(np.median(v))} for k, v in todo.items()}
+        c, ic = comparar_velocidad(junto['base'], junto['nuevo'])
+        salida(f"  las dos corridas juntas ({len(todo['base'])} sesiones): mediana {junto['base']['mediana']:.1f} -> "
+               f"{junto['nuevo']['mediana']:.1f} pasos (x{c:.2f}, IC90 [{ic[0]:.2f}, {ic[1]:.2f}]); p90 "
+               f"{np.quantile(todo['base'], 0.9):.1f} -> {np.quantile(todo['nuevo'], 0.9):.1f}")
+    return out
+
+
 def informe(salida=print):
     for ruta in sorted(CACHE.glob('corrida_*.pkl')):
         d = pickle.loads(ruta.read_bytes())
@@ -98,6 +142,8 @@ def informe(salida=print):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == 'informe':
         return informe()
+    if len(sys.argv) > 1 and sys.argv[1] == 'velocidad':
+        return informe_velocidad()
     if len(sys.argv) > 1 and sys.argv[1] == 'control':
         return control(int(sys.argv[2]) if len(sys.argv) > 2 else 4, int(sys.argv[3]) if len(sys.argv) > 3 else 4,
                        sys.argv[4] if len(sys.argv) > 4 else 'actual')

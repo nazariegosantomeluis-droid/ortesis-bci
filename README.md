@@ -229,9 +229,9 @@ El **«sham ciego»** lo confirma por el otro lado. Recibe `p_errp` sacados al a
 
 La conclusión para el control: el contraste limpio no es «ErrP ordenados contra desordenados», sino **«con la evidencia del ErrP contra sin ella»**. El sham permutado sigue disponible para mostrarlo (`--sham-fuente recientes`); el ciego se descartó para el lazo y queda en el estudio.
 
-### Prior de error por paso: la frontera del sham ciego (EXPLORATORIO, apagado por defecto)
+### Prior de error por paso (encendido por defecto desde el 4 de octubre, ε = 0.10): la frontera del sham ciego
 
-Hipótesis (4 de octubre): el sham ciego se recupera 7 de 16 porque, con el agente muy seguro y equivocado, `P_hat` promedia el **prior global** de error y el gradiente empuja `beta` sin información real. Se probó dar a cada paso como prior el error que el propio agente predice, `1 − max(p', 1 − p')`, con un piso ε (`ConfigAgente.prior_por_paso` y `piso_prior`; en `config`, `PRIOR_POR_PASO = False` y `PISO_PRIOR_PASO = 0.05`; ε = `None` es la tasa global, el prior global vivo del agente). **El valor por defecto no cambió: pendiente de que Luis lo apruebe.**
+Hipótesis (4 de octubre): el sham ciego se recupera 7 de 16 porque, con el agente muy seguro y equivocado, `P_hat` promedia el **prior global** de error y el gradiente empuja `beta` sin información real. Se probó dar a cada paso como prior el error que el propio agente predice, `1 − max(p', 1 − p')`, con un piso ε (`ConfigAgente.prior_por_paso` y `piso_prior`; ε = `None` es la tasa global, el prior global vivo del agente). **Por decisión de Luis (4 de octubre) es el defecto: `config.PRIOR_POR_PASO = True`, `PISO_PRIOR_PASO = 0.10`**, con la condición de que la mediana de pasos hasta recuperarse no empeorara más de 25 % (medido abajo). Se apaga con `ConfigAgente(prior_por_paso=False)`.
 
 Medido en el gemelo sin LSL (`python estudios/prior_por_paso.py`: 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10, detector actual). **Es el gemelo, no una persona.**
 
@@ -249,7 +249,31 @@ Medido en el gemelo sin LSL (`python estudios/prior_por_paso.py`: 4 sujetos × 4
 - **El control negativo es obligatorio** (`CLAUDE.md`): se midió en el lazo de `estudios/agente_lento.py` (todo paso visible, sin topes), con el agente recibiendo siempre la tasa base (LLR = 0). Sin la bandera dio 3 de 16 (la referencia del README decía 4 de 16: varía entre corridas). Con la bandera y ε ≤ 0.15, 0 de 16. Con el sham `nula` del orquestador (el de la demo) el sham se recupera 0 de 16 con ε ≤ 0.20.
 - **Costo con detectores peores** (ε entre 0 y 0.10): con el detector de ayer el real se recupera 12 a 15 de 16 (sin la bandera, 15 de 16) y el sham ciego 0 a 1 de 16 (antes 5); con el débil el real baja de 11 a 9–10 de 16 con ε ≤ 0.05 y queda en 10 a 12 de 16 con 0.10 (ese detector ya no cumplía el criterio). Con ε = 0.10 el bloque real queda a una sesión o menos de la base en los tres detectores. Las diferencias de 1 a 2 sesiones sobre 16 no se distinguen del azar.
 - **Qué dice esto del mecanismo:** consistente con la hipótesis, pero no la prueba. Con ε bajo, un ErrP en una decisión muy segura del agente se lee como probable falsa alarma y empuja poco; solo un ErrP que sigue llegando con la perturbación (el real) la contrarresta. Queda sin medir si el costo de ε bajo aparece con una persona (el ErrP real puede ser más ruidoso que el del gemelo).
-- Recomendación (no aplicada): si se enciende para la final, **ε = 0.10**, y entonces el ciego (`--sham-fuente calibracion`, hoy solo en `estudios/sham_gemelo.py`) podría competir con `nula`. Ninguna de las dos cosas está en el orquestador todavía.
+- El sham ciego (`calibracion`) sigue solo en `estudios/sham_gemelo.py`; el del orquestador sigue siendo `nula`.
+
+#### Velocidad de recuperación con el prior por paso (ε = 0.10) contra sin bandera
+
+Bloque real, 16 sesiones de 80 pasos, detector actual, gemelo (`python estudios/prior_por_paso.py velocidad`). Pasos hasta que `beta` llega al 70 % de la perturbación. Son las mismas 16 sesiones medidas en dos corridas (con el sham `calibracion` y con el `nula`; solo cambia el orden de los bloques y el azar del sham).
+
+| Corrida | Recuperan (sin bandera → con ε 0.10) | Mediana de pasos | Percentil 90 | Cociente de medianas (IC 90 %) |
+|---|---|---|---|---|
+| con sham ciego | 16/16 → 16/16 | 24.0 → 29.0 | 37.0 → 45.5 | ×1.21 [0.94, 1.49] |
+| con sham `nula` | 16/16 → 16/16 | 28.0 → 27.5 | 40.5 → 49.0 | ×0.98 [0.72, 1.38] |
+| las dos juntas (32) | | 25.5 → 29.0 | 38.0 → 49.1 | ×1.14 [0.89, 1.35] |
+
+La mediana no empeora más del 25 % en ninguna de las tres lecturas (el peor punto es +21 %), pero **el intervalo llega hasta ×1.49: con 16 sesiones no se descarta una pérdida mayor**, y el percentil 90 sí sube (de 38 a 49 pasos, unos 25 s a ciclo nominal). En el simulador de rasgos (`simulador_lazo.py`, 30 sujetos, salida binaria) el error en los primeros 2 min tras perturbar pasa de 0.214 a 0.221 (±0.05): no se distingue.
+
+#### Tabla del control causal con el defecto nuevo (ε = 0.10)
+
+Gemelo sin LSL, 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10. «Sin ErrP» es el control negativo de `agente_lento.py` (todo paso visible, sin topes). **Gemelo, no una persona.**
+
+| Detector | Real se recupera | Sham `nula` (el de la demo) | Sham ciego | Sin ErrP (control negativo) |
+|---|---|---|---|---|
+| actual | 16/16 | 0/16 (+0.184 [+0.155, +0.212]) | 2/16 (+0.158 [+0.127, +0.191]) | 0/16 (error 0.471; sombra 0.487) |
+| de ayer | 15/16 | 0/16 (+0.164 [+0.138, +0.190]) | 0/16 (+0.124 [+0.087, +0.160]) | no medido |
+| débil | 12/16 con `nula`, 10/16 con ciego | 0/16 (+0.078 [+0.054, +0.101]) | 1/16 (+0.057 [+0.035, +0.079]) | no medido |
+
+Entre paréntesis, sham − real (error tras perturbar). Antes del defecto nuevo, con el detector actual: real 16/16, `nula` 1/16, ciego 7/16, sin ErrP 3/16 (tabla de arriba). No se midió el sham permutado (`--sham-fuente recientes`) con el defecto nuevo, y las cifras de referencia de `CLAUDE.md` (corrida completa contra el gemelo, caos, `paso_sin_movimiento`) son anteriores a este cambio y no se repitieron.
 
 ### Lo que una sola sesión puede mostrar
 

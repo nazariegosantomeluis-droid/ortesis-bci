@@ -208,9 +208,11 @@ def agente_basico():
 
 @prueba
 def prior_por_paso():
-    """Prior de error por paso (experimental, apagado): el error que el agente predice, con un piso."""
+    """Prior de error por paso (encendido por defecto con epsilon 0.10): el error que el agente predice, con un piso."""
     from agente_errp import AgenteErrP, ConfigAgente
-    assert config.PRIOR_POR_PASO is False and ConfigAgente().prior_por_paso is False     # apagado por defecto
+    assert config.PRIOR_POR_PASO is True and config.PISO_PRIOR_PASO == 0.10                # el defecto medido el 4 de octubre
+    assert ConfigAgente().prior_por_paso is True and ConfigAgente().piso_prior == 0.10
+    assert ConfigAgente(prior_por_paso=False).prior_por_paso is False                     # y se puede apagar
     kw = dict(salida_detector='calibrada', p_error_calibracion=0.3)
     phi = np.array([6.0])                                    # decoder muy seguro: p' ~ 0.998, error predicho ~ 0.002
 
@@ -218,7 +220,7 @@ def prior_por_paso():
         ag = AgenteErrP([1.0], 0.0, ConfigAgente(**kw, **c))
         d = ag.decidir(phi)
         return ag.actualizar(0.9, False, 1.0)['P_hat'], d.p_prima, ag
-    base, p_prima, _ = p_hat()
+    base, p_prima, _ = p_hat(prior_por_paso=False)
     assert p_prima > 0.99
     for piso, esperado in ((0.0, 0.0), (0.05, 0.05), (0.10, 0.10), (None, 0.2)):         # None: la tasa global (prior 0.2)
         ph, _, ag = p_hat(prior_por_paso=True, piso_prior=piso)
@@ -238,7 +240,15 @@ def prior_por_paso():
             raise AssertionError('debio rechazar el piso')
         except ValueError:
             pass
-    return 'apagado por defecto; con epsilon 0, 0.05, 0.10 y tasa global el prior de cada paso es el error predicho con piso'
+    # velocidad de recuperacion (estudios/prior_por_paso.py): no recuperada = infinito, y el p90 lo dice
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import prior_por_paso as pp
+    series = {0: [0.5, 1.0, 1.7, 2.0, 2.0], 1: [0.1, 0.5, 1.0, 1.5, 1.7], 2: [0.1] * 5}     # recupera en 3, en 5 y nunca (meta 1.68)
+    filas = [{'sujeto': s, 'rep': 0, 'bloque': 'real', 'primero': True, 'post': True, 'beta_pre': 0.0, 'beta': b, 'erroneo': False, 'sombra': False}
+             for s, bs in series.items() for b in bs]
+    v = pp.velocidad(filas)
+    assert v['n'] == 3 and v['recuperadas'] == 2 and v['mediana'] == 5 and v['p90'] == np.inf, v
+    return 'encendido por defecto (epsilon 0.10); con epsilon 0, 0.05, 0.10 y tasa global el prior de cada paso es el error predicho con piso'
 
 
 @prueba
@@ -740,8 +750,15 @@ def orquestador_sham():
     sham = [f for f in filas if f['bloque'] == 'sham']
     assert {f['estado'] for f in sham} <= {'LAZO_ADAPTATIVO', 'PERTURBACION'}          # nunca congelado
     assert {f['fiabilidad'] for f in sham} == {'1.0'}
-    # fuente 'nula': P_hat es el prior, igual en todos los pasos con epoca; beta no sigue a los errores
-    assert len({f['P_hat'] for f in sham if f['P_hat']}) == 1
+    # fuente 'nula': P_hat es solo el prior del paso (con el prior por paso, el error que el agente predice
+    # con su piso: depende de p', no del error verdadero); sin la bandera seria el mismo prior en todos los pasos
+    con = [f for f in sham if f['P_hat']]
+    assert con
+    if orq.agente.cfg.prior_por_paso:
+        piso = orq.agente.cfg.piso_prior
+        assert all(abs(float(f['P_hat']) - max(1 - max(float(f['p_prima']), 1 - float(f['p_prima'])), piso)) < 2e-3 for f in con)
+    else:
+        assert len({f['P_hat'] for f in con}) == 1
     c = orq.comparacion_sham
     assert c['orden'] == ['sham', 'real'] and c['ic_dif'][0] <= c['dif'] <= c['ic_dif'][1]
     assert orq.error_post['agente'] == c['real']['agente']                      # el CP4 es el del bloque real
