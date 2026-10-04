@@ -19,10 +19,11 @@ source .venv/Scripts/activate
    No cierres la tapa durante la demo: la suspensión congela la sesión.
 2. **Código de la demo.** `git checkout main && git pull` y comprueba que estás en la etiqueta `v-demo` (`git describe --tags`).
 3. **Humo.** `python pruebas.py` debe terminar con todas las pruebas en verde (unos 3 minutos).
-4. **Borra los modelos viejos.** En `modelos/` quedan los del gemelo de las pruebas. Bórralos para que nadie los cargue por error:
+4. **Quita los modelos viejos.** En `modelos/` quedan los del gemelo de las pruebas. Quítalos para que nadie los cargue por error, **sin llevarte `decoder_preentrenado.pkl`** (no está en el repositorio y regenerarlo exige bajar unos 350 MB de PhysioNet):
    ```bash
-   rm -f modelos/*.pkl modelos/*.npz resultados/estado_sesion.json
+   python demo.py preflight --limpiar-modelos      # los mueve a modelos/_anteriores/ y deja el preentrenado
    ```
+   A mano, el equivalente que borra de verdad es `find modelos -maxdepth 1 \( -name '*.pkl' -o -name '*.npz' \) ! -name decoder_preentrenado.pkl -delete` y `rm -f resultados/estado_sesion.json`. Un `rm -f modelos/*.pkl` a secas **sí** borra el preentrenado.
 5. **Lleva:** el casco con **su dongle**, la órtesis con su cable USB, gel o solución para los electrodos, y cargadores.
 
 ## 2. Al llegar: verificar el casco (5 minutos)
@@ -77,6 +78,39 @@ python orquestador.py real --puerto COM4
 ```
 
 Con la app UnicornLSL como fuente, no lances el puente y usa `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
+
+### Atajo: `python demo.py`
+
+Hace lo de arriba en el orden correcto, con una revisión previa y una bitácora. No cambia el orquestador: si algo falla aquí, los comandos manuales de arriba siguen valiendo.
+
+```bash
+python demo.py preflight --puerto COM4                  # solo revisa: OK / AVISO / FALLA, con qué hacer
+python demo.py lanzar --puerto COM4                     # revisa, y lanza puente + tablero + orquestador
+python demo.py lanzar --plan unicornlsl --puerto COM4   # la fuente es la app UnicornLSL: no lanza el puente
+python demo.py lanzar --plan gemelo --ortesis-sim       # sin casco: el gemelo digital como fuente
+python demo.py lanzar --puerto COM4 -- --sham --preentrenado   # lo que va tras `--` pasa tal cual al orquestador
+python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real
+```
+
+También acepta `--narrador`, `--copiloto`, `--flechas`, `--idioma en`, `--serie <número>` (varios cascos cerca), `--eeg-nombre` y `--sin-tablero`.
+
+| El preflight revisa | AVISO o FALLA si |
+|---|---|
+| Código | no estás en la etiqueta `v-demo` (AVISO), hay cambios sin guardar (AVISO) o `origin/main` trae commits que no tienes (AVISO: pregunta a Luis; solo él aprueba cambios a `main`) |
+| Dependencias | falta algo que se importa de verdad: numpy, scipy, scikit-learn, pylsl, pyriemann y, según el plan, brainflow, pyserial y pyqtgraph (FALLA) |
+| Modelos | quedan calibraciones de otra persona o del gemelo (AVISO; `--limpiar-modelos` las mueve) |
+| Flujos LSL | ya hay un flujo `EEG`, o `Marcadores`/`Paso`/`Estado` (FALLA); con `--plan unicornlsl`, no se ve el flujo `Data` de la app (FALLA) |
+| Órtesis | el puerto no existe (FALLA) |
+| Verificaciones de hoy | `verificar_unicorn.py` o `verificar_ortesis.py` no se corrieron, son de hace más de 4 h o probaron otra fuente (AVISO); una comprobación crítica en rojo (FALLA). **No las corre: son guiadas.** |
+| IA y plan B | sin llave de la API (AVISO: narrador, copiloto y co-investigador usan plantillas); ninguna sesión real grabada para repetir (AVISO) |
+| Disco | menos de 500 MB libres (FALLA) |
+
+- Una FALLA detiene `lanzar` (código de salida 2). `--ignorar-fallas` sigue de todos modos, bajo tu responsabilidad, y queda escrito en la bitácora.
+- Los procesos de fondo escriben en `resultados/logs_demo/<fecha>/` (`fuente.log`, `tablero.log`, `narrador.log`). La bitácora, con el preflight, los comandos exactos, los extras, cómo se cerró cada proceso y los archivos nuevos, queda en `resultados/demo_<fecha>.json`.
+- Ctrl+C en la terminal del orquestador cierra todo, y cierra cada proceso por su PID (nunca por nombre). Primero se les pide que terminen, para que el puente suelte el casco.
+- El código de salida de `lanzar` es el del orquestador. **No esconde un checkpoint en NO GO, no agrega `--forzar` ni `--saltar-calibracion` por su cuenta y no contesta el cuestionario.** Si hace falta forzar, se pide a propósito: `python demo.py lanzar -- --forzar`.
+- El EEG crudo queda en `resultados/sesion_unicorn_<fecha>.csv` (con fecha), no en `sesion_unicorn.csv`: guarda ese. **LabRecorder no lo abre este programa**: ábrelo tú y selecciona todos los flujos; `Marcadores`, `Paso` y `Estado` aparecen cuando arranca el orquestador.
+- **Sin probar en Windows.** Se probó en Linux contra el gemelo. Quedan sin comprobar con la laptop de la demo: el listado de puertos COM, el cierre con Ctrl+Break y que el puente suelte el casco al cerrarse. Antes de depender de él, corre en esa laptop `python demo.py preflight` y una vez `python demo.py lanzar --plan gemelo --ortesis-sim`.
 
 **Qué va a pasar** (unos 15 minutos):
 
@@ -155,15 +189,15 @@ En este orden:
    python tablero.py                                              # terminal 1
    python repetir_sesion.py --ultima --velocidad 2 --puerto COM4  # terminal 2
    ```
-   `--ultima` toma la sesión real más reciente; también se le puede dar un archivo `resultados/sesion_real_<fecha>_estado.jsonl`. Empieza en el lazo y conserva los checkpoints. Es una repetición: nada se decide en vivo, y hay que decirlo.
+   `--ultima` toma la sesión real más reciente; también se le puede dar un archivo `resultados/sesion_real_<fecha>_estado.jsonl`. Empieza en el lazo y conserva los checkpoints. Es una repetición: nada se decide en vivo, y hay que decirlo. Atajo: `python demo.py planb --puerto COM4` (si no hay sesión grabada, lo dice y no abre nada).
 2. **El gemelo digital en vivo**, sin casco. El lazo completo corre de verdad, pero el cerebro es sintético:
    ```bash
    python cerebro_sintetico.py                 # terminal 1, en lugar del puente
    python tablero.py                           # terminal 2
    python orquestador.py real --puerto COM4    # terminal 3 (o --ortesis-sim sin la órtesis)
    ```
-   Tarda lo mismo que una sesión real. Hay que presentarlo como gemelo, no como una persona.
-3. **La señal grabada.** `python puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv` vuelve a publicar el EEG crudo. Sirve para mostrar la señal y los semáforos; no sirve para el lazo, porque lo grabado no responde a las señales nuevas.
+   Tarda lo mismo que una sesión real. Hay que presentarlo como gemelo, no como una persona. Atajo: `python demo.py lanzar --plan gemelo --puerto COM4`.
+3. **La señal grabada.** `python puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv` (o el `sesion_unicorn_<fecha>.csv` que dejó `demo.py`) vuelve a publicar el EEG crudo. Sirve para mostrar la señal y los semáforos; no sirve para el lazo, porque lo grabado no responde a las señales nuevas.
 
 ## 7. Si algo se cae a media sesión
 
