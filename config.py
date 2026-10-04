@@ -7,13 +7,12 @@ from pathlib import Path
 
 # ============================ Flujos LSL ============================
 # nombre: (tipo, canales, Hz [0 = irregular], formato, source_id, quien lo produce)
+# El decoder de MI y el detector de ErrP corren dentro del orquestador (hardware.py): no publican flujos propios.
 FLUJOS = {
     'EEG':        ('EEG',     8, 250, 'float32', 'unicorn-01', 'puente_lsl.py (o el gemelo)'),
     'IMU':        ('IMU',     6, 250, 'float32', 'unicorn-imu-01', 'puente_lsl.py (o el gemelo)'),
-    'Intencion':  ('Control', 1, 16,  'float32', 'mi-01',     'decoder MI (B1)'),
     'Marcadores': ('Markers', 1, 0,   'string',  'orq-01',    'orquestador'),
     'Paso':       ('Control', 3, 0,   'float32', 'agente-01', 'orquestador'),   # canales en el lazo: p_prima, direccion, delta
-    'Error':      ('Control', 3, 0,   'float32', 'errp-01',   'detector ErrP (B2)'),
     'Estado':     ('Markers', 1, 0,   'string',  'estado-01', 'orquestador (JSON por paso, para el tablero)'),
     'Narracion':  ('Markers', 1, 0,   'string',  'narrador-01', 'narrador.py (JSON: una frase por evento, para el tablero)'),
 }
