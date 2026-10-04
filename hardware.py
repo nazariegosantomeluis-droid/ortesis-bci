@@ -1054,21 +1054,34 @@ def evaluar_latencias(latencias_ms):
     return {'ok': ok, 'mad_ms': mad, 'p95_ms': p95, 'perdidos': perdidos, 'texto': texto}
 
 
+def _tasas_por_ensayos(errores, tam_ensayo, n_boot, rng):
+    """Tasas de error de n_boot remuestreos de ENSAYOS (bloques de tam_ensayo pasos con la misma meta)."""
+    e = np.asarray(errores, dtype=float)
+    bloques = [e[i:i + tam_ensayo] for i in range(0, e.size, tam_ensayo)]
+    return np.array([np.concatenate([bloques[i] for i in rng.integers(0, len(bloques), len(bloques))]).mean()
+                     for _ in range(n_boot)])
+
+
 def intervalo_error(errores, nivel=0.90, tam_ensayo=config.PASOS_ENSAYO, n_boot=2000, semilla=0):
     """Intervalo bootstrap de una tasa de error del lazo, remuestreando ENSAYOS (bloques de
     `tam_ensayo` pasos con la misma meta) y no pasos sueltos: los errores de un ensayo estan
     correlacionados y remuestrear pasos daria un intervalo demasiado estrecho."""
-    e = np.asarray(errores, dtype=float)
-    if e.size == 0:
+    if len(errores) == 0:
         return 0.0, 1.0
-    bloques = [e[i:i + tam_ensayo] for i in range(0, e.size, tam_ensayo)]
-    rng = np.random.default_rng(semilla)
-    tasas = []
-    for _ in range(n_boot):
-        elegidos = rng.integers(0, len(bloques), len(bloques))
-        tasas.append(np.concatenate([bloques[i] for i in elegidos]).mean())
+    tasas = _tasas_por_ensayos(errores, tam_ensayo, n_boot, np.random.default_rng(semilla))
     q = (1 - nivel) / 2
     return float(np.quantile(tasas, q)), float(np.quantile(tasas, 1 - q))
+
+
+def intervalo_diferencia(errores_a, errores_b, nivel=0.90, tam_ensayo=config.PASOS_ENSAYO, n_boot=2000, semilla=0):
+    """Intervalo bootstrap de tasa(a) - tasa(b) entre dos tramos del lazo (los dos bloques del control
+    causal), remuestreando los ensayos de cada tramo por separado."""
+    if len(errores_a) == 0 or len(errores_b) == 0:
+        return -1.0, 1.0
+    rng = np.random.default_rng(semilla)
+    d = _tasas_por_ensayos(errores_a, tam_ensayo, n_boot, rng) - _tasas_por_ensayos(errores_b, tam_ensayo, n_boot, rng)
+    q = (1 - nivel) / 2
+    return float(np.quantile(d, q)), float(np.quantile(d, 1 - q))
 
 
 def intervalo_ba(y, pred, nivel=0.90, n_boot=1000, semilla=0):

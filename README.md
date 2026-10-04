@@ -24,7 +24,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 42/42 pruebas pasaron
+python pruebas.py                    # debe decir 46/46 pruebas pasaron
 ```
 
 ## Archivos
@@ -32,9 +32,9 @@ python pruebas.py                    # debe decir 42/42 pruebas pasaron
 | Archivo | Qué hace |
 |---|---|
 | `config.py` | **El contrato**: flujos LSL, marcadores, columnas del CSV, umbrales, protocolo del ESP32, estados. Nadie define estas cosas en otro lado. |
-| `agente_errp.py` | Agente bayesiano + `ConfianzaDetector` (confiabilidad viva del detector de ErrP). |
+| `agente_errp.py` | Agente bayesiano + `ConfianzaDetector` (confiabilidad viva del detector de ErrP) + `SenalSham` (lo que recibe el agente en el bloque sham del control causal). |
 | `simulador_lazo.py` | Piloto sintético para probar y comparar agentes sin casco. |
-| `orquestador.py` | Máquina de estados, calibraciones, checkpoints go/no go, lazo, CSV. Backends `sim` y `real`. |
+| `orquestador.py` | Máquina de estados, calibraciones, checkpoints go/no go, lazo, CSV. Backends `sim` y `real`. Con `--sham`, control causal: bloque real contra bloque sham. |
 | `hardware.py` | EEG por LSL, órtesis por USB (o simulada), decoder de MI con recentrado y detector de ErrP calibrado. |
 | `puente_lsl.py` | BrainFlow → LSL: Unicorn (`--placa unicorn --serie <num>`), placa sintética, playback o Cyton. Publica `EEG` e `IMU` con la hora de cada muestra reconstruida por contador, y registra los huecos de Bluetooth. |
 | `verificar_unicorn.py` | Con el casco puesto: comprueba orden de canales, unidades, contador, IMU, batería y validez, y dice qué fuente usar. |
@@ -165,6 +165,39 @@ Son cifras del gemelo, no de una persona. Parte de la mejora del detector actual
 ![Control negativo con la configuración final](docs/figuras/control_negativo.png)
 
 Sigue siendo el gemelo, no una persona. El simulador rápido (`simulador_lazo.py`, la curva de robustez) no modela los topes: ahí todo paso informa, y por eso recupera antes.
+
+## Control causal en vivo: bloque real contra bloque sham (`--sham`)
+
+El control negativo de arriba se midió fuera de línea. `--sham` lo lleva a la sesión, frente al jurado. En lugar del bloque adaptativo corren **dos bloques del mismo largo, uno real y uno sham, en orden al azar**:
+
+- Cada bloque arranca con el agente reiniciado (beta, varianza y prior) y sin perturbación, y recibe la suya (2.4 logits) en el mismo paso (el 10, tras dos ensayos).
+- En el bloque sham el agente aprende igual de rápido (fiabilidad fija en la calibrada, sin congelar), pero **no recibe la evidencia del ErrP**: recibe la tasa base de la calibración, que no dice nada del paso. El `ConfianzaDetector` sigue midiendo al detector, así que la BA viva se puede comparar entre bloques.
+- **Ciego simple:** el piloto no sabe cuál bloque es cuál. La consola y el tablero dicen «A» y «B»; el tablero muestra cuál es el real solo cuando el operador pulsa *Revelar bloques*.
+- El orden queda en el CSV (columna `bloque`) y en los marcadores `bloque:real` y `bloque:sham`. `EVALUACION` y el tablero comparan los bloques lado a lado: error tras perturbar con intervalo del 90 %, tiempo de recuperación y si se recuperó. El CP4 es el del bloque real.
+
+```bash
+python orquestador.py real --puerto COM4 --sham      # 60 pasos por bloque: unos 4 minutos los dos
+python estudios/sham_gemelo.py                       # el criterio de aceptación en el gemelo (~2 min)
+```
+
+Medido en el gemelo sin LSL y con los topes del recorrido (`estudios/sham_gemelo.py`; 4 sujetos × 4 sesiones, 60 pasos por bloque, con los tres detectores del control negativo). **Es el gemelo, no una persona.**
+
+| Detector | Qué recibe el agente en el sham | Real se recupera | Sham se recupera | Error tras perturbar, real / sham | Sham − real (IC 90 %) |
+|---|---|---|---|---|---|
+| actual | **sin evidencia del ErrP** (por defecto) | **16/16** (mediana 26 pasos) | **0/16** | 0.342 / 0.479 | **+0.136 [+0.111, +0.161]** |
+| actual | `p_errp` permutados | 16/16 | 11/16 | 0.349 / 0.422 | +0.074 [+0.038, +0.106] |
+| de ayer | sin evidencia del ErrP | 14/16 | 0/16 | 0.366 / 0.476 | +0.110 [+0.085, +0.136] |
+| de ayer | `p_errp` permutados | 15/16 | 9/16 | 0.367 / 0.425 | +0.058 [+0.030, +0.084] |
+| débil | sin evidencia del ErrP | 7/16 | 2/16 | 0.449 / 0.466 | +0.017 [−0.003, +0.036] |
+| débil | `p_errp` permutados | 8/16 | 6/16 | 0.425 / 0.453 | +0.027 [−0.001, +0.057] |
+
+El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer; no con el detector débil**, con el que el propio bloque real se recupera solo 7 veces de 16.
+
+**Hallazgo: permutar los `p_errp` no sirve de sham para este agente.** El diseño original era darle al agente los `p_errp` del mismo bloque permutados entre los pasos recientes: misma distribución, sin relación con el error de cada paso. Así el sham se recupera en 11 de 16 sesiones. La razón: tras la perturbación casi todas las decisiones van hacia el mismo lado, y entonces la sola **tasa** de ErrP ya dice hacia dónde corregir, caiga cada ErrP en el paso que caiga. La permutación conserva la tasa, así que conserva la información. Lo que el agente usa del ErrP es, sobre todo, cuántos hay; la alineación paso a paso aporta menos (0.07 de error). Por eso el sham por defecto quita la evidencia en lugar de barajarla; el otro queda disponible con `--sham-fuente recientes`.
+
+**Lo que una sola sesión puede mostrar.** Tras la perturbación quedan 50 pasos por bloque: la diferencia de error de una sesión tiene un intervalo de ±0.2 y casi nunca excluye el 0. Lo que se ve en vivo es si beta se recuperó en un bloque y no en el otro. En el simulador rápido el contraste de error es menor (la perturbación sube el error de la sombra a 0.30, no a 0.50), y ahí solo se comprueba la recuperación: 8 de 12 en el real contra 0 de 12 en el sham (`pruebas.py`, `orquestador_sham`).
+
+**Crédito.** La idea de un bloque sham dentro de la sesión es de jusren (rama `b1-b2-sham-errp`). Su sham es otro control: con el piloto en reposo la órtesis se mueve sola y `p(t)` del decoder no debe seguirla. La implementación de `--sham` es distinta y propia.
 
 ## Resiliencia: el lazo que no se cae
 

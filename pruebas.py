@@ -58,6 +58,10 @@ def contrato():
     # Tarea 2: movimientos ajenos anunciados, fuera del analisis del agente
     assert config.m_paso_ajeno(3) == 'paso_ajeno:3' and config.AVISO_AJENO == 'aviso_ajeno'
     assert config.m_paso_quieto(3) == 'paso_quieto:3' and config.SIN_MOVIMIENTO == 'sin_movimiento'
+    # control causal: los dos bloques tienen marcador y columna en el CSV
+    assert [config.m_bloque(b) for b in config.BLOQUES_SHAM] == ['bloque:real', 'bloque:sham']
+    assert 'bloque' in config.COLUMNAS_CSV and config.SHAM_ERRP_FUENTE in config.SHAM_ERRP_FUENTES
+    assert 60 <= config.SHAM_ERRP_PASOS <= 80 and config.SHAM_ERRP_PERTURBAR_EN % config.PASOS_ENSAYO == 0
     assert config.IGNORAR_SIN_MOVIMIENTO is True
     assert 'ajeno' in config.MOTIVOS_EXCLUSION and config.CANALES_N1 == config.PAPELES['visual']
     # montaje del Unicorn Hybrid Black y el papel de cada sensor
@@ -630,6 +634,129 @@ def reanudar():
             f"sesion sin interrumpir (con caos)")
 
 
+# ------------------------------------------------------------ control causal con sham
+@prueba
+def senal_sham():
+    """Lo que recibe el agente en el bloque sham. 'nula': LLR = 0 con las dos salidas del detector
+    (P_hat queda en el prior). 'recientes': los mismos valores en otro orden, cada uno una sola vez,
+    y sin el del paso actual; se guarda y se restaura para --reanudar."""
+    from agente_errp import AgenteErrP, ConfigAgente, SenalSham
+    for salida in ('calibrada', 'binaria'):
+        ag = AgenteErrP([1.0], 0.0, ConfigAgente(salida_detector=salida))
+        p, s, e = SenalSham('nula')(0.97, ag.cfg)
+        assert abs(ag.prob_error(p, s, e, 1.0) - ag.prior) < 1e-12, salida
+    cfg = ConfigAgente()
+    senal, entra = SenalSham('recientes', semilla=1, memoria=8), [k / 100 for k in range(1, 61)]
+    sale = [senal(p, cfg)[0] for p in entra]
+    assert all(np.isnan(v) for v in sale[:8]) and not any(np.isnan(v) for v in sale[8:])
+    dados = sale[8:]
+    assert len(set(dados)) == len(dados) and set(dados) | set(senal.guardados) == set(entra)
+    assert all(d != p for d, p in zip(sale, entra)), 'nunca entrega el p_errp del propio paso'
+    assert np.mean([abs(entra.index(d) - k) for k, d in enumerate(sale) if not np.isnan(d)]) < 20   # son recientes
+    copia = SenalSham('recientes').desde_dict(senal.a_dict())
+    assert [copia(0.5, cfg)[0] for _ in range(5)] == [senal(0.5, cfg)[0] for _ in range(5)]
+    try:
+        SenalSham('otra')
+        raise AssertionError('acepto una fuente desconocida')
+    except ValueError:
+        pass
+    import hardware as hw
+    lo, hi = hw.intervalo_diferencia([1] * 40, [0] * 40)
+    assert lo == hi == 1.0
+    lo, hi = hw.intervalo_diferencia([0, 1] * 20, [1, 0] * 20)
+    assert lo <= 0 <= hi
+    return "'nula' deja P_hat en el prior; 'recientes' permuta sin repetir ni adelantar; intervalo de la diferencia"
+
+
+def _sesion_sham(semilla, orden, fuente=config.SHAM_ERRP_FUENTE, extra=()):
+    import orquestador
+    a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', str(semilla), '--pasos_estatico', '20', '--sham',
+                                '--sham-orden', orden, '--sham-fuente', fuente, *extra])
+    orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+    eventos = []
+    estado = orq.salidas.estado
+    orq.salidas.estado = lambda **d: (eventos.append(d), estado(**d))[1]
+    orquestador.correr(orq, a)
+    return orq, eventos
+
+
+@prueba
+def orquestador_sham():
+    """--sham: dos bloques del mismo largo con el agente reiniciado y su propia perturbacion en el
+    mismo paso; en el sham no se congela y la fiabilidad queda fija; EVALUACION los compara; el
+    flujo Estado no dice cual es cual hasta el final (el tablero lo oculta)."""
+    n, en = config.SHAM_ERRP_PASOS, config.SHAM_ERRP_PERTURBAR_EN
+    orq, eventos = _sesion_sham(3, 'sham-real')
+    filas = list(csv.DictReader(open(orq.ruta_csv)))
+    assert list(filas[0]) == config.COLUMNAS_CSV
+    assert [f['bloque'] for f in filas] == [''] * 20 + ['sham'] * n + ['real'] * n
+    m = orq.salidas.marcadores
+    assert m.index('bloque:sham') < m.index('bloque:real') and m.count(config.PERTURBACION_ON) == 2
+    for nombre, ini in (('sham', 20), ('real', 20 + n)):
+        b = orq.sham['bloques'][nombre]
+        assert b['inicio'] == ini and b['t_perturbacion'] == ini + en and abs(b['beta_pre']) < 1.0, (nombre, b)
+        # arranca reiniciado: la primera fila del bloque tiene la varianza inicial (o menos, si ya aprendio)
+        assert float(filas[ini]['varianza_beta']) <= orq.agente.cfg.varianza_inicial + 1e-9
+    sham = [f for f in filas if f['bloque'] == 'sham']
+    assert {f['estado'] for f in sham} <= {'LAZO_ADAPTATIVO', 'PERTURBACION'}          # nunca congelado
+    assert {f['fiabilidad'] for f in sham} == {'1.0'}
+    # fuente 'nula': P_hat es el prior, igual en todos los pasos con epoca; beta no sigue a los errores
+    assert len({f['P_hat'] for f in sham if f['P_hat']}) == 1
+    c = orq.comparacion_sham
+    assert c['orden'] == ['sham', 'real'] and c['ic_dif'][0] <= c['dif'] <= c['ic_dif'][1]
+    assert orq.error_post['agente'] == c['real']['agente']                      # el CP4 es el del bloque real
+    pasos = [e for e in eventos if e['tipo'] == 'paso']
+    assert [e['bloque'] for e in pasos] == [None] * 20 + ['A'] * n + ['B'] * n
+    assert [e['tipo'] for e in eventos if e['tipo'] in ('bloque_sham', 'sham')] == ['bloque_sham', 'bloque_sham', 'sham']
+    # 12 sesiones del simulador con el orden alternado: beta se recupera en el real y casi nunca en el
+    # sham. (En el simulador la perturbacion sube poco el error, 0.30 de la sombra contra 0.50 en el
+    # gemelo, asi que aqui se compara la recuperacion; la diferencia de error se mide en el gemelo.)
+    rec = {'real': 0, 'sham': 0}
+    for s in range(12):
+        o, _ = _sesion_sham(100 + s, ('real-sham', 'sham-real')[s % 2])
+        for b in rec:
+            rec[b] += o.comparacion_sham[b]['pasos'] is not None
+    assert rec['real'] >= rec['sham'] + 5 and rec['sham'] <= 2, rec
+    # la fuente 'recientes' tambien corre; el orden al azar queda registrado
+    o, _ = _sesion_sham(5, 'real-sham', 'recientes')
+    assert len({f['P_hat'] for f in csv.DictReader(open(o.ruta_csv)) if f['bloque'] == 'sham' and f['P_hat']}) > 1
+    import orquestador
+    a = orquestador.argumentos(['sim', '--sham'])
+    assert a.sham_orden is None and sorted(orquestador.Orquestador(orquestador.BackendSim(a), a).sham['orden']) == ['real', 'sham']
+    return f"simulador, 12 sesiones: beta se recupera en el bloque real {rec['real']}/12 y en el sham {rec['sham']}/12"
+
+
+@prueba
+def reanudar_sham():
+    """Una sesion --sham interrumpida a mitad del segundo bloque se reanuda identica (misma senal sham)."""
+    import orquestador
+    for fuente in config.SHAM_ERRP_FUENTES:
+        ref, _ = _sesion_sham(7, 'real-sham', fuente)
+        referencia = list(csv.DictReader(open(ref.ruta_csv)))
+        a = orquestador.argumentos(['sim', '--ciclo', '0', '--semilla', '7', '--pasos_estatico', '20', '--sham',
+                                    '--sham-orden', 'real-sham', '--sham-fuente', fuente])
+        orq = orquestador.Orquestador(orquestador.BackendSim(a), a)
+        corte = 20 + config.SHAM_ERRP_PASOS + 33
+
+        def guardar(terminada=False, orq=orq):
+            orquestador.Orquestador.guardar(orq, terminada)
+            if len(orq.filas) == corte:
+                raise KeyboardInterrupt
+        orq.guardar = guardar
+        orquestador.correr(orq, a)
+        inst = orquestador.cargar_instantanea()
+        assert inst['paso'] == corte and inst['sham']['actual'] == 'sham' and inst['prog']['bloque'] == 'sham'
+        a2 = orquestador.argumentos_reanudados(inst, orquestador.argumentos(['sim', '--reanudar', '--ciclo', '0']))
+        orq2 = orquestador.Orquestador(orquestador.BackendSim(a2), a2, inst)
+        orquestador.correr(orq2, a2)
+        filas = list(csv.DictReader(open(orq2.ruta_csv)))
+        quitar = lambda f: {k: v for k, v in f.items() if k not in ('t_iso', 't_lsl')}
+        distintas = [i for i, (x, y) in enumerate(zip(filas, referencia)) if quitar(x) != quitar(y)]
+        assert len(filas) == len(referencia) and not distintas, (fuente, len(filas), distintas[:5])
+        assert orq2.comparacion_sham['real']['agente'] == ref.comparacion_sham['real']['agente']
+    return 'interrumpida en el paso 33 del bloque sham y reanudada: CSV identico con las dos fuentes'
+
+
 # ------------------------------------------------------------ tablero
 @prueba
 def tablero_salud():
@@ -680,6 +807,20 @@ def tablero_salud():
         assert '+0.42' in t.lbl_iic.text() and 'exploratorio' in t.lbl_iic.text() and '12' in t.lbl_iic.text()
         t._procesar({**paso, 'paso': 4, 'iic': {**r, 'iic': None, 'ic': None}})
         assert 'sin estimar' in t.lbl_iic.text()
+        # control causal: ciego hasta que el operador pulsa 'Revelar bloques'
+        assert t.btn_sham.isHidden() and t.lbl_sham.text() == ''
+        t._procesar({'tipo': 'bloque_sham', 'letra': 'A', 'nombre': 'sham', 'pasos': 60, 'fuente': 'nula'})
+        assert 'bloque A' in t.lbl_sham.text() and 'SHAM' not in t.lbl_sham.text() and not t.btn_sham.isHidden()
+        b = lambda err, pasos: {'agente': err, 'sombra': 0.5, 'ic_agente': [err - 0.1, err + 0.1],
+                                'ic_sombra': [0.4, 0.6], 'pasos': pasos, 'seg': pasos and pasos * 2.1}
+        t._procesar({'tipo': 'sham', 'orden': ['sham', 'real'], 'fuente': 'nula', 'dif': 0.14, 'ic_dif': [0.02, 0.26],
+                     'solo_real': True, 'real': b(0.33, 26), 'sham': b(0.47, None)})
+        txt = t.lbl_sham.text()
+        assert 'Bloque A: error 0.47' in txt and 'NO se recupero' in txt and '26 pasos' in txt, txt
+        assert 'SHAM' not in txt and 'REAL' not in txt and 'sham - real' not in txt, txt
+        t.btn_sham.setChecked(True)
+        txt = t.lbl_sham.text()
+        assert 'Bloque A = SHAM' in txt and 'Bloque B = REAL' in txt and 'sham - real +0.14' in txt, txt
     finally:
         t.close()
     return 'cuatro semaforos (gris al calentar), PAUSA SEGURA en rojo con el electrodo y la causa; IIC y AUTOMATICO'
@@ -2103,7 +2244,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'tablero_salud', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

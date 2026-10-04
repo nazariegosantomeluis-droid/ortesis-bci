@@ -12,6 +12,7 @@ Uso
   python orquestador.py real --puerto COM4 --saltar-calibracion   usa modelos guardados
 
   python orquestador.py real --puerto COM4 --reanudar   continua la sesion tras un cierre inesperado
+  python orquestador.py real --puerto COM4 --sham       control causal: bloque real contra bloque sham
 
 Antes de 'real': puente_lsl.py corriendo y LabRecorder grabando.
 
@@ -32,6 +33,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import sys
 import time
 from datetime import datetime
@@ -42,7 +44,7 @@ from pylsl import StreamOutlet, local_clock
 
 import config
 import embodiment as emb
-from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, sigmoide
+from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, SenalSham, sigmoide
 from caos import PlanCaos
 from salud import Vigilante
 
@@ -740,6 +742,11 @@ class Orquestador:
         self.avisos_salud = []                       # lo que se dijo en consola sobre la salud
         self.excluidos, self.error_post = {}, None   # los llena evaluar()
         self.sin_movimiento = 0                      # pasos que no movieron la ortesis (lo llena evaluar())
+        # control causal (--sham): orden de los bloques, cual va y donde se perturbo cada uno
+        self.sham, self.senal_sham, self.comparacion_sham = None, None, None
+        if getattr(a, 'sham', False):
+            orden = a.sham_orden.split('-') if a.sham_orden else random.SystemRandom().sample(config.BLOQUES_SHAM, 2)
+            self.sham = {'orden': orden, 'fuente': a.sham_fuente, 'actual': None, 'bloques': {}}
         # Tarea 2 (EXPLORATORIO): N1 de los movimientos propios y ajenos -> IIC
         self.embodiment = emb.IndiceEmbodiment(semilla=a.semilla)
         self.iic, self.con_ajenos = self.embodiment.estimar(), False
@@ -792,6 +799,9 @@ class Orquestador:
         self.confianza.desde_dict(inst['confianza'])
         self.angulo, self.desplazamiento = inst['angulo'], inst['desplazamiento']
         self.t_perturbacion, self.beta_pre, self.prog = inst['t_perturbacion'], inst['beta_pre'], inst['prog']
+        self.sham = inst.get('sham')
+        if inst.get('senal_sham'):
+            self.senal_sham = SenalSham(self.sham['fuente']).desde_dict(inst['senal_sham'])
         aviso(f"Sesion REANUDADA en el paso {inst['paso']} ({self.fsm.estado}), beta {self.agente.beta:+.3f}. "
               f"CSV: {self.ruta_csv}")
         return True
@@ -816,7 +826,8 @@ class Orquestador:
                 'angulo': self.angulo, 'desplazamiento': self.desplazamiento,
                 't_perturbacion': self.t_perturbacion, 'beta_pre': self.beta_pre, 'prog': self.prog,
                 'agente': self.agente.a_dict(), 'confianza': self.confianza.a_dict(),
-                'preparacion': self.preparacion, 'backend': self.b.instantanea()}
+                'preparacion': self.preparacion, 'backend': self.b.instantanea(), 'sham': self.sham,
+                'senal_sham': self.senal_sham.a_dict() if self.senal_sham else None}
 
     def guardar(self, terminada=False):
         guardar_instantanea(config.ESTADO_SESION_JSON, self.instantanea(terminada))
@@ -886,7 +897,7 @@ class Orquestador:
         """Escribe una fila del CSV con el esquema del contrato (lo que falte queda vacio)."""
         fila = {c: '' for c in config.COLUMNAS_CSV}
         fila.update(t_iso=datetime.now().isoformat(timespec='milliseconds'),
-                    t_lsl=round(local_clock(), 4), estado=self.fsm.estado,
+                    t_lsl=round(local_clock(), 4), estado=self.fsm.estado, bloque=self._bloque_sham() or '',
                     angulo=round(self.angulo, 3), beta=round(self.agente.beta, 4),
                     varianza_beta=round(self.agente.var, 4), salud=self.vigilante.codigo())
         fila.update(campos)
@@ -935,13 +946,22 @@ class Orquestador:
         # escalon 2: con el reloj en ROJO la epoca puede estar desalineada; no se aprende de ella
         aprende = aprender and valido and self.vigilante.colores['reloj'] != config.ROJO
         # P_hat se calcula con la fiabilidad real del detector; el peso decide si se aprende
-        info = self.agente.actualizar(p_errp, art or not valido, self.confianza.fiabilidad_bruta, sens_v, espec_v,
-                                      peso=fiab if aprende else 0.0)
+        sham = self._bloque_sham() == 'sham'
+        if sham:
+            # control causal: el agente aprende a toda velocidad (fiabilidad fija en la calibrada, sin
+            # congelar) de una senal que no dice nada de este paso. La confianza sigue midiendo al detector
+            fiab, sin_epoca = 1.0, art or not valido
+            p_ag, s_ag, e_ag = (float('nan'), sens_v, espec_v) if sin_epoca else self.senal_sham(p_errp, self.agente.cfg)
+            info = self.agente.actualizar(p_ag, sin_epoca, 1.0, s_ag, e_ag, peso=1.0 if aprende else 0.0)
+        else:
+            info = self.agente.actualizar(p_errp, art or not valido, self.confianza.fiabilidad_bruta, sens_v, espec_v,
+                                          peso=fiab if aprende else 0.0)
+        congelado = self.confianza.congelado and not sham
 
         if self.fsm.estado in ('LAZO_ADAPTATIVO', 'APRENDIZAJE_CONGELADO'):
-            if self.confianza.congelado and self.fsm.estado == 'LAZO_ADAPTATIVO':
+            if congelado and self.fsm.estado == 'LAZO_ADAPTATIVO':
                 self.fsm.ir_a('APRENDIZAJE_CONGELADO')
-            elif not self.confianza.congelado and self.fsm.estado == 'APRENDIZAJE_CONGELADO':
+            elif not congelado and self.fsm.estado == 'APRENDIZAJE_CONGELADO':
                 self.fsm.ir_a('LAZO_ADAPTATIVO')
 
         P_hat = info['P_hat']
@@ -961,16 +981,43 @@ class Orquestador:
             p_prima=dec.p_prima, P_hat=None if not np.isfinite(P_hat) else P_hat,
             error=int(erroneo), error_sombra=fila['error_sombra'], beta=info['beta'],
             sd_beta=float(np.sqrt(info['varianza'])), youden=self.confianza.youden,
-            fiabilidad=fiab, congelado=self.confianza.congelado, cambio=info['cambio'],
+            fiabilidad=fiab, congelado=congelado, cambio=info['cambio'],
             latencia_ms=None if not np.isfinite(lat) else lat,
             perturbado=self.desplazamiento != 0, salud=self.vigilante.colores, excluido=excluido,
-            ajeno=False, iic=self.iic)
+            ajeno=False, iic=self.iic, bloque=self._letra_sham())
 
         self.b.fin_paso()
         espera = self.a.ciclo - (time.perf_counter() - t0)
         if espera > 0:
             time.sleep(espera)
         return True
+
+    # ---------------- control causal (--sham) ----------------
+    def _bloque_sham(self):
+        """'real' o 'sham' si va uno de los dos bloques del control causal; si no, None."""
+        return self.sham['actual'] if self.sham else None
+
+    def _letra_sham(self, nombre=None):
+        """Como se le dice al bloque mientras dura el ciego: 'A' el primero, 'B' el segundo."""
+        nombre = nombre or self._bloque_sham()
+        return 'AB'[self.sham['orden'].index(nombre)] if nombre else None
+
+    def bloque_sham(self, nombre, n_pasos):
+        """Un bloque del control causal ('real' o 'sham'): arranca con el agente reiniciado (beta,
+        varianza y prior) y sin perturbacion, y recibe la suya en el paso SHAM_ERRP_PERTURBAR_EN.
+        Sin movimientos ajenos. La consola y el tablero solo dicen 'A' o 'B': el piloto no sabe cual es."""
+        if self.prog is None or self.prog['bloque'] != nombre:      # bloque nuevo (no reanudado)
+            self.agente.reiniciar()
+            self.desplazamiento = 0.0
+            self.senal_sham = SenalSham(self.sham['fuente'], self.a.semilla) if nombre == 'sham' else None
+            self.sham['bloques'][nombre] = {'inicio': len(self.filas), 't_perturbacion': None, 'beta_pre': None}
+            self.salidas.marcador(config.m_bloque(nombre))
+        self.sham['actual'] = nombre
+        aviso(f'Bloque {self._letra_sham()} del control causal ({n_pasos} pasos)...')
+        self.salidas.estado(tipo='bloque_sham', letra=self._letra_sham(), nombre=nombre, pasos=n_pasos,
+                            fuente=self.sham['fuente'])
+        self.bloque(nombre, n_pasos, aprender=True, perturbar_en=config.SHAM_ERRP_PERTURBAR_EN)
+        self.sham['actual'] = None
 
     def _iic_csv(self):
         return '' if self.iic['iic'] is None else round(self.iic['iic'], 3)
@@ -1051,6 +1098,8 @@ class Orquestador:
                 self.desplazamiento = -config.PERTURBACION_LOGITS
                 self.t_perturbacion = len(self.filas)
                 self.beta_pre = self.agente.beta
+                if self._bloque_sham():
+                    self.sham['bloques'][nombre].update(t_perturbacion=self.t_perturbacion, beta_pre=self.beta_pre)
                 self.fsm.ir_a(previo)
             ajeno = self.con_ajenos and self._es_ajeno(t)
             while True:                              # las pausas no consumen pasos del bloque
@@ -1117,32 +1166,10 @@ class Orquestador:
                       f'error sombra={s[m].mean():.2f} {ic(s[m])}')
         if self.a.backend == 'real':
             aviso(f'  latencia ACK: {lat.mean():.1f} +- {lat.std():.1f} ms')
-        if self.t_perturbacion is not None:
-            tp = sum(1 for f in self.filas[:self.t_perturbacion] if not f['excluido'])
-            if tp < len(validas):
-                k2 = tp + int(config.RECUPERACION_MAX_S / config.CICLO_S)
-                self.error_post = {'agente': float(e[tp:k2].mean()), 'sombra': float(s[tp:k2].mean()),
-                                   'ic_agente': self.hw_intervalo(e[tp:k2]), 'ic_sombra': self.hw_intervalo(s[tp:k2])}
-                beta = np.array([f['beta'] for f in validas[tp:]])
-                meta_beta = self.beta_pre + 0.7 * config.PERTURBACION_LOGITS
-                idx = np.flatnonzero(beta >= meta_beta)
-                if idx.size:
-                    n_rec = idx[0] + 1
-                    if self.a.backend == 'real':        # tiempo real medido con los ACK (incluye pausas)
-                        seg = validas[tp + idx[0]]['t_lsl'] - validas[tp]['t_lsl']
-                    else:                               # simulacion: al ritmo nominal del lazo
-                        seg = n_rec * config.CICLO_S
-                    checkpoint(self.salidas, 4, seg <= config.RECUPERACION_MAX_S,
-                               f'recuperacion (beta al 70% de la perturbacion) en {n_rec} pasos '
-                               f'= {seg:.0f} s; error ~2 min tras perturbar: agente '
-                               f'{self.error_post["agente"]:.2f} {ic(e[tp:k2])} vs sombra '
-                               f'{self.error_post["sombra"]:.2f} {ic(s[tp:k2])}',
-                               False, informativo=True)
-                else:
-                    checkpoint(self.salidas, 4, False,
-                               f'no se recupero dentro del bloque; error tras perturbar: agente '
-                               f'{self.error_post["agente"]:.2f} vs sombra {self.error_post["sombra"]:.2f}',
-                               False, informativo=True)
+        if self.sham:
+            self._evaluar_sham()
+        elif self.t_perturbacion is not None:
+            self._cp4(self._tras_perturbar(self.t_perturbacion, self.beta_pre))
         co = getattr(self.b, 'coadapta', None)
         if co is not None:
             ba = co.ba_secuencial()
@@ -1156,6 +1183,73 @@ class Orquestador:
         aviso(f'  beta final = {self.filas[-1]["beta"]}  |  cambios detectados = {self.agente.n_cambios}'
               f'  |  detector vivo: sens {self.confianza.sens:.2f}, espec {self.confianza.espec:.2f}')
         aviso(f'  CSV: {self.ruta_csv}')
+
+    def _tras_perturbar(self, desde, beta_pre, bloque=None):
+        """Lo que paso desde la perturbacion (fila `desde`) hasta el final de la sesion, o de su bloque
+        del control causal: error del agente y de la sombra en los ~2 min siguientes con sus intervalos
+        y la recuperacion (beta al 70 % de la perturbacion). None si no quedo ningun paso valido."""
+        filas = [f for f in self.filas[desde:] if not f['excluido'] and (bloque is None or f['bloque'] == bloque)]
+        if not filas:
+            return None
+        k = int(config.RECUPERACION_MAX_S / config.CICLO_S)
+        e = np.array([f['error_verdadero'] for f in filas[:k]])
+        s = np.array([f['error_sombra'] for f in filas[:k]])
+        r = {'agente': float(e.mean()), 'sombra': float(s.mean()), 'ic_agente': self.hw_intervalo(e),
+             'ic_sombra': self.hw_intervalo(s), 'pasos': None, 'seg': None, 'errores': e.tolist()}
+        idx = np.flatnonzero(np.array([f['beta'] for f in filas]) >= beta_pre + 0.7 * config.PERTURBACION_LOGITS)
+        if idx.size:
+            r['pasos'] = int(idx[0]) + 1
+            if self.a.backend == 'real':            # tiempo real medido con los ACK (incluye pausas)
+                r['seg'] = float(filas[idx[0]]['t_lsl'] - filas[0]['t_lsl'])
+            else:                                   # simulacion: al ritmo nominal del lazo
+                r['seg'] = r['pasos'] * config.CICLO_S
+        return r
+
+    def _cp4(self, r):
+        if r is None:
+            return
+        self.error_post = r
+        ic = '[{:.2f}, {:.2f}]'.format
+        if r['pasos'] is not None:
+            checkpoint(self.salidas, 4, r['seg'] <= config.RECUPERACION_MAX_S,
+                       f'recuperacion (beta al 70% de la perturbacion) en {r["pasos"]} pasos '
+                       f'= {r["seg"]:.0f} s; error ~2 min tras perturbar: agente '
+                       f'{r["agente"]:.2f} {ic(*r["ic_agente"])} vs sombra '
+                       f'{r["sombra"]:.2f} {ic(*r["ic_sombra"])}', False, informativo=True)
+        else:
+            checkpoint(self.salidas, 4, False,
+                       f'no se recupero dentro del bloque; error tras perturbar: agente '
+                       f'{r["agente"]:.2f} vs sombra {r["sombra"]:.2f}', False, informativo=True)
+
+    def _evaluar_sham(self):
+        """Control causal: los dos bloques lado a lado (aqui se rompe el ciego). El CP4 es el del
+        bloque real. La diferencia de error lleva un intervalo que remuestrea los ensayos de cada bloque."""
+        import hardware as hw
+        res = {}
+        for nombre in self.sham['orden']:
+            b = self.sham['bloques'].get(nombre)
+            if b and b['t_perturbacion'] is not None:
+                res[nombre] = self._tras_perturbar(b['t_perturbacion'], b['beta_pre'], nombre)
+        aviso(f"  CONTROL CAUSAL (--sham, fuente '{self.sham['fuente']}'): primero el bloque {self.sham['orden'][0]}; "
+              f"error tras perturbar con intervalo del 90 %")
+        for nombre, r in res.items():
+            if r:
+                rec = f"se recupero en {r['pasos']} pasos = {r['seg']:.0f} s" if r['pasos'] else 'NO se recupero'
+                aviso(f"    bloque {self._letra_sham(nombre)} = {nombre:4s}  error agente {r['agente']:.2f} "
+                      f"[{r['ic_agente'][0]:.2f}, {r['ic_agente'][1]:.2f}]  sombra {r['sombra']:.2f}  {rec}")
+        comp = {'orden': self.sham['orden'], 'fuente': self.sham['fuente'], 'dif': None, 'ic_dif': None, 'solo_real': None,
+                **{n: (None if r is None else {k: v for k, v in r.items() if k != 'errores'}) for n, r in res.items()}}
+        if res.get('real') and res.get('sham'):
+            comp['dif'] = res['sham']['agente'] - res['real']['agente']
+            comp['ic_dif'] = hw.intervalo_diferencia(res['sham']['errores'], res['real']['errores'])
+            comp['solo_real'] = bool(res['real']['pasos'] and not res['sham']['pasos'])
+            aviso(f"    sham - real: {comp['dif']:+.2f} [{comp['ic_dif'][0]:+.2f}, {comp['ic_dif'][1]:+.2f}] -> "
+                  + ('el agente solo se recupero con el ErrP del piloto' if comp['solo_real']
+                     else 'esta sesion no separa los bloques por la recuperacion')
+                  + ('' if comp['ic_dif'][0] > 0 else '; la diferencia de error de una sola sesion no excluye el 0'))
+        self.comparacion_sham = comp
+        self.salidas.estado(tipo='sham', **comp)
+        self._cp4(res.get('real'))
 
     @staticmethod
     def hw_intervalo(errores):
@@ -1213,6 +1307,14 @@ def argumentos(argv=None):
                     help='Tarea 2: un movimiento ajeno cada tantos pasos del lazo adaptativo (0 = ninguno)')
     ap.add_argument('--sin-cuestionario', dest='sin_cuestionario', action='store_true',
                     help='no hace el cuestionario de la Tarea 2 al terminar (real)')
+    ap.add_argument('--sham', action='store_true',
+                    help='control causal: en lugar del bloque adaptativo, dos bloques (real y sham) en orden al azar')
+    ap.add_argument('--sham-pasos', dest='sham_pasos', type=int, default=config.SHAM_ERRP_PASOS,
+                    help='pasos de cada bloque del control causal')
+    ap.add_argument('--sham-orden', dest='sham_orden', choices=['real-sham', 'sham-real'], default=None,
+                    help='fija el orden de los bloques (por defecto, al azar)')
+    ap.add_argument('--sham-fuente', dest='sham_fuente', choices=config.SHAM_ERRP_FUENTES,
+                    default=config.SHAM_ERRP_FUENTE, help='que recibe el agente en el bloque sham (ver config)')
     # sim
     ap.add_argument('--embodiment', type=float, default=0.5,
                     help='solo sim: atenuacion de la N1 simulada de los movimientos propios (Tarea 2)')
@@ -1264,9 +1366,15 @@ def correr(orq, a):
                 aviso(f'Bloque LAZO_ESTATICO ({a.pasos_estatico} pasos)...')
                 orq.bloque('estatico', a.pasos_estatico, aprender=False)
                 orq.fsm.ir_a('LAZO_ADAPTATIVO')
-            aviso(f'Bloque LAZO_ADAPTATIVO ({a.pasos_adaptativo} pasos)...')
-            orq.bloque('adaptativo', a.pasos_adaptativo, aprender=True,
-                       perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3, ajenos=True)
+            if orq.sham:                            # control causal: los ya terminados no se repiten
+                orden = orq.sham['orden']
+                hechos = orden.index(orq.prog['bloque']) if orq.prog and orq.prog['bloque'] in orden else 0
+                for nombre in orden[hechos:]:
+                    orq.bloque_sham(nombre, a.sham_pasos)
+            else:
+                aviso(f'Bloque LAZO_ADAPTATIVO ({a.pasos_adaptativo} pasos)...')
+                orq.bloque('adaptativo', a.pasos_adaptativo, aprender=True,
+                           perturbar_en=None if a.sin_perturbacion else a.pasos_adaptativo // 3, ajenos=True)
             completa = True
         else:
             aviso('Detenido por NO GO. Que hacer en cada caso: docs/DOMINGO.md. Plan B: repetir una sesion '

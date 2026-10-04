@@ -95,11 +95,12 @@ def m_detector(version): return f'detector:v{version}'      # cambio de modelo d
 
 
 # ============================ CSV (una fila por paso) ============================
-COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'meta', 'angulo', 'p_prima',
+COLUMNAS_CSV = ['t_iso', 't_lsl', 'seq', 'estado', 'bloque', 'meta', 'angulo', 'p_prima',
                 'direccion', 'delta', 'P_hat', 'artefacto', 'fiabilidad', 'beta',
                 'varianza_beta', 'sens_viva', 'espec_viva', 'cambio', 'explorando',
                 'error_verdadero', 'error_sombra', 'latencia_ack_ms', 'salud', 'excluido', 'alineacion',
                 'ajeno', 'n1_uv', 'iic']
+# bloque: vacio, o 'real' / 'sham' en los dos bloques del control causal (--sham).
 # alineacion: a que se alineo la epoca del ErrP: 'telemetria' (inicio real del movimiento),
 # 'ack+latencia' (ACK mas la latencia mecanica media medida) o 'ack'. SIN_MOVIMIENTO: la ortesis
 # ya estaba en el tope y no se movio; no hay epoca (ver IGNORAR_SIN_MOVIMIENTO).
@@ -172,6 +173,24 @@ BA_MIN           = 0.75         # checkpoint 3
 ESPEC_MIN        = 0.90
 RECUPERACION_MAX_S = 120.0      # checkpoint 4
 PERTURBACION_LOGITS = 2.4
+
+# ============================ Control causal con sham (--sham) ============================
+# Dos bloques adaptativos del mismo largo, 'real' y 'sham', en orden al azar; cada uno arranca con
+# el agente reiniciado (beta, varianza y prior) y recibe su perturbacion en el mismo paso. En el
+# sham el agente aprende igual de rapido (fiabilidad fija en la calibrada, sin congelar) de una
+# senal que no dice nada del error de cada paso (agente_errp.SenalSham). La idea de un bloque sham
+# dentro de la sesion es de jusren (rama b1-b2-sham-errp); esta implementacion es otra.
+BLOQUES_SHAM = ('real', 'sham')         # columna 'bloque' del CSV y marcadores bloque:real / bloque:sham
+SHAM_ERRP_PASOS = 60                    # por bloque: los dos caben en ~4 min a CICLO_S
+SHAM_ERRP_PERTURBAR_EN = 10             # paso del bloque en que entra su perturbacion (tras 2 ensayos)
+# Que recibe el agente en el bloque sham (medido en estudios/sham_gemelo.py):
+#   nula       sin evidencia del ErrP: la tasa base de la calibracion (LLR = 0)
+#   recientes  los p_errp del mismo bloque, permutados entre los ultimos SHAM_ERRP_MEMORIA pasos.
+#              OJO: conserva la TASA de ErrP, y con las decisiones cargadas a un lado tras la
+#              perturbacion la tasa sola ya dice hacia donde corregir (gemelo: se recupera 11 de 16)
+SHAM_ERRP_FUENTES = ('nula', 'recientes')
+SHAM_ERRP_FUENTE = 'nula'
+SHAM_ERRP_MEMORIA = 8
 
 # ============================ Ortesis (USB serial) ============================
 PUERTO_ORTESIS = 'COM4'

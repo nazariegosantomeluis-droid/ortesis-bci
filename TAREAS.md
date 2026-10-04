@@ -85,6 +85,16 @@ El sistema aprende en tres escalas de tiempo:
 
 ### Decisiones de implementación y hallazgos (se anotan aquí conforme salen)
 
+**1. Sham (3 de octubre, noche; cifras del gemelo, `estudios/sham_gemelo.py`, 16 sesiones).**
+
+- **Hallazgo que cambia el diseño: el sham que permuta los `p_errp` no cumple el criterio y no puede cumplirlo.** Con 60 pasos por bloque y el detector actual, el bloque real se recupera en 16 de 16 y el sham permutado en 11 de 16 (con 70 pasos, 15 de 16). Tras la perturbación casi todas las decisiones van al mismo lado, y la sola tasa de ErrP ya dice hacia dónde corregir; la permutación conserva la tasa. Un sham con «la misma distribución» conserva justo la información que usa el agente.
+- **Decisión tomada, pendiente del visto bueno de Luis:** el sham por defecto quita la evidencia del ErrP (`config.SHAM_ERRP_FUENTE = 'nula'`: tasa base de la calibración, LLR = 0; es el control negativo de siempre, ahora en vivo). Con él: real 16 de 16, sham 0 de 16, sham − real +0.136 [+0.111, +0.161]. El permutado queda disponible con `--sham-fuente recientes`. Se probó una tercera fuente (los `p_errp` del bloque estático, permutados) y quedó en medio (sham 3 a 8 de 16): descartada.
+- **Duración:** 60 pasos por bloque alcanzan, pero solo con la perturbación en el paso 10 (50 pasos después). Con la perturbación a un tercio del bloque (paso 20 de 60) el real se recuperaba en 10 de 16; harían falta 80 pasos (5.6 min los dos bloques). Se eligió perturbar en el paso 10 (`config.SHAM_ERRP_PERTURBAR_EN`) en lugar de alargar.
+- **Con el detector débil el criterio no se cumple** (real 7 de 16): es el detector, no el sham. Si el CP3 da NO GO el domingo, el contraste en vivo no está garantizado.
+- El `ConfianzaDetector` no se reinicia entre bloques (lo que sabe del detector no es del bloque) y sigue midiendo durante el sham, aunque ahí no decide nada. Los bloques del control causal no llevan movimientos ajenos. El orden sale de `random.SystemRandom` (no de `--semilla`, que por defecto es 0 y daría siempre el mismo); `--sham-orden` lo fija para las pruebas.
+- Una sola sesión no da para el intervalo de la diferencia de error (±0.2 con 50 pasos): en vivo se muestra recuperó / no se recuperó y el intervalo se reporta tal cual.
+- Columna nueva `bloque` en el CSV (contrato), después de `estado`.
+
 ---
 
 ## Cambio de hardware (2 de octubre de 2026): g.tec Unicorn Hybrid Black

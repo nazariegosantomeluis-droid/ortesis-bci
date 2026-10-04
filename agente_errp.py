@@ -312,3 +312,41 @@ class ConfianzaDetector:
     def vivo(self):
         """(sens, espec) acotados para usarse en Bayes."""
         return float(np.clip(self.sens, 0.51, 0.99)), float(np.clip(self.espec, 0.51, 0.99))
+
+
+class SenalSham:
+    """Control causal con sham: lo que recibe el agente en lugar del p_errp de cada paso.
+
+    Fuentes (config.SHAM_ERRP_FUENTES):
+      nula       sin evidencia del ErrP: la tasa base de la calibracion, con sens = espec = 0.5,
+                 asi el LLR es 0 con las dos salidas del detector y P_hat queda en el prior.
+      recientes  los p_errp del propio bloque permutados entre los pasos recientes: guarda los
+                 ultimos `memoria`, en cada paso entrega al azar uno de los guardados y guarda el de
+                 ahora (cada valor se entrega una sola vez). Mientras junta los primeros devuelve
+                 nan: ese paso no ensena.
+    """
+
+    def __init__(self, fuente=config.SHAM_ERRP_FUENTE, semilla=0, memoria=config.SHAM_ERRP_MEMORIA):
+        if fuente not in config.SHAM_ERRP_FUENTES:
+            raise ValueError(f'fuente debe ser una de {config.SHAM_ERRP_FUENTES}')
+        self.fuente, self.memoria, self.guardados = fuente, memoria, []
+        self.rng = np.random.default_rng([abs(int(semilla)), 404])
+
+    def __call__(self, p_errp, cfg: ConfigAgente):
+        """p_errp: el del paso (finito, sin artefacto). Devuelve (p_errp, sens, espec) para
+        AgenteErrP.actualizar; se llama una vez por paso valido."""
+        if self.fuente == 'nula':
+            return cfg.p_error_calibracion, 0.5, 0.5
+        sale = float('nan')
+        if len(self.guardados) >= self.memoria:
+            sale = self.guardados.pop(int(self.rng.integers(len(self.guardados))))
+        self.guardados.append(float(p_errp))
+        return sale, cfg.sens, cfg.espec
+
+    def a_dict(self):
+        return {'fuente': self.fuente, 'guardados': list(self.guardados), 'rng': self.rng.bit_generator.state}
+
+    def desde_dict(self, d):
+        self.fuente, self.guardados = d['fuente'], list(d['guardados'])
+        self.rng.bit_generator.state = d['rng']
+        return self

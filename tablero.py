@@ -6,6 +6,9 @@
   4. error movil del agente contra el decoder en la sombra
   5. beta +- 2 desviaciones, confianza viva del detector y cambios detectados
 
+Con --sham (control causal) una linea dice que bloque va, solo con su letra (A o B): cual es el
+real y cual el sham se ve al pulsar 'Revelar bloques'. Al terminar compara los dos lado a lado.
+
 En la cabecera, tres semaforos de salud (EEG, ortesis, detector; gris = el detector
 aun calienta). En PAUSA_SEGURA el estado se pone en rojo y dice el motivo y, si es
 un electrodo, cual falla y por que.
@@ -63,6 +66,18 @@ class Tablero(QtWidgets.QWidget):
         self.lbl_iic = QtWidgets.QLabel('')
         self.lbl_iic.setStyleSheet('font-size:12px; color:#555; padding:2px 4px;')
         lay.addWidget(self.lbl_iic)
+        # control causal (--sham): ciego hasta que el operador pide ver cual bloque es cual
+        fila = QtWidgets.QHBoxLayout()
+        self.lbl_sham = QtWidgets.QLabel('')
+        self.lbl_sham.setStyleSheet('font-size:13px; font-weight:bold; padding:2px 4px;')
+        self.btn_sham = QtWidgets.QPushButton('Revelar bloques')
+        self.btn_sham.setCheckable(True)
+        self.btn_sham.setVisible(False)
+        self.btn_sham.toggled.connect(lambda _: self._sham())
+        fila.addWidget(self.lbl_sham, 1)
+        fila.addWidget(self.btn_sham)
+        lay.addLayout(fila)
+        self.sham_bloque, self.sham_comparacion = None, None
 
         self.g = pg.GraphicsLayoutWidget()
         lay.addWidget(self.g)
@@ -164,6 +179,12 @@ class Tablero(QtWidgets.QWidget):
             if tipo == 'ajeno':
                 self._cue(e['meta'])                             # vuelve la meta del ensayo
             self._iic(e['iic'])
+        elif tipo == 'bloque_sham':
+            self.sham_bloque, self.sham_comparacion = e, None
+            self._sham()
+        elif tipo == 'sham':
+            self.sham_comparacion = e
+            self._sham()
         elif tipo == 'checkpoint':
             color = '#2ca02c' if e['ok'] else '#d62728'
             self.lbl_cp.setText(e['texto'])
@@ -184,6 +205,8 @@ class Tablero(QtWidgets.QWidget):
             if e.get('cambio'):
                 color = '#9467bd' if e['cambio'] == 'sesgo' else '#8c564b'
                 self.p[4].addItem(pg.InfiniteLine(e['paso'], angle=90, pen=pg.mkPen(color, width=1)))
+            if not e.get('perturbado'):                          # cada bloque del control causal trae la suya
+                self._pert_marcada = False
             if e.get('perturbado') and not getattr(self, '_pert_marcada', False):
                 for pl in self.p:
                     pl.addItem(pg.InfiniteLine(e['paso'], angle=90,
@@ -197,6 +220,27 @@ class Tablero(QtWidgets.QWidget):
                                     f"{ack}{congel}")
             self.lbl_estado.setStyleSheet('font-size:16px;font-weight:bold;padding:4px;' +
                                           ('color:#d62728;' if e['congelado'] else ''))
+
+    def _sham(self):
+        """Control causal: durante el ciego solo la letra del bloque; con 'Revelar bloques', cual es cual."""
+        self.btn_sham.setVisible(True)
+        ver = self.btn_sham.isChecked()
+        c = self.sham_comparacion
+        if c is None:
+            b = self.sham_bloque
+            self.lbl_sham.setText(f"Control causal · bloque {b['letra']}" + (f" = {b['nombre'].upper()}" if ver else '')
+                                  + f" · {b['pasos']} pasos")
+            return
+        partes = []
+        for letra, nombre in zip('AB', c['orden']):
+            r = c.get(nombre)
+            if r:
+                rec = f"se recupero en {r['pasos']} pasos ({r['seg']:.0f} s)" if r['pasos'] else 'NO se recupero'
+                partes.append(f"Bloque {letra}" + (f" = {nombre.upper()}" if ver else '')
+                              + f": error {r['agente']:.2f} [{r['ic_agente'][0]:.2f}, {r['ic_agente'][1]:.2f}], {rec}")
+        if ver and c.get('ic_dif'):
+            partes.append(f"sham - real {c['dif']:+.2f} [{c['ic_dif'][0]:+.2f}, {c['ic_dif'][1]:+.2f}]")
+        self.lbl_sham.setText('Control causal · ' + '   |   '.join(partes))
 
     def _cue(self, meta):
         cerrar = meta > 0
