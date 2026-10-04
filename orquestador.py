@@ -323,6 +323,12 @@ class BackendSim:
     def posicion_segura(self):
         return self.mover(config.POSICION_SEGURA)
 
+    def nervio(self, p):
+        pass
+
+    def destello(self):
+        pass
+
     def inicio(self, seq, t_ack):
         return t_ack, 'ack'
 
@@ -770,6 +776,16 @@ class BackendReal:
     def mover(self, fraccion):
         return self.ortesis.mover(fraccion)
 
+    def nervio(self, p):
+        """Nivel del nervio de luz de la ortesis (p' del agente), si la ortesis lo tiene (Wi-Fi)."""
+        if hasattr(self.ortesis, 'set_p'):
+            self.ortesis.set_p(p)
+
+    def destello(self):
+        """Destello rojo de la ortesis cuando el detector marca un ErrP, si la ortesis lo tiene (Wi-Fi)."""
+        if hasattr(self.ortesis, 'errp'):
+            self.ortesis.errp()
+
     def centrar(self, angulo):
         """Lleva la ortesis al punto medio antes del cue. No es un paso: sin epoca de ErrP."""
         self.ortesis.mover(angulo, config.CENTRADO_DURACION_MS)
@@ -1037,6 +1053,7 @@ class Orquestador:
         self.angulo = float(np.clip(antes + dec.delta, 0, 1))
         # en el tope la ortesis no se mueve (o menos de lo que se percibe): nadie ve nada
         quieto = config.IGNORAR_SIN_MOVIMIENTO and abs(self.angulo - antes) < config.PASO_VISIBLE - 1e-9
+        self.b.nervio(dec.p_prima)                   # el nervio de luz sube con p' (viaja con la orden y en los latidos)
         seq, t_ack, lat = self.b.mover(self.angulo)
         erroneo = dec.direccion != meta
 
@@ -1059,6 +1076,8 @@ class Orquestador:
         self.iic = self.embodiment.estimar(con_ic=False) | {'ic': self.iic['ic']}
         valido = not excluido
         detectado = bool(np.isfinite(p_errp) and p_errp > self.umbral_errp)
+        if detectado and not art:                    # una epoca con artefacto no cuenta como ErrP: sin destello
+            self.b.destello()
         fiab = self.confianza(erroneo, detectado, valido and not art)
         sens_v, espec_v = self.confianza.vivo()
         # escalon 2: con el reloj en ROJO la epoca puede estar desalineada; no se aprende de ella

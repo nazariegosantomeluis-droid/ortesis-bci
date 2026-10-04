@@ -716,10 +716,14 @@ class OrtesisUDP(_OrtesisBase):
             pass
         return t
 
+    def _seq_aparte(self):
+        with self._cv:
+            self._seq_latido += 1
+            return self._seq_latido
+
     def _latir(self):
         while self._vivo:
-            self._seq_latido += 1
-            self._enviar(self._seq_latido)
+            self._enviar(self._seq_aparte())
             time.sleep(self.latido_s)
 
     def _escuchar(self):
@@ -781,6 +785,11 @@ class OrtesisUDP(_OrtesisBase):
     def set_p(self, p):
         """Nivel del nervio de luz (0 a 1); viaja en el siguiente latido."""
         self.estado['p'] = float(np.clip(p, 0.0, 1.0))
+
+    def errp(self):
+        """Destello rojo del nervio de luz: el detector marco un ErrP. Un solo datagrama, sin esperar ACK
+        (si se pierde, se pierde el destello)."""
+        self._enviar(self._seq_aparte(), {'errp': 1})
 
     def mover(self, fraccion, dur_ms=config.DURACION_PASO_MS):
         self.seq += 1

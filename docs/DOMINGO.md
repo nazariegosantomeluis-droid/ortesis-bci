@@ -88,9 +88,13 @@ python demo.py preflight --puerto COM4                  # solo revisa: OK / AVIS
 python demo.py lanzar --puerto COM4                     # revisa, y lanza puente + tablero + orquestador
 python demo.py lanzar --plan unicornlsl --puerto COM4   # la fuente es la app UnicornLSL: no lanza el puente
 python demo.py lanzar --plan gemelo --ortesis-sim       # sin casco: el gemelo digital como fuente
+python demo.py lanzar --ortesis-udp                     # la órtesis por Wi-Fi (ESP32 en 192.168.4.1), en lugar de --puerto
+python demo.py lanzar --plan gemelo --ortesis-udp 127.0.0.1   # con python ortesis_udp_sim.py corriendo en otra terminal
 python demo.py lanzar --puerto COM4 -- --sham --preentrenado   # lo que va tras `--` pasa tal cual al orquestador
 python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real
 ```
+
+`--ortesis-udp [IP]` (y `--udp-puerto`) hace lo mismo que en el orquestador y es excluyente con `--ortesis-sim`: no pide pyserial ni la verificación USB, y el preflight avisa a dónde apunta (UDP no se puede comprobar sin mandar una orden; en `127.0.0.1` recuerda lanzar `ortesis_udp_sim.py`). `planb --ortesis-udp` repite los ángulos por Wi-Fi.
 
 También acepta `--narrador`, `--copiloto`, `--flechas`, `--idioma en`, `--serie <número>` (varios cascos cerca), `--eeg-nombre` y `--sin-tablero`.
 
