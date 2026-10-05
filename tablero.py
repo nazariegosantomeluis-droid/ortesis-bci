@@ -87,7 +87,7 @@ class Tablero(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self)
 
         cab = QtWidgets.QHBoxLayout()
-        self.lbl_estado = QtWidgets.QLabel('Esperando al orquestador...')
+        self.lbl_estado = QtWidgets.QLabel('Esperando al orquestador... (para ver el EEG sin orquestador: python ver_eeg.py)')
         self.lbl_cue = QtWidgets.QLabel('')
         self._cue_visual = True
         self.lbl_cp = QtWidgets.QLabel('')

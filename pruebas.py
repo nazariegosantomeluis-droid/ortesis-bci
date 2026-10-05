@@ -4427,6 +4427,38 @@ def demo_gemelo_en_vivo():
 
 
 @prueba
+def visor_eeg():
+    """ver_eeg.py: lo que dibuja el visor del casco solo (sin orquestador) sale de una entrada de EEG; sin Qt ni LSL."""
+    import hardware as hw
+    import ver_eeg
+    fs, rng = 250.0, np.random.default_rng(0)
+    t = np.arange(int(12 * fs)) / fs
+    x = 210_000.0 + rng.normal(0, 8.0, (8, len(t)))                     # continua del casco + EEG de ~8 uV
+    x[config.indices(['Oz'])[0]] += 20 * np.sin(2 * np.pi * 10 * t)      # alfa en Oz
+    x[config.indices(['C4'])[0]] = 750_000.0                             # C4 saturado (electrodo al aire)
+
+    class Entrada:
+        def __init__(self, x):
+            self.x, self.fs = x, fs
+        def _crudo(self, s):
+            return self.x[:, -int(s * fs):], t[-int(s * fs):]
+        calidad = hw.EntradaEEG.calidad
+        edad = lambda self: 0.0
+        ultimo_t = lambda self: t[-1]
+        movimiento = lambda self, t0, t1: 42.0
+    r = ver_eeg.resumen(Entrada(x))
+    assert r['trazos'].shape == (8, int(ver_eeg.VISIBLE_S * fs)) and np.abs(r['trazos'][0]).max() < 60   # sin la continua ni el borde
+    textos = {f['canal']: ver_eeg.texto_canal(f, r['malos'].get(f['canal'])) for f in r['filas']}
+    assert textos['Fz'][1] and textos['Fz'][0].endswith('OK'), textos['Fz']
+    assert not textos['C4'][1] and 'REVISAR (saturado)' in textos['C4'][0], textos['C4']
+    cab = ver_eeg.texto_cabecera(r, alfa_base=r['alfa'] / 2)
+    assert '7/8 canales OK' in cab and 'x2.0 del inicio' in cab and 'giroscopio 42' in cab, cab
+    vacio = ver_eeg.resumen(Entrada(x[:, :0]))                           # aun sin muestras: no lanza
+    assert vacio['trazos'] is None and ver_eeg.texto_cabecera(vacio) == 'Esperando muestras de EEG...'
+    return cab
+
+
+@prueba
 def toques_electrodos():
     """La prueba de toques de verificar_unicorn.py: el pico debe salir en el canal tocado. Datos
     SINTETICOS (ruido, 60 Hz, offset de continua y golpecitos de 150 uV en el canal tocado, 40 uV en sus
@@ -5601,7 +5633,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida', 'sensor_fuerza']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'visor_eeg', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida', 'sensor_fuerza']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']
