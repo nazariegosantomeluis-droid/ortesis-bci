@@ -124,6 +124,17 @@ CUE_VISUAL = {
 # Senal auditiva (--cue-audio): dos tonos seguidos, los MISMOS dos en cada senal y en el orden contrario
 # (sube = CERRAR, baja = RELAJA). Asi duran lo mismo, suenan igual de fuerte y solo difiere el orden.
 CUE_AUDIO = {'frecuencias_hz': (660, 990), 'tono_ms': 150, 'volumen': 0.4}
+
+# Mano virtual (mano_virtual.py): una mano a pantalla completa que sigue las mismas ordenes que la ortesis.
+# Con --mano-virtual el orquestador publica en Estado un evento por cada orden (tipo 'mano': angulo = fraccion
+# de cierre 0..1, ms = duracion de la orden, seq, inicio = hora LSL en que debe empezar a verse el
+# movimiento). Sin ese evento la mano sigue el angulo de los eventos 'paso' y 'ajeno' (sirve tambien para
+# repetir una sesion vieja con repetir_sesion.py).
+MANO_VIRTUAL = {
+    'evento': 'mano',
+    'dur_min_ms': 120, 'dur_max_ms': 2000,        # la animacion dura lo que la orden, dentro de estos limites
+    'inicio_antes_s': 0.25, 'inicio_despues_s': 0.5,   # un 'inicio' fuera de esta ventana es de otro reloj: se ignora
+}
 PERTURBACION_ON = 'perturbacion:on'
 CENTRADO        = 'centrado'       # la ortesis vuelve al punto medio antes del cue (no es un paso)
 AVISO_AJENO     = 'aviso_ajeno'    # la pantalla anuncia un movimiento ajeno (Tarea 2)

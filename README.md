@@ -395,6 +395,28 @@ Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas,
 
 **Lo que sí y lo que no se midió.** En el gemelo (8 sujetos, 60 ensayos) C3/Cz/C4 da BA 0.813 y los 8 canales 0.818, y el CP2 (≥ 0.70) pasa 8 de 8 con cualquiera de los dos: restringir los canales no cuesta nada ahí. **El gemelo no tiene la pista visual posterior**, así que no puede mostrar la ventaja; esa justificación sale solo de los datos del casco real de un participante. Hace falta repetirlo con más personas, y con la señal ya neutra, antes de afirmar que quita el sesgo.
 
+## Mano virtual a pantalla completa (`mano_virtual.py`)
+
+Una mano grande que se abre y se cierra con las **mismas órdenes que la órtesis**. Sirve para calibrar el ErrP cuando la órtesis no está lista (el piloto mira esta mano) y como segunda pantalla en la demo.
+
+![Mano virtual a 0, 30, 60, 85 y 100 % de cierre](docs/figuras/mano_virtual.png)
+
+```bash
+python orquestador.py real --ortesis-sim --mano-virtual   # terminal 3: publica cada orden a la órtesis en Estado
+python mano_virtual.py --pantalla 1                       # terminal 4: la mano, a pantalla completa en la pantalla 1 (Esc sale, F alterna)
+python demo.py lanzar --plan casco --ortesis-sim --mano-virtual --pantalla 1   # todo junto
+python mano_virtual.py --demo                             # se abre y se cierra sola, para ver cómo luce
+python mano_virtual.py --captura mano.png --cierre 0.6    # una imagen, sin ventana
+```
+
+- **De dónde saca el movimiento.** Con `--mano-virtual` el orquestador envuelve el `mover` de la órtesis y publica un evento `mano` en `Estado` por cada orden (pasos, centrado, pausa segura, movimientos ajenos): `angulo` (0 abierta, 1 cerrada), `ms`, `seq` e `inicio`. Sin ese evento la mano sigue el ángulo de los eventos `paso` y `ajeno`, así que también anima una sesión vieja con `repetir_sesion.py` (plan B). Los eventos `mano` quedan en el `_estado.jsonl`.
+- **Rápida y clara.** La animación dura lo que la orden (250 ms por paso) y arranca de golpe y frena al final (en 25 ms ya recorrió más del 15 %): el inicio, que es lo que ancla la época del ErrP, se ve de inmediato. Una barra de 0 a 100 % de cierre queda debajo.
+- **Cuándo empieza a verse.** Con la órtesis simulada la mano empieza en el ACK más la latencia mecánica simulada (30 a 150 ms), el mismo instante que el orquestador usa como ancla de la época. Con la órtesis real, en el ACK. Queda el retraso de leer el flujo y dibujar el cuadro (≈ 20 a 40 ms) y el de la pantalla: **no están medidos con un fotodiodo**.
+- **La misma señal neutra.** Arriba muestra la palabra CERRAR/RELAJA con el mismo color y tamaño que el tablero (ver la sección de la señal neutra), o `+` con `--cue-sin-visual`, y `AUTOMATICO` en un movimiento ajeno: el piloto necesita saber hacia dónde *debía* moverse para notar un error.
+- **Un solo costado de la verdad.** La mano muestra lo *ordenado*, no lo que hace la órtesis física: si la órtesis se traba, la mano no lo sabe.
+
+**Qué se probó y qué no.** La geometría, la animación, los eventos, el dibujo (contra un pintor de registro en tres formatos de pantalla), el espejo de la órtesis y el cableado de `orquestador.py` y `demo.py` tienen pruebas sin hardware (`mano_virtual_logica`). El código de la ventana corre entero contra un Qt de mentira (`mano_virtual_ventana_falsa`). **La ventana no se abrió con Qt de verdad** (el entorno donde se escribió no tiene PyQt5): abre `python mano_virtual.py --demo` antes de contar con ella, y la imagen de arriba es de matplotlib, no de Qt. Tampoco se midió si calibrar el ErrP mirando esta mano da un detector mejor que con la órtesis simulada sin nada visible (con esa combinación, la noche del 4 de octubre, el detector quedó en el azar con un participante); el gemelo no ve la mano, así que no lo puede decir.
+
 ## Transferencia desde PhysioNet: arrancar la calibración con un decoder pre-entrenado (`--preentrenado`)
 
 ¿Cuántos ensayos de calibración de imaginación motora ahorra empezar con un decoder entrenado con otras personas? Se midió con la **EEG Motor Movement/Imagery Database** (Schalk et al. 2004; PhysioNet, vía `mne.datasets.eegbci`): «mano derecha imaginada» contra «reposo» (corridas 4, 8 y 12), con los 8 canales del Unicorn remuestreados a 250 Hz y la misma ventana y banda del lazo. El decoder es el del proyecto (covarianzas → recentrado riemanniano → espacio tangente → regresión logística). El recentrado es lo que permite transferir: cada persona queda centrada en la identidad, así que un clasificador ajustado con otras se le aplica tal cual; la persona nueva solo aporta su centro, que sale de EEG **sin etiquetas** (su minuto de reposo, o sus propios ensayos).

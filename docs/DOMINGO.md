@@ -86,6 +86,8 @@ python tablero.py
 python orquestador.py real --puerto COM4
 ```
 
+**Mano virtual** (segunda pantalla, o en lugar de la órtesis para calibrar el ErrP): `python orquestador.py real --ortesis-sim --mano-virtual` y, en otra terminal, `python mano_virtual.py --pantalla 1` (o `demo.py lanzar ... --mano-virtual --pantalla 1`). Ábrela antes con `python mano_virtual.py --demo` para comprobar que la pantalla y la ventana funcionan; Esc la cierra. Si la órtesis es la real, la mano solo repite lo que se le ordena.
+
 Con la app UnicornLSL como fuente, no lances el puente y usa `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
 
 ### Atajo: `python demo.py`

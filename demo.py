@@ -83,14 +83,14 @@ def revisar_codigo(git=_git):
     return out
 
 
-def revisar_dependencias(plan, ortesis_sim, sin_tablero, importar=importlib.import_module, ortesis_udp=None):
+def revisar_dependencias(plan, ortesis_sim, sin_tablero, importar=importlib.import_module, ortesis_udp=None, mano_virtual=False):
     """Importa de verdad lo que hace falta (pylsl carga liblsl; brainflow, su biblioteca nativa)."""
     requeridas = ['numpy', 'scipy', 'sklearn', 'pylsl', 'pyriemann']
     if plan == 'casco':
         requeridas.append('brainflow')
     if not ortesis_sim and not ortesis_udp:         # por Wi-Fi no hace falta pyserial
         requeridas.append('serial')
-    if not sin_tablero:
+    if not sin_tablero or mano_virtual:             # la mano virtual tambien es una ventana Qt
         requeridas.append('pyqtgraph')
     faltan = []
     for nombre in requeridas:
@@ -287,7 +287,8 @@ def revisar_disco(ruta=None, uso=shutil.disk_usage):
 def preflight(a):
     """Todas las comprobaciones, en el orden en que importan. Devuelve la lista de revisiones."""
     out = revisar_codigo()
-    out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero, ortesis_udp=a.ortesis_udp)
+    out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero, ortesis_udp=a.ortesis_udp,
+                                mano_virtual=getattr(a, 'mano_virtual', False))
     out += revisar_modelos()
     out += revisar_flujos(a.plan)
     out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto, plan=a.plan)
@@ -337,6 +338,9 @@ def comandos(plan, a, extras=(), ahora=time.time):
         cmd['tablero'] = ('tablero.py', t)
     if a.narrador:
         cmd['narrador'] = ('narrador.py', ['--idioma', a.idioma])
+    if getattr(a, 'mano_virtual', False):                 # la mano a pantalla completa, de segunda pantalla o en lugar de la ortesis
+        pantalla = getattr(a, 'pantalla', None)
+        cmd['mano'] = ('mano_virtual.py', [] if pantalla is None else ['--pantalla', str(pantalla)])
     if a.ortesis_sim:
         orq = ['real', '--ortesis-sim']
     elif a.ortesis_udp:
@@ -345,6 +349,8 @@ def comandos(plan, a, extras=(), ahora=time.time):
         orq = ['real', '--puerto', a.puerto]
     if plan == 'unicornlsl':
         orq += ['--fuente', 'unicornlsl'] + (['--eeg-nombre', a.eeg_nombre] if a.eeg_nombre else [])
+    if getattr(a, 'mano_virtual', False):
+        orq += ['--mano-virtual']
     cmd['orquestador'] = ('orquestador.py', orq + list(extras))
     return cmd
 
@@ -494,7 +500,7 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
             procesos.lanzar('fuente', nombre, args)
             esperar_flujo('EEG', resolver, procesos, 'fuente', ESPERA_FLUJO_S[a.plan], dormir=dormir)
             salida('  flujo EEG listo')
-        for clave in ('narrador', 'tablero'):
+        for clave in ('narrador', 'tablero', 'mano'):
             if clave in cmd:
                 procesos.lanzar(clave, *cmd[clave])
                 dormir(2.0)
@@ -579,6 +585,9 @@ def argumentos(argv=None):
     p.add_argument('--copiloto', action='store_true')
     p.add_argument('--narrador', action='store_true')
     p.add_argument('--flechas', action='store_true')
+    p.add_argument('--mano-virtual', dest='mano_virtual', action='store_true',
+                   help='abre mano_virtual.py (mano a pantalla completa con las mismas ordenes que la ortesis) y lanza el orquestador con --mano-virtual')
+    p.add_argument('--pantalla', type=int, default=None, help='con --mano-virtual: pantalla donde abrir la mano (0 = la principal)')
     p.add_argument('--idioma', choices=('es', 'en'), default='es')
     p.add_argument('--ignorar-fallas', dest='ignorar_fallas', action='store_true', help='seguir aunque el preflight falle')
     p = sub.add_parser('planb', help='tablero + repeticion de la ultima sesion real', allow_abbrev=False)

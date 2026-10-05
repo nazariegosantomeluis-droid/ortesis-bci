@@ -4074,6 +4074,254 @@ def decoder_canales_mi():
     return f'C3/Cz/C4: BA {np.mean(bas):.2f} en el gemelo (4 sujetos, 40 ensayos); los demas canales no entran'
 
 
+@prueba
+def mano_virtual_logica():
+    """La mano virtual sin pantalla: geometria, animacion, eventos de Estado, dibujo contra un pintor de registro,
+    el espejo de la ortesis y que la ventana Qt hable el mismo idioma que el pintor. La parte Qt no corre aqui."""
+    import ast
+    import types
+    from pathlib import Path
+    import cue
+    import demo
+    import hardware as hw
+    import mano_virtual as mv
+    import orquestador
+    # geometria: la punta de cada dedo baja y se acerca a la palma al cerrar, sin saltos; cabe en la caja
+    prev = None
+    for c in np.linspace(0, 1, 11):
+        pts = mv.punta_de_dedos(c)
+        if prev is not None:
+            if c <= 0.81:                                    # al final la yema se mete hacia la palma y sube un poco: es el puno
+                assert all(p[1] <= q[1] + 1e-9 for p, q in zip(pts[:4], prev[:4])), f'las puntas de los dedos suben al cerrar ({c:.1f})'
+            assert max(np.hypot(p[0] - q[0], p[1] - q[1]) for p, q in zip(pts, prev)) < 0.45, 'salto de una punta entre dos cierres'
+        prev = pts
+    abierta, cerrada = mv.punta_de_dedos(0.0), mv.punta_de_dedos(1.0)
+    assert all(p[1] > mv.PALMA[-1][1] + 0.5 for p in abierta[:4]), 'abierta, los dedos salen de la palma'
+    assert all(p[1] < mv.PALMA[-1][1] - 0.1 for p in cerrada[:4]), 'cerrada, las puntas quedan por debajo de los nudillos'
+    xmin, ymin, xmax, ymax = mv.CAJA
+    for c in (0.0, 0.5, 1.0):
+        for f in mv.primitivas(c):
+            for x, y in f[1]:
+                assert xmin <= x <= xmax and ymin <= y <= ymax, (c, f[0], x, y)
+    # animacion: arranca de golpe (en 25 ms ya recorrio mas del 15 % de una orden de 250 ms), llega y no retrocede en el tiempo
+    an = mv.Animacion(0.0)
+    an.ir_a(1.0, 0.25, 10.0)
+    assert an.valor(9.9) == 0.0 and an.valor(10.0) == 0.0 and an.valor(10.025) > 0.15 and an.valor(10.125) > 0.7
+    assert abs(an.valor(10.25) - 1.0) < 1e-12 and an.valor(99.0) == 1.0
+    an.ir_a(0.0, 0.25, 10.125)                              # una orden nueva con la anterior a medias: sale de donde esta
+    assert abs(an.valor(10.125) - 0.75) < 1e-9 and an.valor(10.4) == 0.0
+    an.ir_a(5.0, 0.2, 11.0)
+    assert an.destino() == 1.0, 'el destino se recorta a 0..1'
+    # estado: el evento 'mano' manda; 'paso' y 'ajeno' solo valen mientras no haya llegado ninguno
+    st = mv.EstadoMano()
+    st.procesar({'tipo': 'paso', 'angulo': 0.8}, 100.0)
+    assert st.cierre(100.3) == 0.8 and not st.exacto
+    st.procesar({'tipo': 'mano', 'angulo': 0.2, 'ms': 250, 'inicio': 100.4}, 100.35)
+    assert st.exacto and st.cierre(100.39) == 0.8 and abs(st.cierre(100.66) - 0.2) < 1e-9, 'arranca en el inicio que dice el orquestador'
+    st.procesar({'tipo': 'paso', 'angulo': 1.0}, 101.0)
+    assert abs(st.cierre(101.5) - 0.2) < 1e-9, "con el evento 'mano', el 'paso' ya no mueve la mano"
+    st.procesar({'tipo': 'mano', 'angulo': 1.0, 'ms': 250, 'inicio': 7.0}, 102.0)          # de otro reloj: se ignora, arranca ya
+    assert st.cierre(102.3) == 1.0 and st.cierre(102.01) > 0.2
+    st.procesar({'tipo': 'mano', 'angulo': 0.0, 'ms': 5}, 103.0)                              # 5 ms se alarga a lo minimo visible
+    assert 0.2 < st.cierre(103.06) and st.cierre(103.2) == 0.0
+    for raro in ({}, {'tipo': 'salud'}, {'tipo': 'paso'}, {'tipo': 'checkpoint', 'ok': False}):
+        st.procesar(raro, 104.0)                                                              # ni se cae ni mueve la mano
+    assert st.cierre(105.0) == 0.0
+    # la senal de arriba: la misma para las dos metas, salvo la palabra; AUTOMATICO en un movimiento ajeno
+    st = mv.EstadoMano()
+    assert st.rotulo()[0] == ''
+    st.procesar({'tipo': 'cue', 'meta': 1}, 1.0)
+    r1 = st.rotulo()
+    st.procesar({'tipo': 'cue', 'meta': -1}, 2.0)
+    r2 = st.rotulo()
+    assert (r1[0], r2[0]) == ('CERRAR', 'RELAJA') and r1[1] == r2[1], 'mismo color para las dos metas'
+    st.procesar({'tipo': 'cue', 'meta': 1, 'visual': False}, 3.0)
+    assert st.rotulo()[0] == cue.texto(1, visual=False) == '+'
+    st.procesar({'tipo': 'aviso_ajeno'}, 4.0)
+    assert st.rotulo()[0] == 'AUTOMATICO'
+    st.procesar({'tipo': 'ajeno', 'angulo': 0.5}, 5.0)
+    assert st.rotulo()[0] == '+'
+    # dibujo: todo cabe en el cuadro (con su grosor) en pantallas anchas, altas y chicas, y la barra sigue al cierre
+    for w, h in ((1920, 1080), (1080, 1920), (800, 600)):
+        for c in (0.0, 0.5, 1.0):
+            e = mv.EstadoMano()
+            e.animacion = mv.Animacion(c)
+            e.procesar({'tipo': 'cue', 'meta': 1 if c >= 0.5 else -1}, 0.0)
+            pintor = mv.PintorRegistro()
+            mv.dibujar(pintor, w, h, e, 1.0)
+            assert pintor.ordenes[0] == ('rellenar', mv.COLOR_FONDO)
+            for o in pintor.ordenes:
+                if o[0] == 'poligono':
+                    assert all(-1 <= x <= w + 1 and -1 <= y <= h + 1 for x, y in o[1]), (w, h, c)
+                elif o[0] == 'cadena':
+                    g = o[2]
+                    assert all(g / 2 <= x <= w - g / 2 and g / 2 <= y <= h - g / 2 for x, y in o[1]), (w, h, c, 'la mano se sale del cuadro')
+            textos = [o[1] for o in pintor.ordenes if o[0] == 'texto']
+            assert ('CERRAR' if c >= 0.5 else 'RELAJA') in textos and f'{c * 100:.0f} % cerrada' in textos
+            barra = [o for o in pintor.ordenes if o[0] == 'poligono' and o[2] == mv.COLOR_BANDA and o[1][0][1] == o[1][1][1] and len(o[1]) == 4][-1]
+            assert abs((barra[1][1][0] - barra[1][0][0]) - c * 0.5 * w) < 1e-6
+    e = mv.EstadoMano()
+    pintor = mv.PintorRegistro()
+    mv.dibujar(pintor, 800, 600, e, 0.0, conectado=False)
+    assert 'Esperando al orquestador...' in [o[1] for o in pintor.ordenes if o[0] == 'texto']
+    # la imagen de verificacion no necesita Qt
+    import tempfile
+    ruta = Path(tempfile.mkdtemp()) / 'mano.png'
+    e.animacion = mv.Animacion(1.0)
+    mv.imagen(e, ruta, 300, 350)
+    assert ruta.read_bytes()[:8] == b'\x89PNG\r\n\x1a\n' and ruta.stat().st_size > 3000
+    # espejo de la ortesis: publica cada orden con su inicio y deja todo lo demas de la ortesis como estaba
+    pub = []
+    sim = hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0, semilla=3)
+    espejo = mv.espejar(sim, lambda **d: pub.append(d), lambda seq: hw.latencia_mecanica_simulada(seq, sim.semilla))
+    assert espejo is sim and isinstance(sim, hw.OrtesisSimulada)
+    seq, t_ack, _ = sim.mover(0.7)
+    seq2, t_ack2, _ = sim.mover(0.5, config.CENTRADO_DURACION_MS)
+    assert [p['tipo'] for p in pub] == ['mano', 'mano'] and pub[0]['angulo'] == 0.7 and pub[0]['seq'] == seq and pub[0]['ack']
+    assert pub[0]['ms'] == config.DURACION_PASO_MS and pub[1]['ms'] == config.CENTRADO_DURACION_MS
+    lo, hi = config.LATENCIA_MECANICA_SIM_MS
+    assert lo / 1000 <= pub[0]['inicio'] - t_ack <= hi / 1000 + 1e-9 and sim.angulo == 0.5
+    sim.seq = 40                                             # la reanudacion fija el seq en la ortesis, no en el espejo
+    assert sim.mover(0.4)[0] == 41 and pub[-1]['seq'] == 41
+    perdida = types.SimpleNamespace(mover=lambda f, d=250: (9, None, None))             # un ACK perdido tambien se publica
+    pub2 = []
+    mv.espejar(perdida, lambda **d: pub2.append(d))
+    assert perdida.mover(0.3)[0] == 9 and pub2[0]['inicio'] is None and pub2[0]['ack'] is False
+    roto = types.SimpleNamespace(mover=lambda f, d=250: (1, 5.0, None))
+    mv.espejar(roto, lambda **d: 1 / 0)
+    assert roto.mover(0.1) == (1, 5.0, None), 'un fallo al publicar no detiene la sesion'
+    # el orquestador lo cablea con --mano-virtual (apagado por defecto) y el simulador avisa que no tiene ortesis
+    assert not orquestador.argumentos(['real']).mano_virtual and orquestador.argumentos(['real', '--mano-virtual']).mano_virtual
+    avisos, eventos = [], []
+    backend = types.SimpleNamespace(hw=hw, ortesis=hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0))
+    assert orquestador.espejar_ortesis(backend, types.SimpleNamespace(estado=lambda **d: eventos.append(d)), avisar=avisos.append) is True
+    backend.ortesis.mover(0.6)
+    assert eventos and eventos[0]['tipo'] == 'mano' and 'mano_virtual.py' in avisos[0]
+    assert orquestador.espejar_ortesis(types.SimpleNamespace(hw=hw), None, avisar=avisos.append) is False and 'simulador' in avisos[-1]
+    # demo.py: la abre con --pantalla y lanza el orquestador con --mano-virtual; Qt se exige tambien con --sin-tablero
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-sim', '--mano-virtual', '--pantalla', '1'])
+    cmd = demo.comandos('gemelo', a)
+    assert cmd['mano'] == ('mano_virtual.py', ['--pantalla', '1']) and cmd['orquestador'][1] == ['real', '--ortesis-sim', '--mano-virtual']
+    assert 'mano' not in demo.comandos('gemelo', demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-sim']))
+    vistos = []
+    demo.revisar_dependencias('gemelo', True, True, importar=vistos.append, mano_virtual=True)
+    assert 'pyqtgraph' in vistos
+    # la ventana Qt traduce el mismo pintor que se probo aqui: mismos metodos, y el codigo al menos se puede leer
+    fuente = Path(mv.__file__).read_text(encoding='utf-8')
+    arbol = ast.parse(fuente)
+    clases = {n.name: n for f in ast.walk(arbol) if isinstance(f, ast.FunctionDef) and f.name == '_crear_ventana'
+              for n in ast.walk(f) if isinstance(n, ast.ClassDef)}
+    metodos = lambda c: {m.name for m in c.body if isinstance(m, ast.FunctionDef) and not m.name.startswith('_')}
+    assert metodos(clases['PintorQt']) == metodos(ast.parse(fuente).body[[getattr(n, 'name', '') for n in arbol.body].index('PintorRegistro')]) - {'ordenes'}
+    import importlib
+    spec = importlib.util.find_spec('pyqtgraph')
+    return 'cierre 0-1 sin saltos, cabe en 3 formatos de pantalla, espejo con inicio = ACK + latencia mecanica' + ('' if spec else ' (la ventana Qt no se pudo correr aqui)')
+
+
+@prueba
+def mano_virtual_ventana_falsa():
+    """Corre el codigo de la ventana Qt contra un Qt de mentira que solo anota las llamadas: atrapa nombres mal escritos,
+    argumentos que no cuadran y errores de logica de la ventana. NO prueba que Qt de verdad dibuje eso (hay que abrirla)."""
+    import sys
+    import types
+    import mano_virtual as mv
+
+    llamadas = []
+
+    class Anota:
+        """Cualquier atributo es una funcion que anota su llamada y devuelve otro Anota."""
+        def __init__(self, nombre='Qt'):
+            self._n = nombre
+
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return Anota(f'{self._n}.{k}')
+
+        def __call__(self, *a, **kw):
+            llamadas.append((self._n, a, kw))
+            return Anota(self._n + '()')
+
+    class Widget:
+        def __init__(self):
+            self.cerrado, self.pantalla_completa, self._w, self._h = False, False, 900, 600
+
+        def width(self):
+            return self._w
+
+        def height(self):
+            return self._h
+
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return lambda *a, **kw: llamadas.append((k, a, kw))
+
+        def close(self):
+            self.cerrado = True
+
+        def isFullScreen(self):
+            return self.pantalla_completa
+
+        def showFullScreen(self):
+            self.pantalla_completa = True
+
+        def showNormal(self):
+            self.pantalla_completa = False
+
+    class Timer:
+        def __init__(self):
+            self.timeout = Anota('timeout')
+            self.periodo = None
+
+        def start(self, ms):
+            self.periodo = ms
+
+    class Pintor(Anota):
+        def viewport(self):
+            return 'viewport'
+    Qt = types.SimpleNamespace(SolidLine=1, RoundCap=2, RoundJoin=3, NoBrush=4, AlignCenter=5, Key_Escape=27, Key_F=70)
+    QtCore = types.SimpleNamespace(Qt=Qt, QTimer=Timer, QPointF=lambda x, y: (x, y), QRectF=lambda *a: a)
+    QtGui = types.SimpleNamespace(QColor=lambda c: c, QPen=lambda *a: ('pluma',) + a, QBrush=lambda c: ('brocha', c),
+                                  QPolygonF=lambda p: list(p), QPainterPath=lambda: Anota('ruta'),
+                                  QFont=lambda *a: Anota('fuente'), QPainter=type('QPainter', (Pintor,), {'Antialiasing': 1}))
+    pantalla = types.SimpleNamespace(geometry=lambda: types.SimpleNamespace(x=lambda: 1920, y=lambda: 0))
+    QtWidgets = types.SimpleNamespace(QWidget=Widget, QApplication=types.SimpleNamespace(screens=lambda: [pantalla, pantalla]))
+    qt = types.ModuleType('pyqtgraph.Qt')
+    qt.QtCore, qt.QtGui, qt.QtWidgets = QtCore, QtGui, QtWidgets
+    pg = types.ModuleType('pyqtgraph')
+    pg.Qt = qt
+    previos = {k: sys.modules.get(k) for k in ('pyqtgraph', 'pyqtgraph.Qt')}
+    sys.modules['pyqtgraph'], sys.modules['pyqtgraph.Qt'] = pg, qt
+    try:
+        st = mv.EstadoMano()
+        v = mv._crear_ventana(st, demo=True, ventana=False, pantalla=1)
+        assert v.pantalla_completa and ('move', (1920, 0), {}) in llamadas and v.timer.periodo == 8
+        v._cuadro()                                          # el guion de --demo da la primera orden
+        assert st.ordenes == 1 and st.rotulo()[0] == 'CERRAR'
+        for _ in range(3):
+            llamadas.clear()
+            v.paintEvent(None)
+            nombres = [n for n, _, _ in llamadas]
+            assert 'viewport' not in nombres and any(n.endswith('drawPolygon') for n in nombres) and any(n.endswith('drawPath') for n in nombres)
+            assert any(n.endswith('drawText') for n in nombres) and any(n.endswith('fillRect') for n in nombres)
+        v.keyPressEvent(types.SimpleNamespace(key=lambda: 70))
+        assert not v.pantalla_completa
+        v.keyPressEvent(types.SimpleNamespace(key=lambda: 70))
+        assert v.pantalla_completa
+        v.keyPressEvent(types.SimpleNamespace(key=lambda: 27))
+        assert v.cerrado
+        w = mv._crear_ventana(mv.EstadoMano(), demo=False, ventana=True)
+        assert not w.pantalla_completa and ('resize', (900, 900), {}) in llamadas
+    finally:
+        for k, m in previos.items():
+            if m is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = m
+    return 'la ventana corre entera contra un Qt de mentira (demo, dibujo, teclas, pantalla 1); falta abrirla con Qt de verdad'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -4088,7 +4336,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

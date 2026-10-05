@@ -48,6 +48,7 @@ from pylsl import StreamOutlet, local_clock
 import config
 import cue
 import embodiment as emb
+import mano_virtual
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, SenalSham, sigmoide
 from caos import PlanCaos
 from salud import Vigilante
@@ -64,6 +65,21 @@ INSTRUCCION_CUE = ('Senales: CERRAR = imagina que cierras la mano; RELAJA = imag
 def linea_cue(meta):
     """La linea de consola de una senal: la misma forma para las dos metas."""
     return f'    >>> {cue.texto(meta)}'
+
+
+def espejar_ortesis(backend, salidas, avisar=aviso):
+    """--mano-virtual: cada orden a la ortesis tambien sale en Estado (evento 'mano') para mano_virtual.py. Con la
+    ortesis simulada el movimiento visible empieza cuando empezaria el mecanico (la misma latencia que usa el
+    gemelo), que es el ancla de la epoca del ErrP. El simulador no tiene ortesis: ahi la mano sigue los pasos."""
+    o = getattr(backend, 'ortesis', None)
+    if o is None:
+        avisar('Mano virtual: en el simulador no hay ortesis; la mano sigue los eventos de cada paso.')
+        return False
+    hw = backend.hw
+    latencia = (lambda seq: hw.latencia_mecanica_simulada(seq, o.semilla)) if isinstance(o, hw.OrtesisSimulada) else None
+    mano_virtual.espejar(o, salidas.estado, latencia)
+    avisar('Mano virtual: lanza python mano_virtual.py (--pantalla N para la del piloto); sigue las mismas ordenes que la ortesis.')
+    return True
 
 
 def audio_activo(a):
@@ -867,6 +883,8 @@ class Orquestador:
         self.salidas = Salidas()
         # senal auditiva opcional (--cue-audio); solo con el casco, nunca en el simulador
         self.audio_cue = cue.Audio(audio_activo(a), avisar=aviso)
+        if getattr(a, 'mano_virtual', False):
+            espejar_ortesis(backend, self.salidas)
         time.sleep(0.5)                              # dar tiempo a que LabRecorder/tablero se conecten
         self.fsm = MaquinaEstados(self.salidas, inst['estado'] if inst else None)
         self.angulo, self.filas, self.desplazamiento = 0.5, [], 0.0
@@ -1619,6 +1637,9 @@ def argumentos(argv=None):
                     default=config.DECODER_CANALES_DEFECTO,
                     help='canales del decoder de MI: mi = solo C3/Cz/C4 (por defecto), auto = elige entre eso y los 8 '
                          'por validacion cruzada, todos = los 8')
+    ap.add_argument('--mano-virtual', dest='mano_virtual', action='store_true',
+                    help='publica en Estado cada orden a la ortesis para mano_virtual.py (mano a pantalla completa; sirve '
+                         'de ortesis visible para calibrar el ErrP con --ortesis-sim)')
     ap.add_argument('--cue-audio', dest='cue_audio', action='store_true',
                     help='cada senal de CERRAR/RELAJA tambien suena: dos tonos, sube = CERRAR, baja = RELAJA (solo con el casco)')
     ap.add_argument('--cue-sin-visual', dest='cue_sin_visual', action='store_true',
