@@ -53,6 +53,7 @@ from pylsl import StreamInlet, resolve_byprop
 
 import config
 import cue
+import detencion
 
 N = 300          # pasos visibles
 COLORES_SALUD = {config.VERDE: '#2ca02c', config.AMARILLO: '#e6b800', config.ROJO: '#d62728',
@@ -102,6 +103,13 @@ class Tablero(QtWidgets.QWidget):
         self._semaforos({'eeg': config.VERDE, 'ortesis': config.VERDE, 'detector': config.CALENTANDO,
                          'piloto': config.CALENTANDO}, {})
         lay.addLayout(cab)
+        # sesion detenida por un NO GO: en que CP, por que y que hacer, en grande y en lugar de los paneles vacios
+        self._detenida_activa = False
+        self.lbl_detenida = QtWidgets.QLabel('')
+        self.lbl_detenida.setWordWrap(True)
+        self.lbl_detenida.setStyleSheet('background:#b3261e; border-radius:12px; padding:18px 26px;')
+        self.lbl_detenida.setVisible(False)
+        lay.addWidget(self.lbl_detenida, 1)
         # narrador para el jurado (--narrador): la ultima frase del flujo Narracion
         self.narracion, self._narr_encontrado, self._narr_buscando = None, None, False
         self.lbl_narrador = QtWidgets.QLabel('')
@@ -346,9 +354,29 @@ class Tablero(QtWidgets.QWidget):
                               f'border-radius:8px; padding:4px 10px;')
             lbl.setToolTip(detalle.get(sub, ''))
 
+    def _detenida(self, e):
+        """Sesion detenida por un NO GO (evento 'detenida'): el aviso grande ocupa el lugar de los paneles, que
+        estarian vacios. e = None lo quita: empezo otra sesion (llega su primer checkpoint, senal o paso)."""
+        if e is None:
+            if self._detenida_activa:
+                self._detenida_activa = False
+                self.lbl_detenida.setVisible(False)
+                self.g.setVisible(True)
+            return
+        self._detenida_activa = True
+        self.lbl_detenida.setText(detencion.html(e))
+        self.lbl_detenida.setVisible(True)
+        self.g.setVisible(False)
+        self.lbl_estado.setText(e['titulo'].upper())
+        self.lbl_estado.setStyleSheet(f'font-size:16px;font-weight:bold;padding:4px;color:{COLORES_SALUD[config.ROJO]};')
+
     def _procesar(self, e):
         tipo = e.get('tipo')
-        if tipo == 'salud':
+        if tipo in ('checkpoint', 'cue', 'paso', 'ajeno', 'aviso_ajeno'):
+            self._detenida(None)                                 # algo de una sesion nueva: el aviso ya no vale
+        if tipo == 'detenida':
+            self._detenida(e)
+        elif tipo == 'salud':
             self._semaforos(e['colores'], e['detalle'])
             if e['estado'] == 'PAUSA_SEGURA':
                 motivo = e.get('motivo') or ''

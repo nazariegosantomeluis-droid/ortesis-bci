@@ -269,10 +269,12 @@ def revisar_llave():
 
 def revisar_plan_b(resultados=None, ahora=time.time):
     resultados = Path(resultados or config.RESULTADOS)
-    hay = sorted(resultados.glob('sesion_real_*' + config.SUFIJO_ESTADO), key=lambda p: p.stat().st_mtime) if resultados.exists() else []
+    import repetir_sesion
+    hay = repetir_sesion.sesiones('real', resultados) if resultados.exists() else []   # solo las que llegaron al lazo
     if not hay:
-        return [rev('plan_b', AVISO, 'no hay ninguna sesion real grabada para repetir',
-                    'Tras el primer ensayo bueno guarda resultados/sesion_real_*_estado.jsonl (es el plan B).')]
+        return [rev('plan_b', AVISO, 'no hay ninguna sesion real grabada con lazo para repetir',
+                    'Tras el primer ensayo bueno guarda resultados/sesion_real_*_estado.jsonl (es el plan B); una sesion '
+                    'detenida en la calibracion no cuenta.')]
     return [rev('plan_b', OK, f'{len(hay)} sesion(es) para repetir; la ultima: {hay[-1].name}')]
 
 
@@ -455,8 +457,17 @@ def escribir_bitacora(datos, ahora=time.time, carpeta=None):
 
 
 # ====================================================================== lanzar
+def _hay_terminal():
+    """Hay alguien al teclado (stdin es una terminal). En mintty con un Python nativo de Windows puede no serlo."""
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+def _esperar_enter():
+    input()
+
+
 def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, correr_foreground=None,
-           hacer_preflight=None, resultados=None, dormir=time.sleep):
+           hacer_preflight=None, resultados=None, dormir=time.sleep, esperar_operador=None):
     """Preflight, procesos de fondo, orquestador en primer plano, cierre y bitacora. Devuelve el codigo de salida.
     Los argumentos con valor por omision existen para probarlo sin red, sin hardware y sin esperar."""
     t0 = time.time()
@@ -509,6 +520,19 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
         salida('  orquestador en esta terminal (Ctrl+C para detener)\n')
         correr_foreground = correr_foreground or _correr_en_primer_plano
         codigo = correr_foreground(argv_de(*cmd['orquestador']))
+        if codigo == config.SALIDA_NO_GO:           # un NO GO detuvo la sesion: no esconderlo cerrando el tablero
+            bitacora['detenido_por_no_go'] = True
+            if procesos.vivo('tablero'):
+                if esperar_operador is None and not _hay_terminal():
+                    salida('Sesion detenida por un NO GO. Sin terminal no hay a quien esperar: el tablero se cierra con la demo '
+                           '(el motivo quedo en la consola del orquestador).')
+                else:
+                    salida('Sesion detenida por un NO GO. El tablero sigue abierto con el motivo y que hacer. '
+                           'Enter cierra todo (Ctrl+C tambien).')
+                    try:
+                        (esperar_operador or _esperar_enter)()
+                    except (EOFError, KeyboardInterrupt):
+                        pass
     except ErrorDemo as e:
         salida(f'ERROR: {e}')
         bitacora['error'] = str(e)

@@ -397,6 +397,16 @@ ESTADO_SESION_JSON = RESULTADOS / 'estado_sesion.json'
 # junto al CSV de cada sesion: todo lo que se publico en el flujo Estado, una linea JSON por
 # evento con su hora ({'t': ..., 'evento': {...}}). Lo usa repetir_sesion.py (plan B)
 SUFIJO_ESTADO = '_estado.jsonl'
+# codigo de salida de orquestador.py cuando un NO GO (CP1, CP2 o CP3, sin --forzar) detuvo la sesion; antes salia con 0
+# y demo.py no podia distinguirlo de una sesion completa. El evento de Estado de esa parada es tipo 'detenida'
+# (detencion.py: n, titulo, motivo, que_hacer) y el tablero lo muestra en grande.
+SALIDA_NO_GO = 4
+# Cortes del arbol del CP3 en docs/DOMINGO.md seccion 5 (detencion.pasos): BA por debajo del primero -> "el detector no
+# informa"; BA >= BA_MIN con especificidad por debajo del segundo -> "demasiadas falsas alarmas"; el resto, dos caminos.
+DETENCION_CP3_BA_NO_INFORMA = 0.65
+DETENCION_CP3_ESPEC_FALSAS_ALARMAS = 0.85
+# En que CP estaba la sesion segun el estado de la maquina, si nadie dejo dicho el motivo de la parada.
+DETENCION_CP_POR_ESTADO = {'IMPEDANCIAS': 1, 'CAL_MI': 2, 'CAL_ERRP': 3}
 # modelos calibrados hace mas que esto: aviso al cargarlos (pueden ser de otro piloto o del gemelo)
 MODELOS_EDAD_AVISO_H = 6.0
 # decoder de MI pre-entrenado con otras personas (estudios/transferencia_physionet.py modelo)

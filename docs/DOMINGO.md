@@ -102,7 +102,7 @@ python demo.py lanzar --plan gemelo --ortesis-sim       # sin casco: el gemelo d
 python demo.py lanzar --ortesis-udp                     # la órtesis por Wi-Fi (ESP32 en 192.168.4.1), en lugar de --puerto
 python demo.py lanzar --plan gemelo --ortesis-udp 127.0.0.1   # sin la placa: lanza también ortesis_udp_sim.py (la ESP32 simulada)
 python demo.py lanzar --puerto COM4 -- --sham --preentrenado   # lo que va tras `--` pasa tal cual al orquestador
-python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real
+python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real que llegó al lazo
 ```
 
 `--ortesis-udp [IP]` (y `--udp-puerto`) hace lo mismo que en el orquestador y es excluyente con `--ortesis-sim`: no pide pyserial ni la verificación USB, y el preflight avisa a dónde apunta (UDP no se puede comprobar sin mandar una orden; con el plan `gemelo` y una IP de esta laptop, `demo.py` lanza `ortesis_udp_sim.py` antes que el orquestador; con otro plan, el aviso recuerda lanzarlo a mano). `planb --ortesis-udp` repite los ángulos por Wi-Fi.
@@ -117,13 +117,13 @@ También acepta `--narrador`, `--copiloto`, `--flechas`, `--idioma en`, `--serie
 | Flujos LSL | ya hay un flujo `EEG`, o `Marcadores`/`Paso`/`Estado` (FALLA); con `--plan unicornlsl`, no se ve el flujo `Data` de la app (FALLA) |
 | Órtesis | el puerto no existe (FALLA) |
 | Verificaciones de hoy | `verificar_unicorn.py` o `verificar_ortesis.py` no se corrieron, son de hace más de 4 h o probaron otra fuente (AVISO); una comprobación crítica en rojo (FALLA). **No las corre: son guiadas.** |
-| IA y plan B | sin llave de la API (AVISO: narrador, copiloto y co-investigador usan plantillas); ninguna sesión real grabada para repetir (AVISO) |
+| IA y plan B | sin llave de la API (AVISO: narrador, copiloto y co-investigador usan plantillas); ninguna sesión real grabada que haya llegado al lazo (AVISO: una que un NO GO detuvo en la calibración no cuenta; dice «no hay ninguna sesion real grabada con lazo para repetir») |
 | Disco | menos de 500 MB libres (FALLA) |
 
 - Una FALLA detiene `lanzar` (código de salida 2). `--ignorar-fallas` sigue de todos modos, bajo tu responsabilidad, y queda escrito en la bitácora.
 - Los procesos de fondo escriben en `resultados/logs_demo/<fecha>/` (`fuente.log`, `tablero.log`, `narrador.log`). La bitácora, con el preflight, los comandos exactos, los extras, cómo se cerró cada proceso y los archivos nuevos, queda en `resultados/demo_<fecha>.json`.
 - Ctrl+C en la terminal del orquestador cierra todo, y cierra cada proceso por su PID (nunca por nombre). Primero se les pide que terminen, para que el puente suelte el casco.
-- El código de salida de `lanzar` es el del orquestador. **No esconde un checkpoint en NO GO, no agrega `--forzar` ni `--saltar-calibracion` por su cuenta y no contesta el cuestionario.** Si hace falta forzar, se pide a propósito: `python demo.py lanzar -- --forzar`.
+- El código de salida de `lanzar` es el del orquestador (4 si un NO GO detuvo la sesión: entonces, si hay una terminal, deja el tablero abierto con el aviso hasta un Enter; sin terminal dice que no hay a quien esperar y cierra todo). **No esconde un checkpoint en NO GO, no agrega `--forzar` ni `--saltar-calibracion` por su cuenta y no contesta el cuestionario.** Si hace falta forzar, se pide a propósito: `python demo.py lanzar -- --forzar`.
 - El EEG crudo queda en `resultados/sesion_unicorn_<fecha>.csv` (con fecha), no en `sesion_unicorn.csv`: guarda ese. **LabRecorder no lo abre este programa**: ábrelo tú y selecciona todos los flujos; `Marcadores`, `Paso` y `Estado` aparecen cuando arranca el orquestador.
 - **Sin probar en Windows.** Se probó en Linux contra el gemelo. Quedan sin comprobar con la laptop de la demo: el listado de puertos COM, el cierre con Ctrl+Break y que el puente suelte el casco al cerrarse. Antes de depender de él, corre en esa laptop `python demo.py preflight` y una vez `python demo.py lanzar --plan gemelo --ortesis-sim`.
 
@@ -146,7 +146,7 @@ Cuando la órtesis ya llegó al tope (cerrada o abierta del todo), los pasos que
 
 ## 5. Árbol de decisión por checkpoint
 
-Un checkpoint en NO GO detiene la sesión (salvo el CP4, que solo informa). Los modelos ya calibrados quedan guardados en `modelos/`.
+Un checkpoint en NO GO detiene la sesión (salvo el CP4, que solo informa). Los modelos ya calibrados quedan guardados en `modelos/`. El tablero lo dice en grande («Sesion detenida en CP3: …») con estos mismos pasos, y el orquestador sale con el código 4; con `demo.py lanzar` y una terminal, el tablero se queda abierto hasta que pulses Enter. Solo lo ve si ya estaba abierto cuando se detuvo. Si no quedó ningún ensayo (o ninguna época) válido, la sesión se detiene **aunque uses `--forzar`** y el aviso dice CP2 (o CP3), con su motivo.
 
 ### CP1: señal por canal y latencia de la órtesis
 
@@ -163,12 +163,14 @@ El mensaje dice qué falló.
   1. Cambia el cable o el puerto USB y cierra lo que use el COM.
   2. Reinicia el ESP32 y repite `python verificar_ortesis.py --puerto COM4`.
   3. Si la órtesis no responde, haz la demo sin ella: `python orquestador.py real --ortesis-sim`. El tablero muestra todo; dilo al jurado.
+  4. Si ya ibas con `--ortesis-sim` y la latencia falla, no es la órtesis sino la laptop (saturada): cierra lo que no uses y repite. El aviso no vuelve a sugerir `--ortesis-sim`.
 
 ### CP2: imaginación motora, BA ≥ 0.70
 
 - **BA entre 0.60 y 0.70.** Repite una vez: recuérdale al piloto que imagine la sensación de cerrar la mano, sin moverla, y que relaje de verdad en `RELAJA`. Vuelve a lanzar el orquestador.
 - **Sigue por debajo de 0.70.** Cambia de piloto si hay otro disponible.
 - **No hay tiempo ni otro piloto.** `python orquestador.py real --puerto COM4 --forzar` sigue adelante con el decoder que haya. La órtesis se equivocará más; el agente lo corrige solo si el CP3 sale bien.
+- **No quedó ningún ensayo válido.** Se descartaron todos (electrodo despegado, movimiento de cabeza o EEG sin datos frescos; la consola dice cuál). **`--forzar` no lo salta**: sin decoder no hay con qué seguir, y el aviso dice CP2. Revisa los electrodos, pide al piloto que no mueva la cabeza durante la señal y repite.
 
 ### CP3: detector de ErrP, BA ≥ 0.75 y especificidad ≥ 0.90
 
@@ -188,6 +190,7 @@ Es el riesgo principal: el Unicorn tiene 3 electrodos fronto-centrales. La curva
   En la corrida de referencia contra el gemelo pasó justo esto: BA 0.85 con especificidad 0.87 (NO GO), y con ese detector el agente se recuperó en 50 s.
 - **BA por debajo de 0.65.** El detector no informa. Repite la calibración de ErrP una vez; si no mejora, ve al plan B.
 - **BA ≥ 0.75 pero especificidad < 0.85.** Demasiadas falsas alarmas: repite con `--solo-errp`.
+- **No quedó ninguna época válida.** Sin detector no hay con qué seguir: **`--forzar` tampoco lo salta**, y el aviso dice CP3. La consola dice por qué se descartaron; repite solo la calibración de ErrP con `--solo-errp`, con el piloto mirando la órtesis.
 
 ### CP4: recuperación en 120 s o menos
 
@@ -206,7 +209,7 @@ En este orden:
    python tablero.py                                              # terminal 1
    python repetir_sesion.py --ultima --velocidad 2 --puerto COM4  # terminal 2
    ```
-   `--ultima` toma la sesión real más reciente; también se le puede dar un archivo `resultados/sesion_real_<fecha>_estado.jsonl`. Empieza en el lazo y conserva los checkpoints. Es una repetición: nada se decide en vivo, y hay que decirlo. Atajo: `python demo.py planb --puerto COM4` (si no hay sesión grabada, lo dice y no abre nada).
+   `--ultima` toma la sesión real más reciente **que llegó al lazo**: ignora las que un NO GO detuvo en la calibración (no tienen ningún paso), así que tras una parada repite la última sesión buena. También se le puede dar un archivo `resultados/sesion_real_<fecha>_estado.jsonl`. Empieza en el lazo y conserva los checkpoints. Es una repetición: nada se decide en vivo, y hay que decirlo. Atajo: `python demo.py planb --puerto COM4` (si no hay ninguna sesión real grabada con lazo, lo dice y no abre nada).
 2. **El gemelo digital en vivo**, sin casco. El lazo completo corre de verdad, pero el cerebro es sintético:
    ```bash
    python cerebro_sintetico.py                 # terminal 1, en lugar del puente

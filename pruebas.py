@@ -537,6 +537,72 @@ def repetir_sesion():
 
 
 @prueba
+def plan_b_sin_sesion_detenida():
+    """repetir_sesion.tiene_pasos / sesiones / ultima, sin Qt ni LSL: el plan B nunca es una sesion que un NO GO detuvo
+    antes del lazo (solo checkpoint y detenida), un archivo vacio o roto. Cuenta tanto 'paso' como 'ajeno', separa los
+    backends 'real' y 'sim' y lee config.RESULTADOS al llamarla (no al importar)."""
+    import json
+    import tempfile
+    from pathlib import Path
+    import detencion
+    import repetir_sesion as rs
+    suf = config.SUFIJO_ESTADO
+    with tempfile.TemporaryDirectory() as d:
+        carpeta = Path(d)
+
+        def sesion(nombre, tipos, mtime, **extra):
+            return _grabar_estado_falso(carpeta / (nombre + suf), tipos, mtime=mtime, **extra)
+        ajena = sesion('sesion_real_E', ['cue', 'ajeno'], 500)                       # solo un movimiento ajeno: llego al lazo
+        buena = sesion('sesion_real_A', ['checkpoint', 'cue', 'paso', 'paso'], 1000)
+        detenida = sesion('sesion_real_B', ['checkpoint', 'detenida'], 2000, detenida=detencion.evento(3, 'ErrP: BA 0.60', {'ba': 0.6}))
+        vacia = carpeta / ('sesion_real_C' + suf)
+        vacia.write_text('', encoding='utf-8')
+        os.utime(vacia, (3000, 3000))
+        rota = carpeta / ('sesion_real_D' + suf)                                      # la linea de paso quedo a medias
+        rota.write_text('{"t": 1.0, "evento": {"tipo": "paso", \n', encoding='utf-8')
+        os.utime(rota, (4000, 4000))
+        no_json = carpeta / ('sesion_real_H' + suf)
+        no_json.write_text('esto no es json\n\n', encoding='utf-8')
+        os.utime(no_json, (4100, 4100))
+        # lineas que dicen "paso" sin ser un paso: un checkpoint con esa clave y un marcador llamado asi
+        engano = carpeta / ('sesion_real_I' + suf)
+        engano.write_text(json.dumps({'t': 1.0, 'evento': {'tipo': 'checkpoint', 'paso': 3, 'ajeno': 1}}) + '\n'
+                          + json.dumps({'t': 2.0, 'marcador': 'paso'}) + '\n', encoding='utf-8')
+        os.utime(engano, (4200, 4200))
+        sim = sesion('sesion_sim_F', ['checkpoint', 'paso'], 5000)
+        (carpeta / 'sesion_real_G.csv').write_text('a,b\n1,2\n', encoding='utf-8')   # otro archivo de la sesion: no cuenta
+        # una escritura interrumpida despues de un paso valido: la sesion ya llego al lazo
+        cortada = carpeta / ('sesion_real_J' + suf)
+        cortada.write_text(json.dumps({'t': 1.0, 'evento': {'tipo': 'paso', 'paso': 1}}) + '\n{"t": 2.0, "evento": {"tipo": "pa', encoding='utf-8')
+        os.utime(cortada, (600, 600))
+
+        # tiene_pasos: paso y ajeno cuentan; checkpoint y detenida, vacio, roto, un archivo que no existe, no
+        assert rs.tiene_pasos(buena) and rs.tiene_pasos(ajena) and rs.tiene_pasos(sim) and rs.tiene_pasos(cortada)
+        for no in (detenida, vacia, rota, no_json, engano, carpeta / 'no_existe_estado.jsonl'):
+            assert not rs.tiene_pasos(no), no.name
+        # sesiones: solo las que llegaron al lazo, de la mas vieja a la mas reciente, y cada backend por separado
+        assert rs.sesiones('real', carpeta) == [ajena, cortada, buena], [r.name for r in rs.sesiones('real', carpeta)]
+        assert rs.sesiones('sim', carpeta) == [sim] and rs.sesiones('otro', carpeta) == []
+        assert rs.sesiones('real', carpeta / 'no_existe') == []
+        # ultima(): la buena aunque la detenida (y los archivos vacios y rotos) sean mas nuevos; lee config.RESULTADOS al llamarla
+        anterior = config.RESULTADOS
+        config.RESULTADOS = carpeta
+        try:
+            assert rs.ultima('real') == buena and rs.ultima('sim') == sim and rs.ultima() == buena
+            os.utime(buena, (550, 550))                                               # la buena deja de ser la ultima: gana la otra mas nueva
+            assert rs.ultima('real') == cortada
+            os.utime(buena, (1000, 1000))
+            # solo detenidas, vacias o rotas: no hay ultima (None), no una sesion que no sirve
+            for nombre in (buena, ajena, cortada):
+                nombre.unlink()
+            assert rs.ultima('real') is None and rs.sesiones('real') == [] and rs.ultima('sim') == sim
+        finally:
+            config.RESULTADOS = anterior
+        assert config.RESULTADOS == anterior
+    return 'detenida, vacia, rota y enganos no cuentan; paso y ajeno si; real y sim separados; ultima() usa config.RESULTADOS'
+
+
+@prueba
 def modelos_del_dia():
     """Dos protecciones para el dia de la demo. (1) Al cargar modelos ya calibrados se dice hace
     cuanto se calibraron y, si son viejos, se avisa: en modelos/ pueden haber quedado los del
@@ -3414,6 +3480,24 @@ def memoria_sesiones():
 
 
 # ------------------------------------------------------------ modo demo automatico (demo.py)
+def _grabar_estado_falso(ruta, tipos, mtime=None, **extra):
+    """Escribe una sesion grabada falsa (_estado.jsonl, como Salidas._registrar): una linea {'t', 'evento'} por evento,
+    con la hora creciente, y la fija con `mtime` si se da. `tipos` son tipos de evento ('paso', 'ajeno', 'checkpoint',
+    'detenida'...); un 'paso' o 'ajeno' trae su numero. Para probar el plan B sin correr una sesion."""
+    import json
+    lineas = []
+    for k, tipo in enumerate(tipos):
+        ev = {'tipo': tipo, **extra.get(tipo, {})}
+        if tipo in ('paso', 'ajeno'):
+            ev.setdefault('paso', k + 1)
+        lineas.append(json.dumps({'t': float(k + 1), 'evento': ev}))
+        lineas.append(json.dumps({'t': float(k + 1), 'marcador': f'm{k}'}))          # los marcadores tambien van en el archivo
+    ruta.write_text('\n'.join(lineas) + '\n', encoding='utf-8')
+    if mtime is not None:
+        os.utime(ruta, (mtime, mtime))
+    return ruta
+
+
 class _ProcesosFalsos:
     """Hace de demo.Procesos sin lanzar nada: anota que se pidio, en que orden, y si se cerro."""
 
@@ -3664,12 +3748,24 @@ def demo_revisiones():
 
         assert demo.revisar_plan_b(carpeta / 'no_existe')[0]['estado'] == 'AVISO'
         assert demo.revisar_plan_b(carpeta)[0]['estado'] == 'AVISO'
-        (carpeta / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        # una sesion detenida por un NO GO (solo checkpoint y detenida, ningun paso) no es plan B, aunque sea la unica o la mas nueva
+        sufijo = config.SUFIJO_ESTADO
+        solo_detenida = carpeta / 'solo_detenida'
+        solo_detenida.mkdir()
+        _grabar_estado_falso(solo_detenida / ('sesion_real_20261004_120000' + sufijo), ['checkpoint', 'detenida'], mtime=2000)
+        r = demo.revisar_plan_b(solo_detenida)[0]
+        assert r['estado'] == 'AVISO' and 'no hay ninguna sesion real grabada' in r['texto'] and 'no cuenta' in r['que_hacer'], r
+        # la buena (con al menos un paso), mas vieja que la detenida: se elige la buena
+        buena = _grabar_estado_falso(carpeta / ('sesion_real_20261004_100000' + sufijo), ['checkpoint', 'paso'], mtime=1000)
         r = demo.revisar_plan_b(carpeta)[0]
-        assert r['estado'] == 'OK' and 'sesion_real_20261004_100000' in r['texto']
-        # el plan B de una sesion simulada no vale como respaldo de la demo
-        (carpeta / ('sesion_sim_20261004_110000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
-        assert '1 sesion(es)' in demo.revisar_plan_b(carpeta)[0]['texto']
+        assert r['estado'] == 'OK' and 'sesion_real_20261004_100000' in r['texto'] and '1 sesion(es)' in r['texto']
+        _grabar_estado_falso(carpeta / ('sesion_real_20261004_120000' + sufijo), ['checkpoint', 'detenida'], mtime=2000)
+        r = demo.revisar_plan_b(carpeta)[0]
+        assert r['estado'] == 'OK' and '1 sesion(es)' in r['texto'] and buena.name in r['texto'] and '120000' not in r['texto'], r
+        # el plan B de una sesion simulada no vale como respaldo de la demo (aunque tenga pasos)
+        _grabar_estado_falso(carpeta / ('sesion_sim_20261004_110000' + sufijo), ['checkpoint', 'paso'], mtime=3000)
+        r = demo.revisar_plan_b(carpeta)[0]
+        assert '1 sesion(es)' in r['texto'] and buena.name in r['texto'] and 'sesion_sim' not in r['texto'], r
 
         assert demo.revisar_disco(carpeta, lambda ruta: type('U', (), {'free': 10 * 10 ** 9})())[0]['estado'] == 'OK'
         r = demo.revisar_disco(carpeta, lambda ruta: type('U', (), {'free': 100 * 10 ** 6})())[0]
@@ -3832,6 +3928,82 @@ def demo_lanzar_simulado():
         assert 'Bitacora' in lineas[-1] and any('gemelo digital, no una persona' in l for l in lineas)
         # el codigo de salida del orquestador es el de la demo (un CP en NO GO se ve, no se esconde)
         assert lanzar(['--plan', 'gemelo', '--ortesis-sim', '--sin-tablero'], correr_foreground=correr(codigo=1))[0] == 1
+        # un NO GO detuvo la sesion (el orquestador sale con config.SALIDA_NO_GO): el tablero se queda abierto con el aviso
+        # hasta que el operador pulse Enter; si no, la demo lo cerraria en el mismo instante y nadie lo veria
+        esperas, falsos = [], _ProcesosFalsos(res / 'logs')
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO),
+                           procesos=falsos, esperar_operador=lambda: esperas.append(falsos.cerrado))      # aun no se cerro nada
+        assert codigo == config.SALIDA_NO_GO and esperas == [False] and p.cerrado and any('tablero sigue abierto' in l for l in lineas)
+        b = json.loads(bitacoras()[-1].read_text(encoding='utf-8'))
+        assert b['detenido_por_no_go'] is True and b['codigo_orquestador'] == config.SALIDA_NO_GO
+        # sin tablero vivo no hay nada que mantener abierto; una sesion normal o interrumpida tampoco espera
+        for kw in (dict(procesos=_ProcesosFalsos(res / 'logs', mueren=['tablero'])), dict(correr_foreground=correr(codigo=0))):
+            kw.setdefault('correr_foreground', correr(codigo=config.SALIDA_NO_GO))
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], esperar_operador=lambda: esperas.append('no debia esperar'), **kw)
+            assert esperas == [False] and p.cerrado, esperas
+        # Ctrl+C o sin teclado durante la espera: se cierra todo igual y el codigo sigue siendo el del NO GO
+        for error in (KeyboardInterrupt(), EOFError()):
+            def interrumpe(error=error):
+                raise error
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), esperar_operador=interrumpe)
+            assert codigo == config.SALIDA_NO_GO and p.cerrado
+        # sin `esperar_operador` decide la terminal: _hay_terminal mira sys.stdin y _esperar_enter es un input() (probados con falsos)
+        import builtins
+
+        class Entrada:
+            def __init__(self, tty):
+                self.tty = tty
+
+            def isatty(self):
+                return self.tty
+        stdin, hay_terminal, input_real = sys.stdin, demo._hay_terminal, builtins.input
+        llamadas = []
+
+        def input_falso(*args):
+            llamadas.append((args, falsos.cerrado))
+            return ''
+        try:
+            sys.stdin = Entrada(True)
+            assert demo._hay_terminal() is True
+            sys.stdin = Entrada(False)
+            assert demo._hay_terminal() is False
+            sys.stdin = None                                       # pythonw o un proceso sin stdin
+            assert demo._hay_terminal() is False
+            falsos = _ProcesosFalsos(res / 'logs')
+            builtins.input = input_falso
+            demo._esperar_enter()
+            assert llamadas == [((), False)], llamadas                # un solo input(), sin texto
+            # sin terminal: lo dice, no espera, cierra todo y el codigo sigue siendo el del NO GO
+            demo._hay_terminal = lambda: False
+            llamadas.clear()
+            falsos = _ProcesosFalsos(res / 'logs')
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), procesos=falsos)
+            assert codigo == config.SALIDA_NO_GO and not llamadas and p.cerrado, llamadas
+            assert any('Sin terminal' in l for l in lineas) and not any('tablero sigue abierto' in l for l in lineas), lineas
+            assert json.loads(bitacoras()[-1].read_text(encoding='utf-8'))['detenido_por_no_go'] is True
+            # con terminal: espera UN Enter con el tablero todavia abierto y despues cierra todo
+            demo._hay_terminal = lambda: True
+            falsos = _ProcesosFalsos(res / 'logs')
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), procesos=falsos)
+            assert codigo == config.SALIDA_NO_GO and llamadas == [((), False)] and p.cerrado, llamadas
+            assert any('tablero sigue abierto' in l for l in lineas) and not any('Sin terminal' in l for l in lineas), lineas
+            # con terminal pero sin teclado a media espera (EOF o Ctrl+C): se cierra igual
+            for error in (EOFError(), KeyboardInterrupt()):
+                def input_roto(*args, error=error):
+                    raise error
+                builtins.input = input_roto
+                falsos = _ProcesosFalsos(res / 'logs')
+                codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), procesos=falsos)
+                assert codigo == config.SALIDA_NO_GO and p.cerrado
+            # una sesion normal no espera a nadie, haya o no terminal
+            builtins.input = input_falso
+            llamadas.clear()
+            falsos = _ProcesosFalsos(res / 'logs')
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=0), procesos=falsos)
+            assert codigo == 0 and not llamadas and p.cerrado
+        finally:
+            sys.stdin, demo._hay_terminal, builtins.input = stdin, hay_terminal, input_real
+        assert demo._hay_terminal is hay_terminal and builtins.input is input_real
         # Ctrl+C: 130, y los procesos de fondo se cierran igual
         codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(error=KeyboardInterrupt()))
         assert codigo == 130 and p.cerrado
@@ -3853,7 +4025,16 @@ def demo_lanzar_simulado():
         p = _ProcesosFalsos(res / 'logs')
         assert demo.planb(a, salida=lineas.append, resultados=vacia, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 1
         assert p.pedidos == [] and 'No hay plan B' in lineas[-1]
-        (res / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        # una sesion que un NO GO detuvo antes del lazo (solo checkpoint y detenida) no es plan B: planb no abre nada
+        solo = res / 'solo_detenida'
+        solo.mkdir()
+        _grabar_estado_falso(solo / ('sesion_real_20261004_120000' + config.SUFIJO_ESTADO), ['checkpoint', 'detenida'], mtime=2000)
+        foreground.clear()
+        assert demo.planb(a, salida=lineas.append, resultados=solo, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 1
+        assert p.pedidos == [] and not foreground and 'No hay plan B' in lineas[-1]
+        # con una buena (tiene pasos), aunque la detenida sea mas nueva, si hay plan B
+        _grabar_estado_falso(res / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO), ['checkpoint', 'paso'], mtime=1000)
+        _grabar_estado_falso(res / ('sesion_real_20261004_120000' + config.SUFIJO_ESTADO), ['checkpoint', 'detenida'], mtime=2000)
         foreground.clear()
         assert demo.planb(a, salida=lineas.append, resultados=res, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 0
         assert p.pedidos == [('tablero', 'tablero.py', [])] and p.cerrado
@@ -4451,6 +4632,454 @@ def cp1_red_robusto():
     return 'una ventana alta se corrige con la mediana de 3; contaminacion sostenida, saturacion y rms fuera de rango siguen fallando'
 
 
+@prueba
+def detencion_texto():
+    """detencion.py: que dice la parada de cada CP (el arbol de docs/DOMINGO.md, seccion 5), con los numeros que decidieron el NO GO."""
+    import json
+    import detencion as dt
+    todo = lambda l: ' '.join(l)
+    # CP1: segun lo que fallo, y con el COM solo si la ortesis va por USB
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': ['Fz', 'Cz'], 'latencia_ok': True})
+    assert 'Fz, Cz' in p[0] and 'gel' in p[0] and 'demo.py planb' in todo(p) and 'ESP32' not in todo(p)
+    p = dt.pasos(1, {'senal_ok': True, 'canales_malos': [], 'latencia_ok': False}, 'COM4')
+    assert 'verificar_ortesis.py --puerto COM4' in todo(p) and '--ortesis-sim' in todo(p) and 'gel' not in todo(p)
+    assert 'verificar_ortesis' not in todo(dt.pasos(1, {'latencia_ok': False}, None)) and 'ortesis' in todo(dt.pasos(1, {'latencia_ok': False}))
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': ['C3'], 'latencia_ok': False}, 'COM4')
+    assert 'gel' in todo(p) and 'COM4' in todo(p)
+    # CP1 sin muestras de EEG: el casco no esta enviando, no hay electrodos que reacomodar
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': [], 'sin_muestras': True, 'latencia_ok': True})
+    assert 'No llegaron muestras' in todo(p) and 'ver_flujos.py' in todo(p) and 'REVISAR' not in todo(p) and 'gel' not in todo(p), p
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': [], 'sin_muestras': True, 'latencia_ok': False}, 'COM4')
+    assert 'No llegaron muestras' in todo(p) and 'verificar_ortesis.py --puerto COM4' in todo(p) and 'REVISAR' not in todo(p), p
+    assert 'REVISAR' in todo(dt.pasos(1, {'senal_ok': False, 'canales_malos': [], 'sin_muestras': False}))      # mal sin canal nombrado
+    # CP1 con la ortesis simulada: la latencia mala es de la laptop, y no se sugiere pasar a la simulada porque ya lo es
+    p = dt.pasos(1, {'senal_ok': True, 'canales_malos': [], 'latencia_ok': False}, None, simulada=True)
+    assert 'simulada' in todo(p) and 'saturada' in todo(p) and '--ortesis-sim' not in todo(p) and 'verificar_ortesis' not in todo(p), p
+    assert '--ortesis-sim' in todo(dt.pasos(1, {'latencia_ok': False}, None, simulada=False))
+    assert dt.evento(1, 'x', {'latencia_ok': False}, None, True)['que_hacer'] == p              # evento() la pasa tal cual
+    # CP2
+    p = dt.pasos(2, {'ba': 0.65})
+    assert 'cambia de piloto' in todo(p) and '--forzar' in todo(p) and 'sin moverla' in todo(p)
+    assert 'ningun ensayo valido' in todo(dt.pasos(2, {'sin_ensayos': True}))
+    # CP3: las ramas del DOMINGO.md
+    p = todo(dt.pasos(3, {'ba': 0.60, 'espec': 0.95}))
+    assert 'no informa' in p and '--solo-errp' in p and 'planb' in p and '--saltar-calibracion' not in p
+    p = todo(dt.pasos(3, {'ba': 0.80, 'espec': 0.80}))
+    assert 'falsas alarmas' in p and '--solo-errp' in p and '--saltar-calibracion' not in p
+    for ba, espec in ((0.70, 0.95), (0.85, 0.87), (0.70, 0.80), (0.65, 0.90)):       # dos caminos
+        p = todo(dt.pasos(3, {'ba': ba, 'espec': espec}))
+        assert '--solo-errp' in p and '--saltar-calibracion' in p and 'Dos caminos' in p and 'CP4 puede dar NO GO' in p, (ba, espec)
+    assert '--solo-errp' in todo(dt.pasos(3, {'sin_epocas': True}))
+    # los cortes del CP3 son los de config (no numeros sueltos en detencion.py): moverlos mueve las ramas, y en el corte exacto no cambia de rama
+    corte_ba, corte_espec = config.DETENCION_CP3_BA_NO_INFORMA, config.DETENCION_CP3_ESPEC_FALSAS_ALARMAS
+    assert 'no informa' in todo(dt.pasos(3, {'ba': corte_ba - 0.01, 'espec': 0.95})) and 'no informa' not in todo(dt.pasos(3, {'ba': corte_ba, 'espec': 0.95}))
+    ba_alta = config.BA_MIN + 0.05
+    assert 'falsas alarmas' in todo(dt.pasos(3, {'ba': ba_alta, 'espec': corte_espec - 0.01}))
+    assert 'falsas alarmas' not in todo(dt.pasos(3, {'ba': ba_alta, 'espec': corte_espec}))
+    try:
+        config.DETENCION_CP3_BA_NO_INFORMA, config.DETENCION_CP3_ESPEC_FALSAS_ALARMAS = 0.50, 0.70
+        assert 'no informa' not in todo(dt.pasos(3, {'ba': 0.60, 'espec': 0.95})) and 'Dos caminos' in todo(dt.pasos(3, {'ba': 0.60, 'espec': 0.95}))
+        assert 'falsas alarmas' not in todo(dt.pasos(3, {'ba': 0.80, 'espec': 0.80}))
+        assert 'no informa' in todo(dt.pasos(3, {'ba': 0.45, 'espec': 0.95}))
+    finally:
+        config.DETENCION_CP3_BA_NO_INFORMA, config.DETENCION_CP3_ESPEC_FALSAS_ALARMAS = corte_ba, corte_espec
+    # el DOMINGO.md dice los mismos cortes: un umbral movido en config.py sin tocar el arbol (o al reves) se detecta
+    dom = (config.RAIZ / 'docs' / 'DOMINGO.md').read_text(encoding='utf-8')
+    assert '### CP3' in dom and '### CP4' in dom, 'el arbol del DOMINGO.md cambio de forma: ajusta esta prueba'
+    cp3 = dom.split('### CP3')[1].split('### CP4')[0]
+    titulo = cp3.split('\n')[0]
+    assert f'{config.BA_MIN:.2f}' in titulo and f'{config.ESPEC_MIN:.2f}' in titulo, titulo
+    # cada corte aparece en CADA rama del arbol que lo usa (el 0.65 en dos, el 0.85 en dos): cambiar uno solo de los dos numeros se detecta
+    import re
+    llano = ' '.join(re.sub(r'[*_`]', '', cp3).split())                          # sin negritas ni saltos de linea
+    ba, es, ba_min, es_min = (f'{x:.2f}' for x in (corte_ba, corte_espec, config.BA_MIN, config.ESPEC_MIN))
+    for frase in (f'BA entre {ba} y {ba_min}', f'BA por debajo de {ba}', f'especificidad entre {es} y {es_min}', f'especificidad < {es}'):
+        assert frase in llano, f'DOMINGO.md, seccion CP3, ya no dice "{frase}": el arbol y config.DETENCION_CP3_* deben decir lo mismo'
+    # lo que dice el texto existe: cada bandera esta en el arbol del DOMINGO.md y en el orquestador
+    fuente = (config.RAIZ / 'orquestador.py').read_text(encoding='utf-8')
+    for bandera in ('--solo-errp', '--saltar-calibracion', '--forzar', '--ortesis-sim'):
+        assert bandera in dom and f"'{bandera}'" in fuente, bandera
+    assert 'verificar_ortesis.py' in dom and (config.RAIZ / 'verificar_ortesis.py').exists()
+    # sin CP conocido no inventa uno
+    ev = dt.evento(None, 'se detuvo', None)
+    assert ev['titulo'] == 'Sesion detenida' and ev['n'] is None and 'DOMINGO.md' in todo(ev['que_hacer'])
+    assert dt.pasos(4) == dt.pasos(None)
+    # el evento: titulo con el CP, serializable, todo ASCII (regla del proyecto) y escapado para el tablero
+    ev = dt.evento(3, 'ErrP: sens 0.83, espec 0.87, BA 0.85 con 120 epocas (<b>x</b> & y)', {'ba': 0.85, 'espec': 0.87})
+    assert ev['tipo'] == 'detenida' and ev['n'] == 3 and ev['titulo'] == 'Sesion detenida en CP3' and len(ev['que_hacer']) == 3
+    assert json.loads(json.dumps(ev)) == ev
+    for n, datos in ((1, {'senal_ok': False, 'canales_malos': ['Fz']}), (2, {'ba': 0.6}), (3, {'ba': 0.7, 'espec': 0.88}), (3, {'ba': 0.5})):
+        assert all(ord(c) < 128 for c in json.dumps(dt.evento(n, 'x', datos, 'COM4'), ensure_ascii=False))
+    h = dt.html(ev)
+    assert 'Sesion detenida en CP3: ErrP: sens 0.83' in h and '&lt;b&gt;x&lt;/b&gt; &amp; y' in h and '<b>x</b>' not in h
+    assert all(dt.html(dt.evento(3, 'x', {'ba': 0.7, 'espec': 0.88})).count(f) >= 1 for f in ('--solo-errp', '--saltar-calibracion'))
+    c = dt.texto_consola(ev)
+    assert c.startswith('Sesion detenida en CP3: ErrP') and 'Que hacer:' in c and '--solo-errp' in c and 'DOMINGO.md' in c
+    return 'CP1 (con y sin muestras, simulada) a CP3 con sus ramas del arbol, cortes iguales a config y a DOMINGO.md, sin CP no inventa, escapado y ASCII'
+
+
+@prueba
+def detencion_orquestador():
+    """Un NO GO que detiene la sesion se anuncia en Estado (tipo 'detenida') y el orquestador sale con config.SALIDA_NO_GO."""
+    import contextlib
+    import io
+    import types
+    import detencion as dt
+    import orquestador
+    visto = []
+    sal = types.SimpleNamespace(estado=lambda **d: visto.append(d), no_go=None)
+    silencio = lambda: contextlib.redirect_stdout(io.StringIO())
+    # checkpoint(): solo un NO GO sin --forzar deja dicho el motivo
+    with silencio():
+        assert orquestador.checkpoint(sal, 3, True, 'bien', False, datos={'ba': 0.9}) and sal.no_go is None
+        assert orquestador.checkpoint(sal, 3, False, 'mal', True, datos={'ba': 0.6}) and sal.no_go is None
+        assert not orquestador.checkpoint(sal, 4, False, 'lento', False, informativo=True) and sal.no_go is None
+        assert orquestador.checkpoint(sal, 2, False, 'x', False, informativo=True) is False and sal.no_go is None
+        assert not orquestador.checkpoint(sal, 3, False, 'ErrP: sens 0.83, espec 0.87, BA 0.85', False, datos={'ba': 0.85, 'espec': 0.87})
+    assert sal.no_go == {'n': 3, 'motivo': 'ErrP: sens 0.83, espec 0.87, BA 0.85', 'datos': {'ba': 0.85, 'espec': 0.87}}
+    assert [e['ok'] for e in visto if e['tipo'] == 'checkpoint'][-1] is False
+    # anunciar_detencion(): lo publica y lo dice en la terminal
+    orq = types.SimpleNamespace(salidas=sal, fsm=types.SimpleNamespace(estado='CAL_ERRP'))
+    a = orquestador.argumentos(['real', '--puerto', 'COM9'])
+    visto.clear()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ev = orquestador.anunciar_detencion(orq, a)
+    assert visto == [ev] and ev['tipo'] == 'detenida' and ev['n'] == 3 and 'espec 0.87' in ev['motivo'], visto
+    assert '--saltar-calibracion' in buf.getvalue() and 'Sesion detenida en CP3' in buf.getvalue()
+    # CP1 por latencia: el COM de la ortesis por USB, y nada de COM si va simulada o por Wi-Fi AUNQUE se haya dado --puerto
+    sal.no_go = {'n': 1, 'motivo': 'latencia', 'datos': {'senal_ok': True, 'canales_malos': [], 'latencia_ok': False}}
+    for args, hay_com, sugiere_sim, verificar in ((['real', '--puerto', 'COM9'], True, True, True),
+                                                   (['real', '--puerto', 'COM9', '--ortesis-sim'], False, False, False),
+                                                   (['real', '--puerto', 'COM9', '--ortesis-udp'], False, True, False),
+                                                   (['real', '--ortesis-udp', '--puerto', 'COM9'], False, True, False),
+                                                   (['real'], False, True, True)):                     # sin --puerto: el de config
+        with silencio():
+            ev = orquestador.anunciar_detencion(orq, orquestador.argumentos(args))
+        texto = ' '.join(ev['que_hacer'])
+        assert ev['n'] == 1 and ev['titulo'] == 'Sesion detenida en CP1', ev
+        assert ('COM9' in texto) == hay_com, (args, texto)
+        assert ('verificar_ortesis.py' in texto) == verificar and ('--ortesis-sim' in texto) == sugiere_sim, (args, texto)
+        if args == ['real']:
+            assert config.PUERTO_ORTESIS in texto, texto
+        if '--ortesis-sim' in args:                         # la simulada no puede sugerirse a si misma
+            assert 'simulada' in texto, texto
+    # sin motivo dicho: el CP sale del estado de la maquina; sin estado conocido, no inventa
+    sal.no_go = None
+    for estado, n in (('IMPEDANCIAS', 1), ('CAL_MI', 2), ('CAL_ERRP', 3), ('LAZO_ESTATICO', None)):
+        orq.fsm.estado = estado
+        with silencio():
+            ev = orquestador.anunciar_detencion(orq, a)
+        assert ev['n'] == n and 'consola dice por que' in ev['motivo'], (estado, ev)
+
+    # correr(): devuelve SALIDA_NO_GO si preparar() se detuvo, y publica la parada antes de cerrar
+    class Parado:
+        prog, sham, lista = None, None, False
+
+        def __init__(self):
+            self.salidas = types.SimpleNamespace(estado=lambda **d: visto.append(d), no_go={'n': 2, 'motivo': 'MI: BA 0.55', 'datos': {'ba': 0.55}})
+            self.fsm = types.SimpleNamespace(estado='CAL_MI', ir_a=lambda n: None)
+            self.evaluados = self.cerrados = 0
+
+        def preparar(self):
+            return None
+
+        def evaluar(self):
+            self.evaluados += 1
+
+        def cerrar(self):
+            self.cerrados += 1
+    p = Parado()
+    visto.clear()
+    with silencio():
+        codigo = orquestador.correr(p, a)
+    assert codigo == config.SALIDA_NO_GO == 4 and [e['tipo'] for e in visto] == ['detenida'] and visto[0]['n'] == 2
+    assert p.evaluados == 1 and p.cerrados == 1                       # sigue cerrando como siempre
+    # si el aviso mismo falla (Estado caido, por ejemplo) la sesion igual se cierra y sale con 4
+    def estado_roto(**d):
+        raise OSError('Estado caido')
+    p = Parado()
+    p.salidas.estado = estado_roto
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert orquestador.correr(p, a) == config.SALIDA_NO_GO
+    assert p.evaluados == 1 and p.cerrados == 1 and 'no se pudo anunciar la detencion' in buf.getvalue() and 'Estado caido' in buf.getvalue()
+    # una sesion completa sale con 0 (las pruebas del simulador la corren de verdad)
+    b = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '6', '--pasos_adaptativo', '6', '--sin_perturbacion'])
+    with silencio():
+        assert orquestador.correr(orquestador.Orquestador(orquestador.BackendSim(b), b), b) == 0
+    # main(): ese codigo es el de salida del proceso
+    originales = orquestador.BackendSim, orquestador.Orquestador, orquestador.correr
+    try:
+        orquestador.BackendSim, orquestador.Orquestador = (lambda a: None), (lambda *x: None)
+        for devuelve, sale in ((config.SALIDA_NO_GO, config.SALIDA_NO_GO), (0, None)):
+            orquestador.correr = lambda orq, a, d=devuelve: d
+            try:
+                orquestador.main(['sim'])
+                codigo = None
+            except SystemExit as e:
+                codigo = e.code
+            assert codigo == sale, (devuelve, codigo)
+    finally:
+        orquestador.BackendSim, orquestador.Orquestador, orquestador.correr = originales
+    # el cableado, con AST: toda llamada a checkpoint() de un CP que detiene (1, 2 o 3) pasa `datos=`; sin eso detencion.pasos
+    # no sabe que fallo y cae en el texto generico. El CP4 solo informa y no lo necesita
+    import ast
+    arbol = ast.parse((config.RAIZ / 'orquestador.py').read_text(encoding='utf-8'))
+    con_datos = {}
+    for nodo in ast.walk(arbol):
+        nombre = getattr(nodo.func, 'id', getattr(nodo.func, 'attr', None)) if isinstance(nodo, ast.Call) else None
+        if nombre == 'checkpoint' and len(nodo.args) >= 2 and isinstance(nodo.args[1], ast.Constant):
+            con_datos.setdefault(nodo.args[1].value, []).append('datos' in {k.arg for k in nodo.keywords})
+    assert {1, 2, 3, 4} <= set(con_datos), con_datos                    # si no hay llamadas, esta revision no miraria nada
+    for n in (1, 2, 3):
+        assert all(con_datos[n]), f'una llamada a checkpoint() del CP{n} no pasa datos=: {con_datos}'
+
+    # el cableado de BackendReal, con falsos (sin casco, sin ortesis y sin tardar): CP1, CP2 y CP3 dejan el motivo y los numeros
+    import hardware
+
+    class EEGFalso:
+        def __init__(self, filas):
+            self.filas = filas
+
+        def calidad_robusta(self, segundos, esperar=None, avisar=None):
+            return self.filas
+
+    class OrtesisFalsa:
+        def __init__(self, con_ack=True):
+            self.con_ack, self.movimientos = con_ack, []
+
+        def mover(self, fraccion, dur_ms=None):
+            self.movimientos.append(fraccion)
+            return len(self.movimientos), (1.0 if self.con_ack else None), 8.0 + len(self.movimientos) % 2     # ACK de 8 a 9 ms
+
+    def fila(canal, ok=True):
+        return {'canal': canal, 'rms_uv': 12.0, 'red': 0.1 if ok else 0.7, 'saturado': 0.0, 'ok': ok,
+                **({} if ok else {'red_ventanas': [0.7, 0.6, 0.7]})}
+
+    def backend(*argv, filas=(), con_ack=True, hw=hardware):
+        b = object.__new__(orquestador.BackendReal)                       # sin __init__: no conecta a nada
+        b.a = orquestador.argumentos(['real', '--ortesis-sim', '--seg_revision', '0', *argv])
+        b.hw, b.eeg, b.ortesis, b.decoder, b.detector = hw, EEGFalso(list(filas)), OrtesisFalsa(con_ack), None, None
+        sal = types.SimpleNamespace(estado=lambda **d: visto.append(d), no_go=None, marcador=lambda *a, **k: None)
+        return b, types.SimpleNamespace(salidas=sal, fsm=types.SimpleNamespace(estado='IMPEDANCIAS', ir_a=lambda n: pasos_fsm.append(n)))
+    pasos_fsm = []
+    buenas, una_mala = [fila('Fz'), fila('C3')], [fila('Fz'), fila('C3', False), fila('Oz', False)]
+    esperado = {'ok': dict(senal_ok=True, canales_malos=[], sin_muestras=False, latencia_ok=True),
+                'canal': dict(senal_ok=False, canales_malos=['C3', 'Oz'], sin_muestras=False, latencia_ok=True),
+                'vacia': dict(senal_ok=False, canales_malos=[], sin_muestras=True, latencia_ok=True),
+                'sin_ack': dict(senal_ok=True, canales_malos=[], sin_muestras=False, latencia_ok=False),
+                'ambos': dict(senal_ok=False, canales_malos=['C3', 'Oz'], sin_muestras=False, latencia_ok=False)}
+    casos = (('canal', una_mala, True), ('vacia', [], True), ('sin_ack', buenas, False), ('ambos', una_mala, False))
+    movimientos = config.CP1_MOVIMIENTOS
+    config.CP1_MOVIMIENTOS = 2
+    try:
+        with silencio():
+            b, o = backend(filas=buenas)
+            assert b.revisar(o) is True and o.salidas.no_go is None and len(b.ortesis.movimientos) == 2
+            assert [e['ok'] for e in visto if e['tipo'] == 'checkpoint'][-1] is True
+            for clave, filas, con_ack in casos:
+                b, o = backend(filas=filas, con_ack=con_ack)
+                assert b.revisar(o) is False, clave
+                ng = o.salidas.no_go
+                assert ng['n'] == 1 and ng['datos'] == esperado[clave], (clave, ng)
+                assert ('revisar C3, Oz' in ng['motivo']) == (clave in ('canal', 'ambos')) and 'calidad de senal ok' in ng['motivo'], ng
+                # y de ahi sale el texto del tablero: lo que fallo, no el generico
+                dicho = ' '.join(dt.pasos(1, ng['datos']))
+                assert ('No llegaron muestras' in dicho) == (clave == 'vacia') and ('REVISAR' in dicho) is False, (clave, dicho)
+                assert ('Reacomoda C3, Oz' in dicho) == (clave in ('canal', 'ambos')), (clave, dicho)
+                assert ('Revisa la alimentacion' in dicho) == (not esperado[clave]['latencia_ok']), (clave, dicho)
+                # con --forzar el NO GO no detiene y no queda nada que anunciar
+                b, o = backend('--forzar', filas=filas, con_ack=con_ack)
+                assert b.revisar(o) is True and o.salidas.no_go is None, clave
+    finally:
+        config.CP1_MOVIMIENTOS = movimientos
+    assert config.CP1_MOVIMIENTOS == movimientos
+
+    # CP2 y CP3 sin ensayos o sin epocas: no hay modelo con que seguir, asi que paran aunque haya --forzar y sin pasar por checkpoint()
+    sin_decoder = types.SimpleNamespace(cargar=lambda nombre: types.SimpleNamespace(ba=0.9))       # --solo-errp lo carga de modelos/
+    for forzar in ([], ['--forzar']):
+        visto.clear()
+        pasos_fsm.clear()
+        with silencio():
+            b, o = backend('--ensayos_mi', '0', *forzar)
+            assert b.calibrar_mi(o) is False
+            assert o.salidas.no_go['n'] == 2 and o.salidas.no_go['datos'] == {'sin_ensayos': True}, o.salidas.no_go
+            assert 'ningun ensayo valido' in ' '.join(orquestador.anunciar_detencion(o, b.a)['que_hacer'])
+            b, o = backend('--ensayos_mi', '0', *forzar)
+            b.revisar = lambda orq: True                                   # CP1 ya paso: preparar() sigue a la calibracion de MI
+            assert b.preparar(o) is None and pasos_fsm == ['CAL_MI'] and o.salidas.no_go['n'] == 2, (forzar, pasos_fsm)
+            b, o = backend('--ensayos_errp', '0', *forzar)
+            assert b.calibrar_errp(o) is False
+            assert o.salidas.no_go['n'] == 3 and o.salidas.no_go['datos'] == {'sin_epocas': True}, o.salidas.no_go
+            assert 'ninguna epoca valida' in ' '.join(orquestador.anunciar_detencion(o, b.a)['que_hacer'])
+            pasos_fsm.clear()
+            b, o = backend('--solo-errp', '--ensayos_errp', '0', *forzar, hw=sin_decoder)
+            b.revisar = lambda orq: True
+            assert b.preparar(o) is None and pasos_fsm == ['CAL_MI', 'CAL_ERRP'] and o.salidas.no_go['n'] == 3, (forzar, pasos_fsm)
+        assert not [e for e in visto if e['tipo'] == 'checkpoint'], 'estas rutas no pasan por checkpoint()'
+    # el contrato: ese codigo no choca con los otros que usa el proyecto
+    assert config.SALIDA_NO_GO not in (0, 1, 2, 3, 130)
+    return 'NO GO sin --forzar: se anuncia con el CP y que hacer (cableado de revisar/calibrar_mi/calibrar_errp y de checkpoint(datos=)), y el proceso sale con el codigo 4; --forzar y los CP informativos no paran'
+
+
+@prueba
+def tablero_detenida():
+    """El aviso grande de 'Sesion detenida en CPx' del tablero: aparece con el evento 'detenida', ocupa el lugar de los
+    paneles y se quita cuando empieza otra sesion. Con un Qt de mentira (corre sin pantalla ni PyQt); si PyQt esta, tambien con el de verdad."""
+    import importlib
+    import sys
+    import types
+    import detencion as dt
+
+    class Anota:
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return Anota()
+
+        def __call__(self, *a, **kw):
+            return Anota()
+
+    class Etiqueta:
+        """Un QLabel que recuerda lo que se le puso; cualquier otro metodo de Qt es un no-op."""
+        def __init__(self, texto=''):
+            self._t, self._oculto, self._estilo = texto, False, ''
+
+        def setText(self, t):
+            self._t = t
+
+        def text(self):
+            return self._t
+
+        def setVisible(self, v):
+            self._oculto = not v
+
+        def isHidden(self):
+            return self._oculto
+
+        def setStyleSheet(self, s):
+            self._estilo = s
+
+        def styleSheet(self):
+            return self._estilo
+
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return Anota()                                          # setWordWrap, toggled.connect, ...
+
+    class Grafica(Etiqueta):
+        def addPlot(self, **kw):
+            return Anota()
+
+    class Capa:
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return lambda *a, **kw: 0
+
+    class Ventana:
+        """Un QWidget: solo los metodos que el tablero usa; un nombre mal escrito en el tablero aqui SI falla."""
+        def __init__(self, *a):
+            pass
+
+        def resize(self, *a):
+            pass
+
+        def setWindowTitle(self, *a):
+            pass
+
+    class Reloj:
+        timeout = Anota()
+
+        def start(self, ms):
+            pass
+
+        def stop(self):
+            pass
+
+    class Constantes:
+        def __getattr__(self, k):
+            return k
+
+    def con_qt(QtCore, QtWidgets, pg):
+        """Corre la comprobacion con ese Qt y devuelve el tablero ya probado."""
+        tab_viejo = sys.modules.pop('tablero', None)
+        previos = {k: sys.modules.get(k) for k in ('pyqtgraph', 'pyqtgraph.Qt')}
+        if pg is not None:
+            qt = types.ModuleType('pyqtgraph.Qt')
+            qt.QtCore, qt.QtWidgets = QtCore, QtWidgets
+            pg.Qt = qt
+            sys.modules['pyqtgraph'], sys.modules['pyqtgraph.Qt'] = pg, qt
+        try:
+            tablero = importlib.import_module('tablero')
+            tablero.resolve_byprop = lambda *a, **k: []              # que el hilo de conexion no busque flujos de verdad
+            t = tablero.Tablero()
+            try:
+                t.timer.stop()
+                assert t.lbl_detenida.isHidden() and not t.g.isHidden() and not t.lbl_detenida.text()
+                ev = dt.evento(3, 'ErrP: sens 0.83, espec 0.87, BA 0.85 con 120 epocas (x)', {'ba': 0.85, 'espec': 0.87})
+                t._procesar({'tipo': 'checkpoint', 'n': 3, 'ok': False, 'texto': '[CP3] ErrP: ... -> NO GO'})
+                t._procesar(ev)
+                assert not t.lbl_detenida.isHidden() and t.g.isHidden()                       # el aviso ocupa el lugar de los paneles
+                txt = t.lbl_detenida.text()
+                assert 'Sesion detenida en CP3' in txt and 'espec 0.87' in txt and '--solo-errp' in txt and '--saltar-calibracion' in txt, txt
+                assert 'CP3' in t.lbl_estado.text() and tablero.COLORES_SALUD[config.ROJO] in t.lbl_estado.styleSheet()
+                t._procesar(ev)                                                             # repetido: sigue igual
+                assert not t.lbl_detenida.isHidden() and t.g.isHidden()
+                t._procesar({'tipo': 'salud', 'estado': 'IMPEDANCIAS', 'motivo': '', 'escalon': 0, 'colores': {}, 'detalle': {}})
+                assert not t.lbl_detenida.isHidden()                                        # otros eventos no lo quitan
+                for nuevo in ({'tipo': 'checkpoint', 'n': 1, 'ok': True, 'texto': '[CP1] ok'}, {'tipo': 'cue', 'meta': 1},
+                              {'tipo': 'paso', 'paso': 1, 'estado': 'LAZO_ESTATICO', 'meta': 1, 'angulo': 0.5, 'p_crudo': 0.6,
+                               'b': 0.5, 'p_prima': 0.6, 'P_hat': None, 'error': 0, 'error_sombra': 0, 'beta': 0.1, 'sd_beta': 0.5,
+                               'youden': 0.6, 'fiabilidad': 1.0, 'congelado': False, 'cambio': '', 'latencia_ms': None,
+                               'perturbado': False}):
+                    t._procesar(ev)
+                    assert not t.lbl_detenida.isHidden()
+                    t._procesar(nuevo)                                                      # empezo otra sesion: el aviso se va
+                    assert t.lbl_detenida.isHidden() and not t.g.isHidden(), nuevo['tipo']
+                t._procesar({'tipo': 'detenida', 'n': 1, 'titulo': 'Sesion detenida en CP1', 'motivo': '<script>x</script>',
+                             'que_hacer': ['a & b']})                                       # el motivo es texto libre: se escapa
+                assert '&lt;script&gt;' in t.lbl_detenida.text() and '<script>' not in t.lbl_detenida.text()
+            finally:
+                if hasattr(t, 'close'):
+                    t.close()
+        finally:
+            sys.modules.pop('tablero', None)
+            if tab_viejo is not None:
+                sys.modules['tablero'] = tab_viejo
+            for k, v in previos.items():
+                if pg is None:
+                    break
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    pg = types.ModuleType('pyqtgraph')
+    for nombre in ('setConfigOptions', 'mkPen', 'FillBetweenItem', 'InfiniteLine', 'PlotCurveItem', 'ScatterPlotItem'):
+        setattr(pg, nombre, Anota())
+    pg.GraphicsLayoutWidget = Grafica
+    QtCore = types.SimpleNamespace(Qt=Constantes(), QTimer=Reloj)
+    QtWidgets = types.SimpleNamespace(QWidget=Ventana, QVBoxLayout=lambda *a: Capa(), QHBoxLayout=lambda *a: Capa(), QLabel=Etiqueta,
+                                      QPushButton=lambda *a: Etiqueta(*a), QLineEdit=lambda *a: Etiqueta())
+    real = False
+    con_qt(QtCore, QtWidgets, pg)
+    try:
+        import pyqtgraph                                                                    # noqa: F401  (esta el de verdad?)
+        from pyqtgraph.Qt import QtWidgets as QtW
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        app = QtW.QApplication.instance() or QtW.QApplication([])                           # noqa: F841
+        real = True
+    except Exception:
+        pass
+    if real:
+        con_qt(None, None, None)
+    return ('aviso grande, paneles ocultos y se quita con otra sesion (Qt de mentira + el de verdad)' if real else
+            'aviso grande, paneles ocultos y se quita con otra sesion (solo con un Qt de mentira: falta probarlo con PyQt)')
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -4461,11 +5090,11 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'plan_b_sin_sesion_detenida', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

@@ -36,7 +36,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 54/54 pruebas pasaron
+python pruebas.py                    # debe decir 81/81 pruebas pasaron
 ```
 
 ## Archivos
@@ -56,6 +56,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `estudios/` | Mediciones offline con el gemelo y el simulador que respaldan cada decisión (ver su README). |
 | `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector y piloto, que solo avisa) y el retroceso de las reconexiones. |
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
+| `detencion.py` | Qué dice el tablero cuando un NO GO detiene la sesión: el CP, el motivo y qué hacer (el árbol de `docs/DOMINGO.md`), sin Qt ni hardware. |
 | `repetir_sesion.py` | Plan B: repite en el tablero, y si se quiere en la órtesis, una sesión grabada (`resultados/sesion_..._estado.jsonl`). |
 | `ortesis_udp_sim.py` | Firmware 1.2 de la ESP32 simulado en la laptop (UDP): prueba `OrtesisUDP` y el orquestador sin la placa. |
 | `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
@@ -428,6 +429,24 @@ Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas,
 
 **Lo que NO se resolvió.** Los pasos 2 a 5 del ensayo caen *después* de `[2, 4]` (y ahora un segundo más tarde): no hay datos reales de qué hace el ERD ahí (la calibración termina a los 4 s), y esas ventanas incluyen además la respuesta cerebral al movimiento del paso anterior. Con este diseño, de 5 pasos por ensayo solo el primero decide con la ventana en que se entrenó el decoder. Opciones para quien decida: menos pasos por ensayo (`config.PASOS_ENSAYO`, que también cambia el agente y los estudios), calibrar con señales más largas para tener ventanas más tardías, o medir primero: en la primera sesión con lazo de verdad, `python estudios/ventana_mi_lazo.py sesion --ultima` da la tabla y el error por paso del ensayo sale del CSV. El gemelo no puede decidirlo: su ERD es constante durante toda la señal.
 
+## Sesión detenida por un NO GO: el tablero lo dice en grande
+
+**El problema** (4 de octubre): cuando un checkpoint daba NO GO (CP1, CP2 o CP3, sin `--forzar`) el orquestador se detenía y el tablero se quedaba con los paneles vacíos y una línea chica de color; quien miraba la pantalla no sabía qué había pasado. Peor: `demo.py lanzar` cerraba el tablero en cuanto el orquestador terminaba, así que ni esa línea se veía.
+
+**Qué se hizo.**
+- El orquestador publica en `Estado` un evento `tipo = 'detenida'` con el CP, el motivo (la misma línea del checkpoint, con sus números) y **qué hacer** (`detencion.py`). También lo imprime en la terminal.
+- El tablero lo muestra en grande, en rojo, **en lugar de los paneles**: «Sesion detenida en CP3: ErrP: sens 0.83, espec 0.87, BA 0.85…» y debajo los pasos. Se quita solo cuando llega algo de una sesión nueva (su primer checkpoint, señal o paso): lo primero que publica una sesión es el CP1, unos 20 a 40 s después de lanzarla, y hasta entonces el aviso anterior sigue en pantalla. Sin acentos en esa pantalla, como el resto del tablero (regla del proyecto para el código).
+- Qué hacer sale del árbol de `docs/DOMINGO.md`, sección 5, con los números que decidieron el NO GO: en el CP3, BA < 0.65 → «el detector no informa» (repetir con `--solo-errp`, si no mejora plan B); BA ≥ 0.75 con especificidad < 0.85 → «demasiadas falsas alarmas» (repetir con `--solo-errp`); el resto → dos caminos (`--solo-errp` o `--saltar-calibracion`, con la advertencia de que ya no se evalúa el CP3 y el CP4 puede dar NO GO). Los dos cortes del CP3 (0.65 y 0.85) viven en `config.py` (`DETENCION_CP3_BA_NO_INFORMA`, `DETENCION_CP3_ESPEC_FALSAS_ALARMAS`) y el árbol de `docs/DOMINGO.md` los repite a mano: si cambia uno, hay que cambiar el otro. En el CP1 distingue canal (más gel) de latencia (cable, ESP32); si no llegaron muestras de EEG manda a revisar el casco y `python ver_flujos.py`, y si la órtesis ya iba con `--ortesis-sim` y la latencia falló no sugiere `--ortesis-sim` otra vez (la laptop está saturada). En el CP2, repetir, cambiar de piloto o `--forzar`. Las frases dicen «el mismo comando con `--solo-errp`» y no un comando completo, porque quien lanzó con `demo.py` o con `orquestador.py` tiene comandos distintos.
+- El orquestador sale ahora con el código `config.SALIDA_NO_GO` (4) si un NO GO lo detuvo; antes salía con 0 y era indistinguible de una sesión completa. `demo.py lanzar` lo ve y, **si hay una terminal** (stdin interactivo), deja el tablero abierto y espera un Enter (o Ctrl+C) antes de cerrar todo; **sin terminal** imprime que no hay a quien esperar y lo cierra. El código de salida de la demo es el 4 y la bitácora dice `detenido_por_no_go`.
+- Si no quedó ningún ensayo de MI o ninguna época válida de ErrP, la sesión se detiene **aun con `--forzar`** (no hay modelo con qué seguir) y se anuncia como CP2 o CP3, aunque esa parada no vino de un checkpoint con veredicto (el motivo dice «no quedaron ensayos validos de MI» o «no quedaron epocas validas…», sin números). Si el orquestador no sabe en qué CP se detuvo, deduce el CP del estado de la máquina (`config.DETENCION_CP_POR_ESTADO`) y, si tampoco puede, el título no lo inventa («Sesion detenida»).
+- El plan B ya no se confunde tras una parada: `repetir_sesion.ultima` y `demo.py planb` **ignoran las sesiones grabadas que no llegaron al lazo** (sin ningún evento `paso` ni `ajeno`), así que tras un NO GO en la calibración `python demo.py planb` repite la última sesión **buena**. Si no hay ninguna con lazo, el preflight y `planb` lo dicen («no hay ninguna sesion real grabada con lazo para repetir») y no abren nada.
+
+**Qué se verificó.** Pruebas sin pantalla (`detencion_texto`, `detencion_orquestador`, `tablero_detenida`, `demo_lanzar_simulado`). `detencion_texto` comprueba que cada rama del texto dice lo que debe, que las banderas que nombra (`--solo-errp`, `--saltar-calibracion`, `--forzar`, `--ortesis-sim`) existan en `docs/DOMINGO.md` y en el orquestador y que los cortes del CP3 de `config.py` aparezcan en la sección del CP3; **no** cruza el árbol entero con el texto. Aparte, **una corrida manual** (no es una prueba de `pruebas.py`) de punta a punta contra el gemelo en Linux: el CP2 dio NO GO, el evento llegó por LSL a un oyente externo cuando el proceso ya había terminado y el código de salida fue 4. **Qué no:** la prueba del tablero corre con un Qt de mentira (y con PyQt de verdad si está instalado, como en la laptop de la demo); en el entorno de desarrollo de esta tarea no había PyQt, así que **nadie ha visto la ventana**: hay que abrirla (`python tablero.py` y, en otra terminal, un orquestador sin `--forzar` que dé NO GO) y comprobar que el texto cabe y se lee. Que el último evento sobreviva al cierre del proceso se probó en Linux con un script de juguete que publica un evento y sale, repetido 6 veces (llegó 6 de 6); no con el orquestador de verdad ni en Windows.
+
+**Límites.**
+- El tablero solo ve el aviso si ya estaba abierto cuando el orquestador se detuvo (LSL no repite lo que ya pasó).
+- Si no se encuentra el flujo `EEG` (antes de llegar al CP1), **no hay aviso en el tablero**: el error («No encontre el flujo de EEG…», un `RuntimeError`) ocurre al crear `BackendReal`, antes de que existan los flujos de salida del orquestador, y el proceso termina con un traceback en su terminal. No se anuncia como NO GO ni sale con el código 4. Conocido y sin resolver.
+
 ## Mano virtual a pantalla completa (`mano_virtual.py`)
 
 Una mano grande que se abre y se cierra con las **mismas órdenes que la órtesis**. Sirve para calibrar el ErrP cuando la órtesis no está lista (el piloto mira esta mano) y como segunda pantalla en la demo.
@@ -733,7 +752,7 @@ Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orque
 Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`. Para que el detector no cambie durante el lazo: `--sin-coadaptativo`.
 Si el CP3 da NO GO, `--solo-errp` repite solo la calibración de ErrP con el decoder de MI ya calibrado. Al cargar modelos guardados, el orquestador dice hace cuánto se calibraron y avisa si tienen más de 6 horas (en `modelos/` pueden quedar los del gemelo o los de otro piloto).
 
-**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite la última sesión real en el tablero, y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
+**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite en el tablero la última sesión real que llegó al lazo (una que un NO GO detuvo en la calibración no cuenta), y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
 
 El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
@@ -752,7 +771,7 @@ El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 | 3 | CAL_ERRP | BA ErrP ≥ 0.75 y especificidad ≥ 0.90, con 120 épocas fijas y umbral anidado | Repetir con `--solo-errp`, seguir con `--saltar-calibracion` (aprende más lento) o plan B |
 | 4 | EVALUACION | Recuperación ≤ 120 s | Congelar y usar la ruta de 24 h |
 
-`--forzar` continúa aunque un checkpoint diga NO GO (solo para pruebas).
+`--forzar` continúa aunque un checkpoint diga NO GO (para pruebas o, sin otra salida, como indica `docs/DOMINGO.md`, sección 5). Sin él, un NO GO en los CP1 a CP3 detiene la sesión, el tablero lo dice en grande y el orquestador sale con el código 4. Ni `--forzar` salta que no quede ningún ensayo de MI ni ninguna época de ErrP válidos: sin modelo no hay con qué seguir, y esa parada también se anuncia (como CP2 o CP3).
 
 ## Figuras para la presentación
 

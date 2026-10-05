@@ -47,6 +47,7 @@ from pylsl import StreamOutlet, local_clock
 
 import config
 import cue
+import detencion
 import embodiment as emb
 import mano_virtual
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, SenalSham, sigmoide
@@ -121,6 +122,7 @@ class Salidas:
         self.est = StreamOutlet(config.crear_info('Estado'))
         self.marcadores = []                       # copia local, para evaluar y probar
         self.registro = None                       # archivo con cada evento de Estado (plan B)
+        self.no_go = None                          # el NO GO que detuvo la sesion (checkpoint()), para anunciarlo al final
 
     def registrar_en(self, ruta):
         """Desde ahora cada evento de Estado tambien se guarda en ruta, con su hora, para poder
@@ -175,13 +177,20 @@ def texto_edad_modelos():
     return txt
 
 
-def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
+def registrar_no_go(salidas, n, motivo, datos=None):
+    """Deja dicho por que se detiene la sesion: `anunciar_detencion` lo publica cuando el orquestador se para."""
+    salidas.no_go = {'n': n, 'motivo': motivo, 'datos': datos or {}}
+
+
+def checkpoint(salidas, n, ok, detalle, forzar, informativo=False, datos=None):
+    """`datos`: los numeros que decidieron el NO GO (detencion.pasos los usa para decir que hacer)."""
     txt = f'[CP{n}] {detalle} -> {"GO" if ok else "NO GO"}'
     aviso(txt)
     salidas.estado(tipo='checkpoint', n=n, ok=bool(ok), texto=txt)
     if informativo:
         return ok
     if not ok and not forzar:
+        registrar_no_go(salidas, n, detalle, datos)
         return False
     if not ok:
         aviso(f'  (--forzar: se continua a pesar del NO GO en CP{n})')
@@ -473,7 +482,9 @@ class BackendReal:
             latencias.append(lat if t_ack is not None else float('nan'))
             time.sleep(0.15)
         r = self.hw.evaluar_latencias(latencias)
-        return checkpoint(orq.salidas, 1, ok_senal and r['ok'], f"{txt_senal}; {r['texto']}", self.a.forzar)
+        return checkpoint(orq.salidas, 1, ok_senal and r['ok'], f"{txt_senal}; {r['texto']}", self.a.forzar,
+                          datos={'senal_ok': ok_senal, 'canales_malos': malos, 'sin_muestras': not filas,
+                                 'latencia_ok': bool(r['ok'])})
 
     def activar_caos(self, momento):
         """El caos de la ortesis simulada empieza en la calibracion o en el lazo (--caos-desde)."""
@@ -587,6 +598,7 @@ class BackendReal:
                     break
         if self.decoder is None:
             aviso('No se pudo calibrar MI: no quedaron ensayos validos.')
+            registrar_no_go(orq.salidas, 2, 'no quedaron ensayos validos de MI', {'sin_ensayos': True})
             return False
         np.savez(config.RESULTADOS / f'calibracion_mi_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
         self.cal_mi = (np.array(X), np.array(y))     # para la memoria de la sesion (--guardar-memoria)
@@ -595,7 +607,7 @@ class BackendReal:
                           f'MI: BA {self.decoder.ba:.2f} con {len(y)} ensayos '
                           f"({'calibracion corta de largo fijo' if mem is not None else 'calibracion secuencial'}; "
                           f'canales: {self.decoder.eleccion})',
-                          self.a.forzar)
+                          self.a.forzar, datos={'ba': float(self.decoder.ba)})
 
     def calibrar_errp(self, orq):
         rng = np.random.default_rng()
@@ -677,6 +689,7 @@ class BackendReal:
                   + (' -> AVISO: el detector se equivoca mas hacia un lado' if fisher['avisa'] else ''))
         if self.detector is None:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
+            registrar_no_go(orq.salidas, 3, 'no quedaron epocas validas para el detector de ErrP', {'sin_epocas': True})
             return False
         np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y),
                  direccion=np.array(dirs))
@@ -688,7 +701,7 @@ class BackendReal:
         return checkpoint(orq.salidas, 3, ok,
                           f'ErrP: sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f} con {len(y)} epocas '
                           f'({d.eleccion})',
-                          self.a.forzar)
+                          self.a.forzar, datos={'ba': float(d.ba), 'espec': float(d.espec)})
 
     def preparar(self, orq):
         if not self.revisar(orq):
@@ -1663,10 +1676,27 @@ def argumentos(argv=None):
     return a
 
 
+def anunciar_detencion(orq, a):
+    """La sesion se detuvo por un NO GO: lo dice en la terminal y lo publica en Estado (tipo 'detenida') para que el
+    tablero muestre en grande en que CP fue, por que y que hacer, en vez de dejar los paneles vacios (detencion.py).
+    Si nadie dejo dicho el motivo (orq.salidas.no_go) deduce el CP del estado de la maquina, sin inventar numeros."""
+    ng = getattr(orq.salidas, 'no_go', None)
+    if ng is None:
+        n = config.DETENCION_CP_POR_ESTADO.get(orq.fsm.estado)
+        ng = {'n': n, 'motivo': 'la sesion se detuvo antes del lazo; la consola dice por que', 'datos': {}}
+    usb = not (getattr(a, 'ortesis_sim', False) or getattr(a, 'ortesis_udp', None))
+    ev = detencion.evento(ng['n'], ng['motivo'], ng['datos'], getattr(a, 'puerto', None) if usb else None,
+                          simulada=bool(getattr(a, 'ortesis_sim', False)))
+    orq.salidas.estado(**ev)
+    aviso('\n' + detencion.texto_consola(ev))
+    return ev
+
+
 def correr(orq, a):
     """La sesion completa. Pase lo que pase (incluido Ctrl+C dentro de una pausa segura)
-    termina en EVALUACION, con el resumen impreso y el CSV cerrado."""
-    completa, sigue = False, True
+    termina en EVALUACION, con el resumen impreso y el CSV cerrado. Devuelve config.SALIDA_NO_GO si un NO GO la
+    detuvo (CP1 a CP3 sin --forzar) y 0 en cualquier otro caso."""
+    completa, sigue, detenida = False, True, False
     try:
         if orq.preparar():
             if orq.prog is None or orq.prog['bloque'] == 'estatico':
@@ -1690,8 +1720,12 @@ def correr(orq, a):
                 orq.coinvestigador('adaptativo', ultimo=True)
             completa = True
         else:
-            aviso('Detenido por NO GO. Que hacer en cada caso: docs/DOMINGO.md. Plan B: repetir una sesion '
-                  'grabada en el tablero (python repetir_sesion.py --ultima).')
+            detenida = True
+            try:
+                anunciar_detencion(orq, a)
+            except Exception as e:                  # el aviso es una cortesia: nunca debe impedir cerrar la sesion
+                aviso(f'  AVISO: no se pudo anunciar la detencion en el tablero ({type(e).__name__}: {e}); '
+                      f'el motivo esta en las lineas de arriba y en docs/DOMINGO.md, seccion 5.')
     except KeyboardInterrupt:
         aviso('\nInterrumpido por el usuario.'
               + (' Para continuar esta sesion: el mismo comando con --reanudar.' if orq.lista else ''))
@@ -1709,6 +1743,7 @@ def correr(orq, a):
             cuestionario(orq.ruta_csv.with_name(orq.ruta_csv.stem + '_cuestionario.json'), iic=orq.iic)
         except (EOFError, KeyboardInterrupt):
             aviso('  Cuestionario sin contestar.')
+    return config.SALIDA_NO_GO if detenida else 0
 
 
 def argumentos_reanudados(inst, a):
@@ -1735,7 +1770,9 @@ def main(argv=None):
         inst = cargar_instantanea()
         a = argumentos_reanudados(inst, a)
     backend = BackendSim(a) if a.backend == 'sim' else BackendReal(a)
-    correr(Orquestador(backend, a, inst), a)
+    codigo = correr(Orquestador(backend, a, inst), a)
+    if codigo:
+        sys.exit(codigo)                              # un NO GO detuvo la sesion: quien la lanzo lo sabe
 
 
 if __name__ == '__main__':
