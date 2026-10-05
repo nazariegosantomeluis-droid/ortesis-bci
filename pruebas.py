@@ -5552,6 +5552,41 @@ def diagnostico_errp_p001():
     return f"estratos, permutacion con maximo, ortesis simulada y barrido de desfases (ErrP inyectado a +150 ms: AUC maximo {max(sc['auc']):.2f} en {sc['desfases_s'][i] * 1e3:+.0f} ms)"
 
 
+@prueba
+def sensor_fuerza():
+    """FSR402: de la lectura V/3.3 del firmware a resistencia y newtons; imprime en la telemetria de probar_esp32."""
+    import fuerza
+    assert fuerza.fuerza_n(0.0) == 0.0 and fuerza.resistencia_ohm(0.0) is None       # sin contacto
+    assert abs(fuerza.resistencia_ohm(0.5) - config.FSR_R_DIVISOR_OHM) < 1e-6        # V/3.3 = 0.5: el FSR vale lo que el divisor
+    fs = [fuerza.fuerza_n(f) for f in (0.05, 0.2, 0.5, 0.8, 0.95)]
+    assert all(b > a for a, b in zip(fs, fs[1:])), fs                                 # mas presion, mas fuerza
+    (f1, r1), (f2, r2) = config.FSR_CURVA_N_1KOHM, config.FSR_CURVA_N_2
+    for f, r in ((f1, r1), (f2, r2)):                                                 # la curva pasa por sus dos puntos
+        frac = config.FSR_R_DIVISOR_OHM / (config.FSR_R_DIVISOR_OHM + r * 1000)
+        assert abs(fuerza.fuerza_n(frac) - f) < 0.01 * f, (f, fuerza.fuerza_n(frac))
+    # calibracion con pesas: la curva calibrada reproduce los pares dados
+    pares = [(1.0, 0.3), (5.0, 0.7)]
+    curva = fuerza.calibrar(pares)
+    assert all(abs(fuerza.fuerza_n(fr, curva) - n) < 0.01 * n for n, fr in pares)
+    try:
+        fuerza.calibrar([(1.0, 0.3)])
+        raise AssertionError('debia fallar')
+    except ValueError:
+        pass
+    assert 'sin contacto' in fuerza.texto(0.0) and ' N ' in fuerza.texto(0.6) and 'saturado' in fuerza.texto(0.99)
+    # lo imprime la telemetria de probar_esp32 (la que usan sus modos en vivo)
+    import importlib.util
+    esp = importlib.util.spec_from_file_location('probar_esp32', config.RAIZ / 'firmware_esp32' / 'probar_esp32.py')
+    probar = importlib.util.module_from_spec(esp)
+    esp.loader.exec_module(probar)
+    class Falsa:
+        tel = {'cierre': 0.5, 'pulgar': 0.5, 'i_ma': 100, 'fuerza': 0.6, 'paro': False, 'bloqueo': False, 'vigilancia': False}
+        def conectada(self): return True
+    linea = probar.texto_telemetria(Falsa())
+    assert ' N ' in linea and 'FSR' in linea, linea
+    return f"0.6 de 3.3 V = {fuerza.texto(0.6)}"
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -5566,7 +5601,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida', 'sensor_fuerza']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

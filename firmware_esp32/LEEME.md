@@ -74,6 +74,8 @@ Haz lo mismo con `cal pulgar …`. Los ángulos quedan en `calibracion.json` den
 | Botón de prueba (el BOOT de la placa) | GPIO0 |
 | Alimentación | VIN a +5V y GND a GND |
 
+**Sensor de fuerza FSR402 (circular).** Un pin del FSR a 3V3, el otro a GPIO34 y de ahí 10 kΩ a GND. La telemetría manda `fuerza` (V/3.3) y `fuerza.py` la convierte a resistencia y newtons con la curva de la hoja de datos (`config.FSR_*`). `python firmware_esp32/probar_esp32.py` la imprime junto al resto de la telemetría y `python fuerza.py --puerto 192.168.4.1` la imprime sola, en vivo. Es **orientativa** (hasta ~±30 % por pieza): para newtons de verdad, calibrar con pesas (`fuerza.calibrar`). No probado con el sensor real.
+
 En la placa los pines pueden decir D18, IO18 o G18: son lo mismo.
 
 ## 7. Qué significa la luz

@@ -21,8 +21,16 @@ import argparse
 import json
 import socket
 import threading
+import sys
 import time
 from collections import deque
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    import fuerza as _fuerza          # FSR402: fuerza en newtons (si el script corre solo en la ESP32/Thonny, queda la lectura cruda)
+except ImportError:
+    _fuerza = None
 
 
 class Ortesis:
@@ -127,13 +135,17 @@ def si_no(v):
     return 'SÍ' if v else 'no'
 
 
+def _texto_fuerza(f):
+    return _fuerza.texto(f) if _fuerza else f'fuerza {f:.2f}'
+
+
 def texto_telemetria(o):
     if not o.conectada():
         return ('No llega telemetría. Por Wi-Fi: ¿la laptop está en la red «Adaptrode»? Por USB: ¿es el puerto correcto '
                 'y está cerrado Thonny? ¿La ESP32 está encendida y con el firmware 1.3?')
     t = o.tel
     ang = t.get('ang', {})
-    linea = (f"dedos {t['cierre']:.2f} · pulgar {t['pulgar']:.2f} · {t['i_ma']} mA · fuerza {t['fuerza']:.2f} · "
+    linea = (f"dedos {t['cierre']:.2f} · pulgar {t['pulgar']:.2f} · {t['i_ma']} mA · {_texto_fuerza(t['fuerza'])} · "
              f"paro {si_no(t['paro'])} · bloqueo {si_no(t['bloqueo'])} · vigilancia {si_no(t['vigilancia'])}")
     if ang:
         linea += ' · ángulos ' + ', '.join(f'{k} {a:g}–{c:g}' for k, (a, c) in ang.items())
