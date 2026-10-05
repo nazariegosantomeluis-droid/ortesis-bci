@@ -1251,7 +1251,7 @@ class Orquestador:
             if self.sham and bloque in config.BLOQUES_SHAM:      # ciego: ni la API ni el tablero saben cual es
                 resumen['bloque'] = f'bloque {self._letra_sham(bloque)}'
             if self.cliente_ia is False:
-                self.cliente_ia = ia.cliente(config.COINVESTIGADOR_API_S)
+                self.cliente_ia = ia.cliente(config.COINVESTIGADOR_API_S, reintentos=0)    # el tiempo es un tope, no el doble
             p = copiloto.proponer_y_registrar(self.ruta_csv, resumen, f"tras:{resumen['bloque']}", self.cliente_ia)
         except Exception as e:
             aviso(f'  [co-investigador] no pudo proponer ({type(e).__name__}: {e}); la sesion sigue igual')

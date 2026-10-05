@@ -343,7 +343,11 @@ def resumen_para_propuesta(s, bloque=None):
     filas = s.filas_de(bloque)
     todas = [x for x in s.filas if bloque in (None, '', 'todo') or x in filas or
              (x['excluido'] and (x.get('bloque') == bloque or x['estado'] in _ESTADOS.get(bloque, ())))]
-    r = {'bloque': bloque or 'todo', 'pasos': len(filas), 'paso_visible': config.PASO_VISIBLE,
+    # Los valores ACTUALES de los parametros que se pueden proponer (config.PARAMETROS_PROPUESTA, menos pausa_s): sin ellos, desde un
+    # CSV (ia_sesion.py, el informe de la proxima sesion) la API real propuso «paso_max = 0.2» sin saber cuanto valia («si ya es igual
+    # o menor, rechazala»). Aqui van los de config; el orquestador (coinvestigador) los pisa con los vivos de la sesion.
+    r = {'bloque': bloque or 'todo', 'pasos': len(filas), 'paso_visible': config.PASO_VISIBLE, 'paso_max': config.PASO_MAX,
+         'ganancia': config.GANANCIA_PASO, 'ajenos_cada': config.AJENOS_CADA,
          'excluidos': s._excluidos(bloque)['por_motivo'] and {m: d['n'] for m, d in s._excluidos(bloque)['por_motivo'].items()},
          'fraccion_excluidos': (len(todas) - len(filas)) / len(todas) if todas else None}
     if not filas:

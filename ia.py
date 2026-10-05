@@ -36,8 +36,10 @@ def cargar_env(ruta=None):
             os.environ.setdefault(clave.strip(), valor.strip().strip('"\''))
 
 
-def cliente(tiempo_max_s=config.IA_TIEMPO_MAX_S):
-    """El cliente de la API, o None si no hay llave o no esta instalado `anthropic`."""
+def cliente(tiempo_max_s=config.IA_TIEMPO_MAX_S, reintentos=1):
+    """El cliente de la API, o None si no hay llave o no esta instalado `anthropic`. Con un reintento, una peticion que se pasa
+    del tiempo puede esperar el doble (medido con la API real el 5 de octubre: 6 s de tiempo y 12.4 s hasta rendirse); quien
+    necesite que el tiempo sea un tope de verdad, como el narrador en vivo, pide reintentos=0."""
     cargar_env()
     if not os.environ.get('ANTHROPIC_API_KEY'):
         return None
@@ -45,7 +47,7 @@ def cliente(tiempo_max_s=config.IA_TIEMPO_MAX_S):
         import anthropic
     except ImportError:
         return None
-    return anthropic.Anthropic(timeout=tiempo_max_s, max_retries=1)
+    return anthropic.Anthropic(timeout=tiempo_max_s, max_retries=reintentos)
 
 
 def sanear(dato):
@@ -121,14 +123,47 @@ def pedir_json(cli, sistema, datos, esquema, esfuerzo=config.IA_ESFUERZO):
         raise SinRespuesta(f'la API no devolvio JSON: {e}') from e
 
 
+# ====================================================================== esquemas
+# Lo que la salida estructurada de la API no admite en un esquema. Aprendido con la API real el 5 de octubre:
+# un `type` en lista junto a un `enum` (['string', 'null'] con los nombres de los parametros) daba un 400
+# ("Enum value 'paso_visible' does not match declared type"), y ApiSimulada no lo podia ver. Lo opcional va
+# como anyOf con {'type': 'null'}. Las restricciones numericas, de texto y de listas las quitan las
+# bibliotecas oficiales, pero no una peticion cruda; todo objeto lleva additionalProperties: false.
+CLAVES_SIN_SOPORTE = ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+                      'minLength', 'maxLength', 'minItems', 'maxItems')
+
+
+def problemas_esquema(esquema, ruta='$'):
+    """Lista de textos con lo que la API de salida estructurada rechazaria o ignoraria en un esquema
+    (vacia si no hay nada que objetar). Solo mira el esquema: no llama a la API."""
+    out = []
+    if not isinstance(esquema, dict):
+        return out
+    if isinstance(esquema.get('type'), list):
+        out.append(f"{ruta}: 'type' en lista; usa anyOf con {{'type': 'null'}}")
+    out += [f'{ruta}: {k!r} no se admite' for k in CLAVES_SIN_SOPORTE if k in esquema]
+    if esquema.get('type') == 'object' and esquema.get('additionalProperties') is not False:
+        out.append(f'{ruta}: un objeto necesita additionalProperties: false')
+    for clave, valor in esquema.items():
+        if clave == 'properties' and isinstance(valor, dict):
+            for nombre, sub in valor.items():
+                out += problemas_esquema(sub, f'{ruta}.{nombre}')
+        elif clave in ('anyOf', 'allOf') and isinstance(valor, list):
+            for i, sub in enumerate(valor):
+                out += problemas_esquema(sub, f'{ruta}.{clave}[{i}]')
+        elif isinstance(valor, dict):
+            out += problemas_esquema(valor, f'{ruta}.{clave}')
+    return out
+
+
 # ====================================================================== propuestas
 # Esquema fijo de una propuesta (co-investigador entre bloques y proxima sesion del copiloto).
 ESQUEMA_PROPUESTA = {
     'type': 'object',
     'properties': {
         'accion': {'type': 'string', 'enum': list(config.ACCIONES_PROPUESTA)},
-        'parametro': {'type': ['string', 'null'], 'enum': list(config.PARAMETROS_PROPUESTA) + [None]},
-        'valor': {'type': ['number', 'null']},
+        'parametro': {'anyOf': [{'type': 'string', 'enum': list(config.PARAMETROS_PROPUESTA)}, {'type': 'null'}]},
+        'valor': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
         'justificacion': {'type': 'string'},
     },
     'required': ['accion', 'parametro', 'valor', 'justificacion'],

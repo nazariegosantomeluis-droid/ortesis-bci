@@ -57,12 +57,17 @@ PLANTILLAS = {
         'motivo': {'eeg': 'EEG lost', 'canal': 'an electrode came loose', 'ortesis': 'the orthosis is not responding'},
     },
 }
+# El nombre del idioma lleva acento a proposito. Con la API real (5 de octubre), con «espanol» y un prompt sin acentos, 3 de 7
+# frases en espanol salieron sin acentos («ortesis», «recupero», «proposito») y es lo que lee el jurado: el modelo copia la
+# ortografia del prompt. Por eso tambien se le pide la ortografia completa.
+IDIOMAS_API = {'es': 'español', 'en': 'inglés'}
 SISTEMA = (
     'Eres el narrador de una demostracion en vivo ante un jurado: una ortesis de mano controlada por imaginacion '
     'motora, con un agente que se corrige usando el potencial de error (ErrP) del cerebro del piloto. Recibes UN '
     'evento en JSON. Escribe UNA frase corta (maximo {n} caracteres) que explique a un publico no experto que acaba '
     'de pasar y por que importa. Usa solo los datos del evento: no agregues cifras que no esten ahi ni des '
-    'diagnosticos. Sin comillas, sin emojis, sin preambulo. Idioma: {idioma}.')
+    'diagnosticos. Sin comillas, sin emojis, sin preambulo. Escribe con la ortografia completa del idioma, acentos '
+    'incluidos. Idioma: {idioma}.')
 
 
 class Narrador:
@@ -84,8 +89,11 @@ class Narrador:
             self.en_pausa = True
             hechos.append({'evento': 'pausa', 'motivo': e.get('motivo') or 'eeg'})
         elif tipo == 'sham':
+            # con nombres que dicen que es cada cifra: con «agente: 0.19» la API real narro un error (menor es mejor) como si fuera
+            # un puntaje («llego a 0.19... solo a 0.33»)
             hechos.append({'evento': 'sham', 'solo_real': bool(e.get('solo_real')),
-                           **{b: {k: e[b][k] for k in ('agente', 'pasos')} for b in config.BLOQUES_SHAM if e.get(b)}})
+                           **{b: {'error_del_agente': e[b]['agente'], 'pasos_para_recuperarse': e[b]['pasos']}
+                              for b in config.BLOQUES_SHAM if e.get(b)}})
         elif tipo == 'paso':
             if self.en_pausa:
                 self.en_pausa = False
@@ -126,7 +134,7 @@ class Narrador:
             try:
                 r = self.cli.messages.create(
                     model=config.IA_MODELO, max_tokens=config.NARRADOR_MAX_TOKENS,
-                    system=SISTEMA.format(n=config.NARRADOR_MAX_CARACTERES, idioma={'es': 'espanol', 'en': 'ingles'}[self.idioma]),
+                    system=SISTEMA.format(n=config.NARRADOR_MAX_CARACTERES, idioma=IDIOMAS_API[self.idioma]),
                     messages=[{'role': 'user', 'content': ia.a_json(h)}], output_config={'effort': 'low'})
                 txt = ' '.join(ia.texto(r).split())
                 if r.stop_reason == 'end_turn' and frase_valida(txt, h):
@@ -161,7 +169,7 @@ def main(argv=None):
     from pylsl import StreamInlet, StreamOutlet, resolve_byprop
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(errors='replace')     # una consola sin acentos no tumba al narrador
-    cli = None if a.sin_ia else ia.cliente(config.NARRADOR_API_S)
+    cli = None if a.sin_ia else ia.cliente(config.NARRADOR_API_S, reintentos=0)    # NARRADOR_API_S es un tope: sin reintento no se duplica
     narrador = Narrador(a.idioma, cli)
     salida = StreamOutlet(config.crear_info('Narracion'))
     print(f"Narrador ({a.idioma}, {'Claude con plantillas de respaldo' if cli else 'plantillas'}): esperando el flujo Estado...",

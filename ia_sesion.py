@@ -11,7 +11,10 @@ grabada y AUDITA que lo que dicen cite datos que existen. No cambia nada de la s
 AUDITORIA de cifras (`auditar_texto`): cada numero de una respuesta debe existir en lo que las herramientas devuelven para
 esa sesion (resumen, metricas por bloque, eventos, comparacion, filas del CSV y los umbrales de config), con la tolerancia
 del redondeo con que se escribio; y todo «paso N» debe ser un paso que existe. Un numero que no se encuentra NO es
-necesariamente falso (puede ser una resta o un porcentaje derivado): se lista para que una persona lo revise.
+necesariamente falso (puede ser una resta o un porcentaje derivado): se lista para que una persona lo revise. Y uno que
+se encuentra NO esta necesariamente bien atribuido: «verificada» solo dice que la cifra existe en los datos de la sesion
+(con la API real, en 256 numeros, un entero chico como el «42 pasos» de una resta coincide por azar, y un porcentaje
+entero como «35 %» de 0.353 no, porque los enteros se comparan exactos).
 
 Uso:  python ia_sesion.py --sesion resultados/sesion_real_<fecha>.csv [--sin-ia] [--salida informe.md]
 """
@@ -82,9 +85,21 @@ def _decimales(txt):
     return len(txt.split('.')[1]) if '.' in txt else 0
 
 
+MENOS_UNICODE = chr(0x2212)          # U+2212, el «−» que escribe Claude en vez del '-' ASCII (se ven igual: por eso va por codigo)
+
+
+def normalizar_cifras(txt):
+    """Deja las cifras de un texto en la forma que lee `auditar_texto`: el signo menos de Unicode pasa a '-' y la coma decimal
+    del espanol (0,3227; 71,4 s) a punto. Visto con la API real el 5 de octubre: Claude contesta en espanol con coma, y sin esto
+    «0,3227» se leia como 0 y 3227 (un 0 que siempre «se verifica» y un 3227 que nunca). Una coma entre dos digitos es siempre
+    decimal; las listas («pasos 29, 34») llevan espacio tras la coma. Un millar con coma en ingles («1,350») se leeria como 1.35."""
+    return re.sub(r'(?<=\d),(?=\d)', '.', txt.replace(MENOS_UNICODE, '-'))
+
+
 def auditar_texto(texto, s, u=None):
     """Revisa las cifras y los pasos que cita un texto. Devuelve {'cifras', 'verificadas', 'no_encontradas', 'pasos_citados',
     'pasos_inexistentes'}. Una cifra es 'verificada' si coincide con algun numero real (o su version en %) dentro del redondeo."""
+    texto = normalizar_cifras(texto)
     u = u if u is not None else universo(s)
     arr = np.array(sorted(u)) if u else np.array([])
     pasos = [int(n) for n in re.findall(r'paso[s]?\s+(?:de la perturbaci[oó]n\s+)?(\d+)', texto, flags=re.I)]
@@ -122,23 +137,29 @@ def auditar(ruta_csv, cli=None, anteriores=None):
         out['preguntas'].append({'pregunta': q, 'respuesta': txt, 'origen': origen, 'herramientas': [x[0] for x in usadas],
                                  'auditoria': auditar_texto(txt, s, uq), 'sin_dato': copiloto.SIN_DATO in txt})
     resumen = copiloto.resumen_para_propuesta(s)
+    # La propuesta (y el informe, que la lleva) se redacta sobre ESTE resumen, no sobre las herramientas: sus cifras (exactitud, fracciones)
+    # tambien son reales. Visto con la API real: «exactitud 0.833» (= 1 - error) solo estaba en el resumen y salia como no encontrada.
+    u_propuesta = set(u)
+    _plano(resumen, u_propuesta)
     r = ia.proponer(resumen, cli)
     p = r['propuesta']
     reglas = ia.propuesta_por_reglas(resumen)
     ok_rangos, motivo = ia.validar_propuesta(p)
+    # «coincide» compara la DECISION (accion, parametro y valor), no la redaccion: la justificacion de la API nunca es la de las reglas
     out['coinvestigador'] = {'origen': r['origen'], 'propuesta': p, 'valida': bool(ok_rangos), 'motivo': motivo,
-                             'coincide_con_reglas': p == reglas, 'reglas': reglas, 'resumen': resumen,
-                             'rechazada_api': r.get('rechazada_api'),
-                             'auditoria_justificacion': auditar_texto(str(p.get('justificacion', '')), s, u)}
+                             'coincide_con_reglas': all(p.get(k) == reglas.get(k) for k in ('accion', 'parametro', 'valor')),
+                             'reglas': reglas, 'resumen': resumen, 'rechazada_api': r.get('rechazada_api'),
+                             'auditoria_justificacion': auditar_texto(str(p.get('justificacion', '')), s, u_propuesta)}
     informe = copiloto.informe(s, anteriores=anteriores, cli=cli)
     arch = []
     for f in informe['archivos']:
         a = {'archivo': Path(f).name}
         if str(f).endswith('.md'):
-            a['auditoria'] = auditar_texto(Path(f).read_text(encoding='utf-8'), s, u)
+            a['auditoria'] = auditar_texto(Path(f).read_text(encoding='utf-8'), s, u_propuesta)
         arch.append(a)
     out['informe'] = {'archivos': arch, 'origen_texto': informe['origen_texto'],
-                      'propuesta_proxima_sesion': informe['propuesta']['propuesta']}
+                      'propuesta_proxima_sesion': informe['propuesta']['propuesta'],
+                      'origen_propuesta': informe['propuesta']['origen'], 'rechazada_api': informe['propuesta'].get('rechazada_api')}
     return out
 
 
@@ -148,24 +169,44 @@ def _linea_auditoria(a):
             + (f"; pasos citados: {a['pasos_citados']}" if a['pasos_citados'] else ''))
 
 
+def _r3(v):
+    return round(v, 3) if isinstance(v, float) else v
+
+
+def _decision(p):
+    """«continuar», o «ajustar_parametro paso_visible = 0.1»: la decision de una propuesta sin su justificacion."""
+    return str(p.get('accion')) + (f" {p.get('parametro')} = {p.get('valor')}" if p.get('parametro') else '')
+
+
+def _motivo_api(rechazada):
+    """Por que la API no dio una propuesta aceptable (o '' si la dio), para que una caida a reglas no pase en silencio."""
+    return '' if not rechazada else f" La API no dio una propuesta aceptable y se usaron las reglas: {str(rechazada.get('motivo'))[:300]}."
+
+
 def a_markdown(o):
+    n_api = sum(q['origen'] == 'api' for q in o['preguntas'])
     L = [f"# IA sobre la sesión `{o['sesion']}` ({o['pasos']} pasos)", '',
-         f"- Copiloto y co-investigador: **{'con la API de Claude' if o['api'] else 'sin API (plantillas y reglas deterministas)'}**.",
-         '- Nada se aplicó ni se cambió: la propuesta del co-investigador y la de la próxima sesión siguen pendientes de una persona.', '',
+         f"- Copiloto y co-investigador: **{'con la API de Claude' if o['api'] else 'sin API (plantillas y reglas deterministas)'}**."
+         + (f" Preguntas respondidas por la API: {n_api} de {len(o['preguntas'])}." if o['api'] else ''),
+         '- Nada se aplicó ni se cambió: la propuesta del co-investigador y la de la próxima sesión siguen pendientes de una persona.',
+         '- «Verificada» quiere decir que la cifra existe en los datos de la sesión; no prueba que esté bien atribuida (un entero chico puede coincidir por azar). '
+         '«Sin encontrar» no es necesariamente un error (una resta, un porcentaje redondeado): se revisa a mano.', '',
          '## Copiloto: 6 preguntas', '']
     for i, q in enumerate(o['preguntas'], 1):
-        L += [f"### {i}. {q['pregunta']}", '', f"*origen: {q['origen']}*", '', f"> {q['respuesta']}", '', f"**Auditoría:** {_linea_auditoria(q['auditoria'])}"
+        L += [f"### {i}. {q['pregunta']}", '', f"*origen: {q['origen']}" + (f" · herramientas: {', '.join(q['herramientas'])}" if q['herramientas'] else '') + '*',
+              '', f"> {q['respuesta']}", '', f"**Auditoría:** {_linea_auditoria(q['auditoria'])}"
               + (' · responde «no hay dato»' if q['sin_dato'] else ''), '']
     c = o['coinvestigador']
     p = c['propuesta']
     L += ['## Co-investigador', '', f"- Origen: {c['origen']}. Propuesta: **{p.get('accion')}**" + (f" `{p.get('parametro')}` = {p.get('valor')}" if p.get('parametro') else '')
-          + f". Justificación: {p.get('justificacion')}",
+          + f". Justificación: {p.get('justificacion')}" + _motivo_api(c.get('rechazada_api')),
           f"- ¿Válida? {'sí' if c['valida'] else 'NO: ' + str(c['motivo'])} (rangos seguros de `config.PARAMETROS_PROPUESTA`).",
-          f"- ¿Coincide con las reglas deterministas? {'sí' if c['coincide_con_reglas'] else 'no: las reglas proponían ' + str(c['reglas'].get('accion'))}.",
+          f"- ¿Coincide con la decisión de las reglas deterministas? {'sí' if c['coincide_con_reglas'] else 'no: las reglas proponían ' + _decision(c['reglas'])}.",
           f"- Cifras de su justificación: {_linea_auditoria(c['auditoria_justificacion'])}.",
           f"- Resumen que recibió: error del agente {c['resumen'].get('error_agente')}, sombra {c['resumen'].get('error_sombra')}, BA viva {c['resumen'].get('ba_viva')}, "
-          f"fracción congelado {c['resumen'].get('fraccion_congelado')}, excluidos {c['resumen'].get('excluidos')}.", '',
-          '## Informe clínico', '', f"- Texto de interpretación: {o['informe']['origen_texto']}. Propuesta para la próxima sesión: `{o['informe']['propuesta_proxima_sesion']}`.", '']
+          f"fracción congelado {_r3(c['resumen'].get('fraccion_congelado'))}, excluidos {c['resumen'].get('excluidos')}.", '',
+          '## Informe clínico', '', f"- Texto de interpretación: {o['informe']['origen_texto']}. Propuesta para la próxima sesión "
+          f"({o['informe'].get('origen_propuesta', '?')}): `{o['informe']['propuesta_proxima_sesion']}`." + _motivo_api(o['informe'].get('rechazada_api')), '']
     for a in o['informe']['archivos']:
         L.append(f"- `{a['archivo']}`" + (f": {_linea_auditoria(a['auditoria'])}" if 'auditoria' in a else ''))
     return '\n'.join(L) + '\n'
