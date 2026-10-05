@@ -5326,7 +5326,7 @@ def tablero_detenida():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'barrido_paso', 'comparacion_baselines', 'reporte_detector', 'agente_aprende', 
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'diagnostico_errp_p001', 'barrido_paso', 'comparacion_baselines', 'reporte_detector', 'agente_aprende', 
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
@@ -5359,3 +5359,118 @@ def main():
 
 if __name__ == '__main__':
     main()
+@prueba
+def diagnostico_errp_p001():
+    """estudios/diagnostico_errp_p001.py con datos sinteticos: los estratos del diseno y la permutacion que los respeta, el t de
+    Welch y la prueba de permutacion con correccion por el maximo (sin senal no encuentra nada; con una senal en una sola columna
+    la encuentra a ella sola), el AUC de validacion cruzada, el efecto minimo detectable, el reconocimiento de la ortesis simulada
+    (y de una que no lo es), el corte de epocas (igual al de hardware.cortar_epoca) y un registro continuo con un ErrP inyectado
+    150 ms tarde, que el barrido de desfases encuentra (y pierde cuando la epoca se corta muy lejos)."""
+    import sys
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import diagnostico_errp_p001 as dg
+    import cerebro_sintetico as cs
+    import hardware as hw
+    from scipy.stats import ttest_ind
+    rng = np.random.default_rng(3)
+
+    def diseno(n_bloques):
+        """El plan de Orquestador.calibrar_errp: por bloque de 20, 10 de cada cue y 3 errores por cue, mezclados."""
+        y, d = [], []
+        for _ in range(n_bloques):
+            b = [(obj, i < 3) for obj in (0, 1) for i in range(10)]
+            for k in rng.permutation(len(b)):
+                obj, err = b[k]
+                y.append(int(err))
+                d.append(obj if not err else 1 - obj)
+        return np.array(y), np.array(d)
+    # estratos (bloque x cue) y permutacion dentro de ellos
+    y, d = diseno(6)
+    est = dg.estratos_del_diseno(y, d)
+    assert len(np.unique(est)) == 12 and all((est == e).sum() == 10 and y[est == e].sum() == 3 for e in np.unique(est))
+    yp = dg.permutar_en_estratos(y, est, rng)
+    assert yp.sum() == y.sum() and (yp != y).any() and all(yp[est == e].sum() == 3 for e in np.unique(est))
+    # efecto minimo detectable, d de Cohen, t de Welch (contra scipy) y su version para muchas etiquetas a la vez
+    assert abs(dg.efecto_minimo_detectable(1.0, 50, 50) - 0.5603) < 1e-3
+    F = rng.normal(size=(120, 5))
+    assert np.allclose(dg.t_welch(F, y), ttest_ind(F[y == 1], F[y == 0], equal_var=False).statistic)
+    Y = np.stack([dg.permutar_en_estratos(y, est, rng) for _ in range(4)])
+    muchas = dg._t_welch_muchas(F, Y.astype(float))
+    assert all(np.allclose(muchas[k], dg.t_welch(F, Y[k])) for k in range(4))
+    G = rng.normal(size=(4000, 1))
+    yg = np.arange(4000) % 2
+    assert abs(dg.d_de_cohen(G + yg[:, None] * 1.0, yg)[0] - 1.0) < 0.1
+    # prueba de permutacion con maximo: sin senal no pasa ninguna columna; con una senal de d = 1.5 pasa solo esa
+    ruido = rng.normal(size=(120, 40))
+    r0 = dg.prueba_permutacion(ruido, y, est, 400, rng)
+    assert r0['p_corregido'].min() > 0.05 and r0['p_sin_corregir'].shape == (40,), r0['p_corregido'].min()
+    senal = ruido.copy()
+    senal[y == 1, 7] += 1.5
+    r1 = dg.prueba_permutacion(senal, y, est, 400, rng)
+    assert r1['p_corregido'][7] < 0.05 and (r1['p_corregido'] < 0.05).sum() == 1, r1['p_corregido'][7]
+    assert r1['n_sobre_umbral'] >= 1 and r1['max_nula'].shape == (400,)
+    # AUC de validacion cruzada: la senal de d = 1.5 da ~0.86 y el ruido ~0.5 (o un poco menos, como siempre en validacion cruzada)
+    assert dg.auc_cv(senal[:, [7, 8, 9]], y) > 0.7 and abs(dg.auc_cv(ruido[:, :10], y) - 0.5) < 0.15
+    # el LDA propio (mas rapido que el de sklearn) da los mismos puntajes, con su sesgo; y el AUC por rangos es el de sklearn
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import StratifiedKFold
+    for ent, pru in list(StratifiedKFold(5, shuffle=True, random_state=0).split(senal[:, :12], y))[:2]:
+        ref = LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto').fit(senal[ent, :12], y[ent]).decision_function(senal[pru, :12])
+        assert np.allclose(dg.puntajes_lda(senal[ent, :12], y[ent], senal[pru, :12]), ref, atol=1e-9)
+    assert abs(dg.auc_de_puntajes(y, senal[:, 7]) - roc_auc_score(y, senal[:, 7])) < 1e-12
+    # medias por ventana (rampa conocida: la media de la ventana que empieza a 100 ms es la del indice 75 a 99) y bootstrap
+    rampa = np.tile(np.arange(250.0), (3, 2, 1))
+    W, ini = dg.medias_por_ventana(rampa, 0.10, 0.30, 0.10)
+    assert W.shape == (3, 2, 2) and np.allclose(W[:, :, 0], 87.0) and np.allclose(ini, [0.10, 0.20])
+    Xb = rng.normal(size=(60, 2, 50))
+    yb = (np.arange(60) % 3 == 0).astype(int)
+    Xb[yb == 1] += 2.0
+    obs, bajo, alto, dd = dg.bootstrap_onda_diferencia(Xb, yb, 200, rng)
+    assert obs.shape == bajo.shape == (2, 50) and dd.shape == (200, 2, 50) and (bajo > 0).all() and (bajo < obs).all() and (obs < alto).all()
+    # la ortesis simulada se reconoce por su latencia (y una que no depende de `seq` de esa forma, no)
+    seqs = list(range(42, 172))
+    lat = np.array([hw.latencia_mecanica_simulada(q, 0) for q in seqs]) + 0.008 + rng.normal(0, 0.003, len(seqs))
+    r = dg.ortesis_parece_simulada(seqs, lat)
+    assert r['simulada'] is True and r['semilla'] == 0 and r['r'] > 0.99 and abs(r['desfase_mediano_ms'] - 8.0) < 1.5, r
+    assert dg.ortesis_parece_simulada(seqs, rng.uniform(0.03, 0.15, len(seqs)))['simulada'] is False
+    assert dg.ortesis_parece_simulada(seqs, np.full(len(seqs), 0.1))['simulada'] is None
+    ack, ini_ = dg.resumen_pasos([{'t': 1.0, 'marcador': 'paso_ack:7'}, {'t': 1.1, 'marcador': 'paso_inicio:7'}, {'t': 0.5, 'marcador': 'cue_cerrar'}])
+    assert ack == {7: 1.0} and ini_ == {7: 1.1}
+    # registro continuo: 8 canales con desfase de continua, sin huecos, y un ErrP del gemelo inyectado 150 ms despues del inicio
+    fs = dg.FS
+    yc, dc = diseno(5)
+    estc = dg.estratos_del_diseno(yc, dc)
+    t = 100.0 + np.arange(int(150 * fs)) / fs
+    x = rng.normal(0, 40.0, size=(8, len(t))) + 2e5
+    t0s = 105.0 + 1.3 * np.arange(len(yc))
+    xi = dg.inyectar_errp(x, t, t0s + 0.15, yc == 1, 10.0, cs.W_ERRP)
+    dentro = np.zeros(len(t), dtype=bool)
+    for t0, e in zip(t0s + 0.15, yc):
+        if e:
+            dentro |= (t >= t0) & (t < t0 + 1.0)
+    assert not (xi - x)[:, ~dentro].any() and (xi - x)[:, dentro].any()
+    onda = dg.onda_diferencia_gemelo(10.0)[1]
+    assert abs(np.abs(xi[2] - x[2]).max() - np.abs(onda).max()) < 0.05 * np.abs(onda).max()      # el canal de peso 1 recibe la onda entera
+    tramos = dg.preparar_continuo(xi, t)
+    assert len(tramos) == 1
+    e_hw = hw.cortar_epoca(xi, t, t0s[3], fs)
+    assert e_hw is not None and np.allclose(dg.cortar(tramos, t0s[3]), e_hw, atol=1e-9)           # el mismo corte que hardware.cortar_epoca
+    assert not np.allclose(dg.cortar(tramos, t0s[3], linea_base=False), e_hw)
+    sc = dg.escanear_desfases(tramos, t0s, yc, estc, dg.DESFASES_S, config.indices('errp'), 0, rng)
+    i = int(np.argmax(sc['auc']))
+    # las ventanas de 100 ms cubren 600 ms, asi que el maximo cae en una meseta ancha alrededor del retraso (no en un punto), y cortar la
+    # epoca muy lejos de ahi (-300 o +500 ms) pierde la senal
+    assert abs(sc['desfases_s'][i] - 0.15) <= 0.30 and max(sc['auc']) > 0.75, (sc['desfases_s'][i], sc['auc'])
+    assert sc['auc'][0] < max(sc['auc']) - 0.15 and sc['auc'][-1] < max(sc['auc']) - 0.15, sc['auc']
+    # curva de aprendizaje: n epocas hechas de instantes al azar del registro, con la onda inyectada en el 30 % (aqui sobre el ruido solo)
+    cur = dg.curva_de_aprendizaje(x, t, 10.0, (60,), 1, rng)
+    assert set(cur) == {60} and len(cur[60]) == 4 and cur[60][0] > 0.65 and cur[60][2] > 0.6, cur       # (media y sd con Fz/Cz/Pz, media y sd con 8 canales)
+    # giro de la cabeza: la velocidad angular maxima de la ventana de la epoca
+    imu = np.zeros((6, len(t)))
+    imu[4, 5000] = 90.0
+    g = dg.giro_maximo(imu, t, [t[5000] + 0.1, t[5000] + 3.0])
+    assert g[0] == 90.0 and g[1] == 0.0
+    return f"estratos, permutacion con maximo, ortesis simulada y barrido de desfases (ErrP inyectado a +150 ms: AUC maximo {max(sc['auc']):.2f} en {sc['desfases_s'][i] * 1e3:+.0f} ms)"
+
+
