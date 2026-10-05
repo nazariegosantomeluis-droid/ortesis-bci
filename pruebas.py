@@ -214,6 +214,47 @@ def agente_basico():
 
 
 @prueba
+def comparacion_baselines():
+    """La tabla y la figura de comparacion con baselines (estudios/comparacion_baselines.py): cifras por sesion
+    a partir de filas conocidas, tabla en es y en con las mismas cifras y sin mezclar idiomas, y la figura se dibuja."""
+    import sys
+    import tempfile
+    from pathlib import Path
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import comparacion_baselines as cb
+
+    def filas(recupera_en, err=0.3):
+        """Una sesion: 30 pasos antes de perturbar y 77 despues; beta sube 0.1 por paso desde `recupera_en` (None: nunca)."""
+        out = [{'sujeto': 0, 'rep': 0, 'bloque': 'adaptativo', 'post': False, 't': t, 'erroneo': t % 5 == 0, 'sombra': False,
+                'beta': 0.0, 'beta_antes': 0.0} for t in range(30)]
+        for t in range(77):
+            b = 0.0 if recupera_en is None else max(0.0, (t - recupera_en + 1) * 0.1) + (cb.al.META_BETA if t >= recupera_en else 0.0)
+            out.append({'sujeto': 0, 'rep': 0, 'bloque': 'adaptativo', 'post': True, 't': 40 + t, 'erroneo': t % 2 == 0, 'sombra': True,
+                        'beta': b, 'beta_antes': 0.0})
+        return out
+    m = {k: cb.metricas(filas(None if k in ('estatico', 'sin_errp') else 10)) for k in cb.METODOS}
+    assert m['estatico']['recuperan'] == 0 and m['estatico']['mediana'] is None
+    assert m['bayes']['recuperan'] == 1 and m['bayes']['mediana'] == 11 and abs(m['bayes']['antes'] - 0.2) < 1e-9
+    assert abs(m['bayes']['err'] - 29 / 57) < 1e-9 or abs(m['bayes']['err'] - 0.5) < 0.02
+    es, n = cb.tabla(m, 'es')
+    en, _ = cb.tabla(m, 'en')
+    assert n == 1 and len(es) == len(en) == 2 + len(cb.METODOS)
+    assert 'Bayes (el nuestro)' in es[4] and 'Bayes (ours)' in en[4] and 'ours' not in ' '.join(es) and 'nuestro' not in ' '.join(en)
+    assert es[2].count('\u2014') == 1 and en[2].count('\u2014') == 1 and '1/1' in es[4] and '1/1' in en[4]       # estatico: sin pasos de recuperacion
+    # mismas cifras en los dos idiomas
+    cifras = lambda lineas: [c.strip() for l in lineas[2:] for c in l.split('|')[2:-1]]
+    assert cifras(es) == cifras(en)
+    datos = {'actual': {k: filas(None if k in ('estatico', 'sin_errp') else 10) for k in cb.METODOS}}
+    with tempfile.TemporaryDirectory() as d:
+        for idioma in ('es', 'en'):
+            ruta_md, mm = cb.informe_md(datos, idioma, Path(d) / f'{idioma}.md')
+            assert ruta_md.read_text(encoding='utf-8').startswith('# ')
+            png = cb.figura(mm, idioma, Path(d) / f'{idioma}.png')
+            assert png.exists() and png.stat().st_size > 20_000
+    return 'tabla y figura en es y en con las mismas cifras'
+
+
+@prueba
 def barrido_paso():
     """Las cifras del barrido de paso (estudios/barrido_paso.py) a partir de filas conocidas: pasos en tope,
     cierre completo por tipo de ensayo, recuperacion, y la tabla marca la configuracion actual."""
@@ -3924,7 +3965,7 @@ def demo_gemelo_en_vivo():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'barrido_paso', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
