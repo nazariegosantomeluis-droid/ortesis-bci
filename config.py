@@ -317,6 +317,16 @@ UDP_VEL_MAX_GRADOS_S = 90.0     # velocidad del servo en el firmware (CFG['vel_m
 UDP_RECORRIDO_DEDOS_GRADOS = 130.0   # abierta 20, cerrada 150 de fabrica (la telemetria informa los vigentes en 'ang')
 UDP_MUESTRAS_RELOJ  = 200       # pares (hora ESP32, hora de la PC) para convertir relojes: ~20 s de latidos
 
+# ============================ Sensor de fuerza (FSR402) ============================
+# FSR402 circular entre 3V3 y GPIO34, con 10 kOhm a GND (divisor de voltaje). El firmware manda `fuerza` = V/3.3 (0 a 1).
+# La curva fuerza-conductancia es la tipica de la hoja de datos (aprox. 0.2 N a 100 kOhm y 10 N a 3 kOhm): ORIENTATIVA,
+# el FSR402 real varia de pieza a pieza (hasta ~±30 %). Para newtons de verdad hay que calibrar con pesas (fuerza.calibrar).
+FSR_R_DIVISOR_OHM  = 10_000.0
+FSR_CURVA_N_1KOHM  = (0.2, 100.0)   # (fuerza N, resistencia kOhm) del punto debil de la curva
+FSR_CURVA_N_2      = (10.0, 3.0)    # (fuerza N, resistencia kOhm) del punto fuerte
+FSR_UMBRAL_TOQUE   = 0.01           # por debajo de esta fraccion de 3.3 V no hay contacto (ruido del ADC)
+FSR_MAX_N          = 20.0           # el FSR402 se satura hacia aqui: por encima, la cifra no es confiable
+
 # ============================ Salud ============================
 # piloto: alfa occipital contra su linea base (somnolencia, ojos cerrados o desconexion de la
 # tarea). Solo avisa: no pausa, no excluye pasos y no cuenta en la escalera de degradacion.
