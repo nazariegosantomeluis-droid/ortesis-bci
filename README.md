@@ -3,13 +3,19 @@
 Órtesis de mano controlada por imaginación motora, con un agente que se corrige solo usando el **potencial de error (ErrP)** del cerebro como recompensa.
 
 ## Autores
-Luis Nazariego Santome/
-Jose Miguel Fausto Tapia/
-Christopher Lara Martinez/
-Juan Luis Medina Leal/
-Margarita Isabell Gabuta Garcia/
-Saul Hernandez Campech/
-Sixta Janet Lorenzo Romero/
+Luis Nazariego Santome
+
+Jose Miguel Fausto Tapia
+
+Christopher Lara Martinez
+
+Juan Luis Medina Leal
+
+Margarita Isabell Gabuta Garcia
+
+Saul Hernandez Campech
+
+Sixta Janet Lorenzo Romero
 
 ## Tres escalas de aprendizaje
 
