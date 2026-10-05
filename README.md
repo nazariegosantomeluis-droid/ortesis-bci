@@ -36,7 +36,7 @@ El orquestador puede leer el EEG de dos fuentes (`--fuente`): `puente` (por defe
 python -m venv .venv
 source .venv/Scripts/activate        # Git Bash en Windows (en CMD: .venv\Scripts\activate)
 pip install -r requirements.txt
-python pruebas.py                    # debe decir 54/54 pruebas pasaron
+python pruebas.py                    # debe decir 81/81 pruebas pasaron
 ```
 
 ## Archivos
@@ -56,6 +56,7 @@ python pruebas.py                    # debe decir 54/54 pruebas pasaron
 | `estudios/` | Mediciones offline con el gemelo y el simulador que respaldan cada decisión (ver su README). |
 | `salud.py` | `Vigilante`: semáforo VERDE / AMARILLO / ROJO por subsistema (EEG, órtesis, reloj, detector y piloto, que solo avisa) y el retroceso de las reconexiones. |
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
+| `detencion.py` | Qué dice el tablero cuando un NO GO detiene la sesión: el CP, el motivo y qué hacer (el árbol de `docs/DOMINGO.md`), sin Qt ni hardware. |
 | `repetir_sesion.py` | Plan B: repite en el tablero, y si se quiere en la órtesis, una sesión grabada (`resultados/sesion_..._estado.jsonl`). |
 | `ortesis_udp_sim.py` | Firmware 1.2 de la ESP32 simulado en la laptop (UDP): prueba `OrtesisUDP` y el orquestador sin la placa. |
 | `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
@@ -215,7 +216,7 @@ Medido en el gemelo sin LSL y con los topes del recorrido (`estudios/sham_gemelo
 | débil | permutados | 10/16 | 10/16 | 0.385 / 0.389 | +0.004 [−0.033, +0.046] |
 | débil | sham ciego | 11/16 | 2/16 | 0.385 / 0.429 | +0.044 [+0.008, +0.080] |
 
-El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer**. Con el detector débil el propio bloque real se queda en 11 de 16. Con bloques de 60 pasos las cifras eran casi las mismas (real 16/16, sham 0/16, +0.136 [+0.111, +0.161] con el detector actual).
+El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer**. Con el detector débil el propio bloque real se queda en 11 de 16. Con bloques de 60 pasos las cifras eran casi las mismas (real 16/16, sham 0/16, +0.136 [+0.111, +0.161] con el detector actual). La tabla se midió el 3 de octubre con `ESPERA_PRIMER_PASO_S = 1`; con la espera de 2 s solo se repitió la fila «actual / sin evidencia» (16/16 contra 0/16, +0.178 [+0.154, +0.202]; ver «Ventana de decisión de MI»).
 
 ### Hallazgo: un sham que conserva la tasa de ErrP no es un sham
 
@@ -381,6 +382,92 @@ python tablero.py --narrador          # franja con la última frase
 - **Respeta el ciego del control causal:** durante los bloques A y B no cuenta recuperaciones ni congelamientos, que delatarían cuál es el real; al final cuenta el resultado.
 
 Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas, contra una sesión del simulador en vivo por LSL. **Sin probar con la API real.**
+
+## Señal de CERRAR y RELAJA neutra, señal auditiva y decoder de MI en C3/Cz/C4
+
+**Qué pasó.** Con el casco real (un participante, la noche del 4 de octubre; **exploratorio**, no es una conclusión sobre personas) la potencia en PO8 y Pz salió más alta en los ensayos de «cerrar» que en los de «relajar» (d de Cohen cerca de +0.5), y la señal del tablero era **roja** para CERRAR y **azul** para RELAJA. Un decoder que mire los canales posteriores puede aprender esa pista visual en lugar del ERD motor, y el CP2 saldría bien por la razón equivocada.
+
+**Qué cambia** (el contrato está en `config.CUE_VISUAL`, `config.CUE_AUDIO` y `config.DECODER_CANALES`; la lógica en `cue.py`):
+
+- **Señal visual idéntica.** CERRAR y RELAJA tienen el mismo color (gris oscuro), tamaño, grosor y ancho (letra monoespaciada y palabras de 6 letras). Solo cambia la palabra. `cue.estilo()` ni siquiera recibe la meta, y una prueba lee el código de `Tablero._cue` para comprobar que no lleva un color propio. La consola usa la misma forma de línea para las dos (`>>> CERRAR` / `>>> RELAJA`); la explicación de qué imaginar se imprime una vez, antes de la primera señal.
+- **Señal auditiva opcional** (`--cue-audio`, solo con el casco): dos tonos seguidos (660 y 990 Hz, 150 ms cada uno), **los mismos en las dos señales y en orden contrario** (sube = CERRAR, baja = RELAJA). Duran lo mismo y suenan igual de fuerte. En Windows suena con `winsound`; en otros sistemas, con `afplay`, `paplay` o `aplay` si existen. Si el sistema no puede sonar, lo dice una vez y la sesión sigue con la señal visual. Suena en un hilo aparte: no frena el lazo.
+- **Solo auditiva** (`--cue-sin-visual`, con `--cue-audio`): el tablero muestra un `+` fijo y la meta llega por el oído. El evento de `Estado` lleva `visual: false`. La consola del operador sí dice la palabra: no se la enseñes al piloto.
+- **Decoder de MI en C3, Cz y C4 por defecto** (`--decoder-canales mi`). Sin elección entre canales, así que la BA que reporta el CP2 es la de la validación cruzada simple. `--decoder-canales auto` vuelve a elegir por validación cruzada anidada entre C3/Cz/C4 y los 8; `todos` fija los 8. Con `--preentrenado` el decoder sigue usando los 8 canales con los que se entrenó (el orquestador lo avisa).
+
+**Lo que sí y lo que no se midió.** En el gemelo (8 sujetos, 60 ensayos) C3/Cz/C4 da BA 0.813 y los 8 canales 0.818, y el CP2 (≥ 0.70) pasa 8 de 8 con cualquiera de los dos: restringir los canales no cuesta nada ahí. **El gemelo no tiene la pista visual posterior**, así que no puede mostrar la ventaja; esa justificación sale solo de los datos del casco real de un participante. Hace falta repetirlo con más personas, y con la señal ya neutra, antes de afirmar que quita el sesgo.
+
+## CP1 y el 60 Hz: decide la mediana de 3 ventanas, no una sola
+
+**El problema.** El CP1 exigía que en cada canal la fracción de potencia en 58–62 Hz (sobre 1–100 Hz) de **una** ventana de 10 s fuera menor que 50 %. Con el casco real (P001, 616 s quieto, 4 de octubre; **exploratorio**: una persona, una sesión) cuatro canales pasan a veces de ese umbral (Fz, Cz, C3 y PO7, entre 5.6 y 10.9 % de las ventanas cada uno; la mediana de Fz y Cz es 0.30 y 0.33) y en **18 %** de las ventanas (54 de 304 ventanas de 10 s, una cada 2 s, traslapadas) algún canal lo pasaba. Lo que cambia entre ventanas es el 60 Hz mismo (de 3 a 10 µV rms en esos canales), no el resto del EEG (estable en 8 a 10 µV) ni el movimiento de la cabeza (el giroscopio está plano). Un CP1 de una ventana falla, entonces, por azar.
+
+**Dos porcentajes, un mismo cálculo.** El 18 % de arriba y el 15.6 % de más abajo salen de `estudios/red_cp1.py` sobre las mismas ventanas y solo cambia el denominador. El procedimiento nuevo necesita 20 s más después de la primera ventana, así que solo 294 de las 304 ventanas pueden ser un inicio de CP1; con una ventana, 46 de esos 294 inicios fallan: **15.6 %**. Esa es la cifra que se compara con el procedimiento nuevo (6.5 %); el 18 % solo describe cuánto pasa el umbral algún canal.
+
+**Cuánto le llega al decoder.** `hardware.filtrar` aplica un notch de la red (Q = 30) y un pasa-banda de 8–30 Hz (MI) o 1–10 Hz (ErrP), los dos de fase cero (`sosfiltfilt`). Medido el 4 de octubre con un seno puro de 60 Hz de 10 µV rms a 250 Hz, **sin EEG** y con 200 fases al azar: queda a **−26 dB (MI) y −17 dB (ErrP)** con una ventana de 2 s, y a **−33 y −24 dB** con una de 10 s (medianas; sobre las dos bandas, las dos ventanas y todas las fases, de −14 a −37 dB; con la red desviada 0.5 Hz, unos 3 dB menos). Con la ventana de MI del orquestador (3 s filtrados, se guardan los últimos 2 s) salen −34 dB de mediana y −30 dB en el peor caso. La respuesta en frecuencia del filtro en 60 Hz es mucho menor que eso, pero en una ventana corta no es lo que se ve: lo que queda es el transitorio de los bordes de `sosfiltfilt`, con casi nada de energía en 55–65 Hz. Es decir: **llega muy atenuado, no desaparece**. No se midió con EEG real, ni cuánto cambiaría las características del decoder; por eso se lo trata como un indicador de contacto del electrodo y no como algo que el decoder vea, pero eso último es un supuesto sin probar con una persona.
+
+**Qué se hizo.** El umbral **no se movió** (0.5). Cambió el estimador (`hardware.EntradaEEG.calidad_robusta`, `config.CP1_RED`): se mide una ventana y, si algún canal pasa de 0.5, se miden otras dos seguidas (20 s más, solo entonces) y ese canal se juzga por la **mediana** de las tres. Los canales que no pasan de 0.5 se juzgan como antes. En los que se re-miden, la mediana se aplica solo al 60 Hz: el rms sale de la primera ventana y la saturación es la **peor** de las tres (basta una ventana saturada para marcar `REVISAR`). Los demás criterios no cambian. Simulado sobre los datos de P001 (`python estudios/red_cp1.py archivo.xdf`): el CP1 fallaría por 60 Hz en **15.6 %** de los inicios con una ventana y en **6.5 %** con el procedimiento nuevo, que re-mide en 15.6 %. Queda un 6.5 %, probablemente porque el 60 Hz de este participante tiene episodios de decenas de segundos (no se midió su duración aparte); el gel extra en Fz, Cz, C3 y PO7 debería bajarlo, pero eso se verá con el casco, no aquí. `estado_sistema.py` (la franja del tablero) sigue juzgando una ventana por ciclo.
+
+## Ventana de decisión de MI: el primer paso del lazo mira lo mismo que la calibración
+
+**Pregunta** (4 de octubre): con el casco real la desincronización apareció de 2 a 4 s después de la señal. ¿La ventana con la que el lazo decide cubre esa parte del ensayo?
+
+**Lo que se midió.** La calibración decide con los últimos 2 s de una señal de 4 s: `[2, 4]` s, justo donde apareció el ERD. El lazo no: la orden del primer paso de cada ensayo salía a 3 s de la señal (ventana `[1, 3]`), y cada paso siguiente unos 1.0 a 1.7 s después (`estudios/ventana_mi_lazo.py sesion`, sobre una sesión del gemelo con la órtesis simulada):
+
+| Paso del ensayo | Ventana antes | Cubre de `[2, 4]` | Ventana ahora | Cubre de `[2, 4]` |
+|---|---|---|---|---|
+| 1 | [1.05, 3.05] s | 1.05 de 2 s | [2.04, 4.04] s | 1.96 de 2 s |
+| 2 | [2.75, 4.75] s | 1.25 | [3.77, 5.77] s | 0.23 |
+| 3 | [3.81, 5.81] s | 0.19 | [4.83, 6.83] s | 0 |
+| 4 y 5 | [4.81, 7.02] s | 0 | [5.80, 8.04] s | 0 |
+
+(Dos sesiones del gemelo con la órtesis simulada, 3 ensayos de 5 pasos cada una; en el paso 5, 2 ensayos. Con la órtesis de verdad el tiempo entre pasos puede ser algo mayor: espera la telemetría.)
+
+**Con datos reales** (P001, 42 ensayos de MI del XDF, decoder Riemann con C3/Cz/C4, validación cruzada, `estudios/ventana_mi_lazo.py real`): la exactitud balanceada sube con la ventana: **0.53** en `[0, 2]`, 0.56 en `[0.5, 2.5]`, **0.68** en `[1, 3]` (la que usaba el primer paso), 0.77 en `[1.5, 3.5]` y **0.76** en `[2, 4]`; los dos últimos con p = 0.01 por permutaciones (el mínimo con 100). **EXPLORATORIO:** un participante, 42 ensayos (un error estándar de unos 0.07), se miraron 5 ventanas sin corregir el p, y los ensayos solo duran 4 s, así que no se puede probar nada más tardío.
+
+**Qué cambió.** `config.ESPERA_PRIMER_PASO_S` pasó de 1 a 2 s (`= DURACION_MI_S - VENTANA_MI`): el primer paso de cada ensayo espera lo mismo que la calibración y decide con la misma ventana. Cada ensayo dura 1 s más (unos 30 s más en toda la demo). La dirección coincide con el hallazgo del gemelo del 2 de octubre (esperar 2 s en lugar de 1 baja el error del primer paso), con la diferencia de que ahora el motivo viene de una persona.
+
+**El control causal `--sham` con la espera de 2 s** (4 de octubre; gemelo sin LSL con topes, **no una persona**): corrida reducida de `estudios/sham_gemelo.py` con solo el detector actual y el sham sin evidencia (`nula`), 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10 y `ESPERA_PRIMER_PASO_S = 2.0`. El bloque real se recupera en **16 de 16** (mediana de 30 pasos) y el sham en **0 de 16**; error tras perturbar 0.304 contra 0.481; sham − real **+0.178 [+0.154, +0.202]** (IC 90 %). El criterio de aceptación se cumple. Con la espera en 1.0 s y el mismo código de hoy dio 16 de 16 y 0 de 16, 0.289 contra 0.488 y +0.199 [+0.171, +0.230]. Ninguna de las dos corridas reproduce al decimal la referencia del 3 de octubre (16 de 16 y 1 de 16, 0.296 contra 0.471, +0.175, tabla de la sección del control causal), ni la de la «Tabla del control causal con el defecto nuevo» (0 de 16 y +0.184 [+0.155, +0.212], medida con el prior por paso y la espera de 1 s): la diferencia **no viene de la espera**, y probablemente viene del prior por paso (`PRIOR_POR_PASO`), que se activó después de la referencia del 3 de octubre; no se aisló, y los intervalos de todas estas corridas se traslapan. **Solo se repitió ese régimen y esa fuente:** las demás cifras de referencia del gemelo y del simulador (`agente_lento`, `paso_sin_movimiento`, `respaldo_ack`, `prior_por_paso` y el resto del control causal) siguen siendo con 1 s. La corrida reducida es `python estudios/sham_reducido.py` (~1 min con 2 núcleos); `python estudios/sham_gemelo.py` corre además los otros detectores y fuentes de sham.
+
+**Lo que NO se resolvió.** Los pasos 2 a 5 del ensayo caen *después* de `[2, 4]` (y ahora un segundo más tarde): no hay datos reales de qué hace el ERD ahí (la calibración termina a los 4 s), y esas ventanas incluyen además la respuesta cerebral al movimiento del paso anterior. Con este diseño, de 5 pasos por ensayo solo el primero decide con la ventana en que se entrenó el decoder. Opciones para quien decida: menos pasos por ensayo (`config.PASOS_ENSAYO`, que también cambia el agente y los estudios), calibrar con señales más largas para tener ventanas más tardías, o medir primero: en la primera sesión con lazo de verdad, `python estudios/ventana_mi_lazo.py sesion --ultima` da la tabla y el error por paso del ensayo sale del CSV. El gemelo no puede decidirlo: su ERD es constante durante toda la señal.
+
+## Sesión detenida por un NO GO: el tablero lo dice en grande
+
+**El problema** (4 de octubre): cuando un checkpoint daba NO GO (CP1, CP2 o CP3, sin `--forzar`) el orquestador se detenía y el tablero se quedaba con los paneles vacíos y una línea chica de color; quien miraba la pantalla no sabía qué había pasado. Peor: `demo.py lanzar` cerraba el tablero en cuanto el orquestador terminaba, así que ni esa línea se veía.
+
+**Qué se hizo.**
+- El orquestador publica en `Estado` un evento `tipo = 'detenida'` con el CP, el motivo (la misma línea del checkpoint, con sus números) y **qué hacer** (`detencion.py`). También lo imprime en la terminal.
+- El tablero lo muestra en grande, en rojo, **en lugar de los paneles**: «Sesion detenida en CP3: ErrP: sens 0.83, espec 0.87, BA 0.85…» y debajo los pasos. Se quita solo cuando llega algo de una sesión nueva (su primer checkpoint, señal o paso): lo primero que publica una sesión es el CP1, unos 20 a 40 s después de lanzarla, y hasta entonces el aviso anterior sigue en pantalla. Sin acentos en esa pantalla, como el resto del tablero (regla del proyecto para el código).
+- Qué hacer sale del árbol de `docs/DOMINGO.md`, sección 5, con los números que decidieron el NO GO: en el CP3, BA < 0.65 → «el detector no informa» (repetir con `--solo-errp`, si no mejora plan B); BA ≥ 0.75 con especificidad < 0.85 → «demasiadas falsas alarmas» (repetir con `--solo-errp`); el resto → dos caminos (`--solo-errp` o `--saltar-calibracion`, con la advertencia de que ya no se evalúa el CP3 y el CP4 puede dar NO GO). Los dos cortes del CP3 (0.65 y 0.85) viven en `config.py` (`DETENCION_CP3_BA_NO_INFORMA`, `DETENCION_CP3_ESPEC_FALSAS_ALARMAS`) y el árbol de `docs/DOMINGO.md` los repite a mano: si cambia uno, hay que cambiar el otro. En el CP1 distingue canal (más gel) de latencia (cable, ESP32); si no llegaron muestras de EEG manda a revisar el casco y `python ver_flujos.py`, y si la órtesis ya iba con `--ortesis-sim` y la latencia falló no sugiere `--ortesis-sim` otra vez (la laptop está saturada). En el CP2, repetir, cambiar de piloto o `--forzar`. Las frases dicen «el mismo comando con `--solo-errp`» y no un comando completo, porque quien lanzó con `demo.py` o con `orquestador.py` tiene comandos distintos.
+- El orquestador sale ahora con el código `config.SALIDA_NO_GO` (4) si un NO GO lo detuvo; antes salía con 0 y era indistinguible de una sesión completa. `demo.py lanzar` lo ve y, **si hay una terminal** (stdin interactivo), deja el tablero abierto y espera un Enter (o Ctrl+C) antes de cerrar todo; **sin terminal** imprime que no hay a quien esperar y lo cierra. El código de salida de la demo es el 4 y la bitácora dice `detenido_por_no_go`.
+- Si no quedó ningún ensayo de MI o ninguna época válida de ErrP, la sesión se detiene **aun con `--forzar`** (no hay modelo con qué seguir) y se anuncia como CP2 o CP3, aunque esa parada no vino de un checkpoint con veredicto (el motivo dice «no quedaron ensayos validos de MI» o «no quedaron epocas validas…», sin números). Si el orquestador no sabe en qué CP se detuvo, deduce el CP del estado de la máquina (`config.DETENCION_CP_POR_ESTADO`) y, si tampoco puede, el título no lo inventa («Sesion detenida»).
+- El plan B ya no se confunde tras una parada: `repetir_sesion.ultima` y `demo.py planb` **ignoran las sesiones grabadas que no llegaron al lazo** (sin ningún evento `paso` ni `ajeno`), así que tras un NO GO en la calibración `python demo.py planb` repite la última sesión **buena**. Si no hay ninguna con lazo, el preflight y `planb` lo dicen («no hay ninguna sesion real grabada con lazo para repetir») y no abren nada.
+
+**Qué se verificó.** Pruebas sin pantalla (`detencion_texto`, `detencion_orquestador`, `tablero_detenida`, `demo_lanzar_simulado`). `detencion_texto` comprueba que cada rama del texto dice lo que debe, que las banderas que nombra (`--solo-errp`, `--saltar-calibracion`, `--forzar`, `--ortesis-sim`) existan en `docs/DOMINGO.md` y en el orquestador y que los cortes del CP3 de `config.py` aparezcan en la sección del CP3; **no** cruza el árbol entero con el texto. Aparte, **una corrida manual** (no es una prueba de `pruebas.py`) de punta a punta contra el gemelo en Linux: el CP2 dio NO GO, el evento llegó por LSL a un oyente externo cuando el proceso ya había terminado y el código de salida fue 4. **Qué no:** la prueba del tablero corre con un Qt de mentira (y con PyQt de verdad si está instalado, como en la laptop de la demo); en el entorno de desarrollo de esta tarea no había PyQt, así que **nadie ha visto la ventana**: hay que abrirla (`python tablero.py` y, en otra terminal, un orquestador sin `--forzar` que dé NO GO) y comprobar que el texto cabe y se lee. Que el último evento sobreviva al cierre del proceso se probó en Linux con un script de juguete que publica un evento y sale, repetido 6 veces (llegó 6 de 6); no con el orquestador de verdad ni en Windows.
+
+**Límites.**
+- El tablero solo ve el aviso si ya estaba abierto cuando el orquestador se detuvo (LSL no repite lo que ya pasó).
+- Si no se encuentra el flujo `EEG` (antes de llegar al CP1), **no hay aviso en el tablero**: el error («No encontre el flujo de EEG…», un `RuntimeError`) ocurre al crear `BackendReal`, antes de que existan los flujos de salida del orquestador, y el proceso termina con un traceback en su terminal. No se anuncia como NO GO ni sale con el código 4. Conocido y sin resolver.
+
+## Mano virtual a pantalla completa (`mano_virtual.py`)
+
+Una mano grande que se abre y se cierra con las **mismas órdenes que la órtesis**. Sirve para calibrar el ErrP cuando la órtesis no está lista (el piloto mira esta mano) y como segunda pantalla en la demo.
+
+![Mano virtual a 0, 30, 60, 85 y 100 % de cierre](docs/figuras/mano_virtual.png)
+
+```bash
+python orquestador.py real --ortesis-sim --mano-virtual   # terminal 3: publica cada orden a la órtesis en Estado
+python mano_virtual.py --pantalla 1                       # terminal 4: la mano, a pantalla completa en la pantalla 1 (Esc sale, F alterna)
+python demo.py lanzar --plan casco --ortesis-sim --mano-virtual --pantalla 1   # todo junto
+python mano_virtual.py --demo                             # se abre y se cierra sola, para ver cómo luce
+python mano_virtual.py --captura mano.png --cierre 0.6    # una imagen, sin ventana
+```
+
+- **De dónde saca el movimiento.** Con `--mano-virtual` el orquestador envuelve el `mover` de la órtesis y publica un evento `mano` en `Estado` por cada orden (pasos, centrado, pausa segura, movimientos ajenos): `angulo` (0 abierta, 1 cerrada), `ms`, `seq` e `inicio`. Sin ese evento la mano sigue el ángulo de los eventos `paso` y `ajeno`, así que también anima una sesión vieja con `repetir_sesion.py` (plan B). Los eventos `mano` quedan en el `_estado.jsonl`.
+- **Rápida y clara.** La animación dura lo que la orden (250 ms por paso) y arranca de golpe y frena al final (en 25 ms ya recorrió más del 15 %): el inicio, que es lo que ancla la época del ErrP, se ve de inmediato. Una barra de 0 a 100 % de cierre queda debajo.
+- **Cuándo empieza a verse.** Con la órtesis simulada la mano empieza en el ACK más la latencia mecánica simulada (30 a 150 ms), el mismo instante que el orquestador usa como ancla de la época. Con la órtesis real, en el ACK. Queda el retraso de leer el flujo y dibujar el cuadro (≈ 20 a 40 ms) y el de la pantalla: **no están medidos con un fotodiodo**.
+- **La misma señal neutra.** Arriba muestra la palabra CERRAR/RELAJA con el mismo color y tamaño que el tablero (ver la sección de la señal neutra), o `+` con `--cue-sin-visual`, y `AUTOMATICO` en un movimiento ajeno: el piloto necesita saber hacia dónde *debía* moverse para notar un error.
+- **Un solo costado de la verdad.** La mano muestra lo *ordenado*, no lo que hace la órtesis física: si la órtesis se traba, la mano no lo sabe.
+
+**Qué se probó y qué no.** La geometría, la animación, los eventos, el dibujo (contra un pintor de registro en tres formatos de pantalla), el espejo de la órtesis y el cableado de `orquestador.py` y `demo.py` tienen pruebas sin hardware (`mano_virtual_logica`). El código de la ventana corre entero contra un Qt de mentira (`mano_virtual_ventana_falsa`). **La ventana no se abrió con Qt de verdad** (el entorno donde se escribió no tiene PyQt5): abre `python mano_virtual.py --demo` antes de contar con ella, y la imagen de arriba es de matplotlib, no de Qt. Tampoco se midió si calibrar el ErrP mirando esta mano da un detector mejor que con la órtesis simulada sin nada visible (con esa combinación, la noche del 4 de octubre, el detector quedó en el azar con un participante); el gemelo no ve la mano, así que no lo puede decir.
 
 ## Transferencia desde PhysioNet: arrancar la calibración con un decoder pre-entrenado (`--preentrenado`)
 
@@ -665,7 +752,7 @@ Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orque
 Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`. Para que el detector no cambie durante el lazo: `--sin-coadaptativo`.
 Si el CP3 da NO GO, `--solo-errp` repite solo la calibración de ErrP con el decoder de MI ya calibrado. Al cargar modelos guardados, el orquestador dice hace cuánto se calibraron y avisa si tienen más de 6 horas (en `modelos/` pueden quedar los del gemelo o los de otro piloto).
 
-**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite la última sesión real en el tablero, y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
+**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite en el tablero la última sesión real que llegó al lazo (una que un NO GO detuvo en la calibración no cuenta), y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
 
 El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
@@ -684,7 +771,7 @@ El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 | 3 | CAL_ERRP | BA ErrP ≥ 0.75 y especificidad ≥ 0.90, con 120 épocas fijas y umbral anidado | Repetir con `--solo-errp`, seguir con `--saltar-calibracion` (aprende más lento) o plan B |
 | 4 | EVALUACION | Recuperación ≤ 120 s | Congelar y usar la ruta de 24 h |
 
-`--forzar` continúa aunque un checkpoint diga NO GO (solo para pruebas).
+`--forzar` continúa aunque un checkpoint diga NO GO (para pruebas o, sin otra salida, como indica `docs/DOMINGO.md`, sección 5). Sin él, un NO GO en los CP1 a CP3 detiene la sesión, el tablero lo dice en grande y el orquestador sale con el código 4. Ni `--forzar` salta que no quede ningún ensayo de MI ni ninguna época de ErrP válidos: sin modelo no hay con qué seguir, y esa parada también se anuncia (como CP2 o CP3).
 
 ### Barrido del tamaño de paso y de los pasos por ensayo (5 de octubre, gemelo)
 

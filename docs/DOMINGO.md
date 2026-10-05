@@ -45,6 +45,15 @@ Sigue la guía de unos 50 segundos (quieto, parpadear, ojos cerrados, mover la c
 
 Si la comprobación dice que el orden de los canales o las unidades no son los esperados, **no calibres**: el contrato de `config.py` supone Fz, C3, Cz, C4, Pz, PO7, Oz, PO8 en microvolts.
 
+**Prueba de toques (descarta canales intercambiados).** Los parpadeos y el alfa solo *sugieren* el orden de los canales, y un electrodo malo los confunde. Los toques lo comprueban de frente: con quien lleva el casco quieto, otra persona toca cada electrodo 3 s con la yema del dedo (golpecitos seguidos) cuando la pantalla lo pide, y el pico debe salir en ese canal:
+
+```bash
+python verificar_unicorn.py brainflow --solo-toques     # ~45 s: un reposo corto y los 8 toques
+python verificar_unicorn.py brainflow --toques          # la guía completa y, al final, los toques
+```
+
+Imprime una matriz (fila = electrodo tocado, columna = canal que respondió, en veces su reposo): lo correcto es el máximo de cada fila en la diagonal. La izquierda y la derecha son las de quien lleva el casco (C3 es la izquierda). Si dos electrodos responden cada uno donde toca el otro (por ejemplo C3 y C4), dice `electrodos intercambiados` y el veredicto pasa a `NO uses`: hay que corregir el orden de los canales en `puente_lsl.plan_placa` o `config.FUENTES_EEG`. Un electrodo que no se toca, o que responde poco, queda en AVISO y no se da por bueno ni por malo.
+
 ## 3. Verificar la órtesis (2 minutos)
 
 ```bash
@@ -77,6 +86,8 @@ python tablero.py
 python orquestador.py real --puerto COM4
 ```
 
+**Mano virtual** (segunda pantalla, o en lugar de la órtesis para calibrar el ErrP): `python orquestador.py real --ortesis-sim --mano-virtual` y, en otra terminal, `python mano_virtual.py --pantalla 1` (o `demo.py lanzar ... --mano-virtual --pantalla 1`). Ábrela antes con `python mano_virtual.py --demo` para comprobar que la pantalla y la ventana funcionan; Esc la cierra. Si la órtesis es la real, la mano solo repite lo que se le ordena.
+
 Con la app UnicornLSL como fuente, no lances el puente y usa `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
 
 ### Atajo: `python demo.py`
@@ -91,7 +102,7 @@ python demo.py lanzar --plan gemelo --ortesis-sim       # sin casco: el gemelo d
 python demo.py lanzar --ortesis-udp                     # la órtesis por Wi-Fi (ESP32 en 192.168.4.1), en lugar de --puerto
 python demo.py lanzar --plan gemelo --ortesis-udp 127.0.0.1   # sin la placa: lanza también ortesis_udp_sim.py (la ESP32 simulada)
 python demo.py lanzar --puerto COM4 -- --sham --preentrenado   # lo que va tras `--` pasa tal cual al orquestador
-python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real
+python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real que llegó al lazo
 ```
 
 `--ortesis-udp [IP]` (y `--udp-puerto`) hace lo mismo que en el orquestador y es excluyente con `--ortesis-sim`: no pide pyserial ni la verificación USB, y el preflight avisa a dónde apunta (UDP no se puede comprobar sin mandar una orden; con el plan `gemelo` y una IP de esta laptop, `demo.py` lanza `ortesis_udp_sim.py` antes que el orquestador; con otro plan, el aviso recuerda lanzarlo a mano). `planb --ortesis-udp` repite los ángulos por Wi-Fi.
@@ -106,13 +117,13 @@ También acepta `--narrador`, `--copiloto`, `--flechas`, `--idioma en`, `--serie
 | Flujos LSL | ya hay un flujo `EEG`, o `Marcadores`/`Paso`/`Estado` (FALLA); con `--plan unicornlsl`, no se ve el flujo `Data` de la app (FALLA) |
 | Órtesis | el puerto no existe (FALLA) |
 | Verificaciones de hoy | `verificar_unicorn.py` o `verificar_ortesis.py` no se corrieron, son de hace más de 4 h o probaron otra fuente (AVISO); una comprobación crítica en rojo (FALLA). **No las corre: son guiadas.** |
-| IA y plan B | sin llave de la API (AVISO: narrador, copiloto y co-investigador usan plantillas); ninguna sesión real grabada para repetir (AVISO) |
+| IA y plan B | sin llave de la API (AVISO: narrador, copiloto y co-investigador usan plantillas); ninguna sesión real grabada que haya llegado al lazo (AVISO: una que un NO GO detuvo en la calibración no cuenta; dice «no hay ninguna sesion real grabada con lazo para repetir») |
 | Disco | menos de 500 MB libres (FALLA) |
 
 - Una FALLA detiene `lanzar` (código de salida 2). `--ignorar-fallas` sigue de todos modos, bajo tu responsabilidad, y queda escrito en la bitácora.
 - Los procesos de fondo escriben en `resultados/logs_demo/<fecha>/` (`fuente.log`, `tablero.log`, `narrador.log`). La bitácora, con el preflight, los comandos exactos, los extras, cómo se cerró cada proceso y los archivos nuevos, queda en `resultados/demo_<fecha>.json`.
 - Ctrl+C en la terminal del orquestador cierra todo, y cierra cada proceso por su PID (nunca por nombre). Primero se les pide que terminen, para que el puente suelte el casco.
-- El código de salida de `lanzar` es el del orquestador. **No esconde un checkpoint en NO GO, no agrega `--forzar` ni `--saltar-calibracion` por su cuenta y no contesta el cuestionario.** Si hace falta forzar, se pide a propósito: `python demo.py lanzar -- --forzar`.
+- El código de salida de `lanzar` es el del orquestador (4 si un NO GO detuvo la sesión: entonces, si hay una terminal, deja el tablero abierto con el aviso hasta un Enter; sin terminal dice que no hay a quien esperar y cierra todo). **No esconde un checkpoint en NO GO, no agrega `--forzar` ni `--saltar-calibracion` por su cuenta y no contesta el cuestionario.** Si hace falta forzar, se pide a propósito: `python demo.py lanzar -- --forzar`.
 - El EEG crudo queda en `resultados/sesion_unicorn_<fecha>.csv` (con fecha), no en `sesion_unicorn.csv`: guarda ese. **LabRecorder no lo abre este programa**: ábrelo tú y selecciona todos los flujos; `Marcadores`, `Paso` y `Estado` aparecen cuando arranca el orquestador.
 - **Sin probar en Windows.** Se probó en Linux contra el gemelo. Quedan sin comprobar con la laptop de la demo: el listado de puertos COM, el cierre con Ctrl+Break y que el puente suelte el casco al cerrarse. Antes de depender de él, corre en esa laptop `python demo.py preflight` y una vez `python demo.py lanzar --plan gemelo --ortesis-sim`.
 
@@ -121,10 +132,10 @@ También acepta `--narrador`, `--copiloto`, `--flechas`, `--idioma en`, `--serie
 | Fase | Duración | Qué hace el piloto |
 |---|---|---|
 | CP1: señal y latencia | 1 min | Quieto, ojos abiertos. Luego la órtesis se mueve sola 40 veces. |
-| Calibración de MI (CP2) | 3 a 6 min | Con `CERRAR`, imagina cerrar la mano derecha (sin moverla); con `RELAJA`, descansa. |
+| Calibración de MI (CP2) | 3 a 6 min | Con `CERRAR`, imagina cerrar la mano derecha (sin moverla); con `RELAJA`, descansa. Las dos palabras se ven idénticas (mismo color y tamaño). Con `--cue-audio` suenan dos tonos: sube = CERRAR, baja = RELAJA; con `--cue-sin-visual` la pantalla solo muestra un `+`. El decoder usa solo C3, Cz y C4 (`--decoder-canales auto` para volver a elegir). |
 | Calibración de ErrP (CP3) | 5 min | Mira la órtesis. La consola dice hacia dónde debe moverse; a veces se equivoca a propósito. |
 | Lazo estático (30 pasos) | 1 min | Igual que en MI: imagina o relaja según la señal. La órtesis ya obedece. |
-| Lazo adaptativo (120 pasos) | 4 min | Igual. En el paso 40 llega la perturbación. Cuando el tablero diga `AUTOMATICO`, la órtesis se mueve sola: solo obsérvala. |
+| Lazo adaptativo (120 pasos) | 4 a 5 min | Igual. En el paso 40 llega la perturbación. Cuando el tablero diga `AUTOMATICO`, la órtesis se mueve sola: solo obsérvala. |
 | Evaluación (CP4) y cuestionario | 1 min | Tres afirmaciones, de 1 a 7, en la terminal 3. |
 
 Cada ensayo empieza con la órtesis volviendo al punto medio. Pídele al piloto que no mueva la cabeza y que parpadee entre ensayos.
@@ -135,7 +146,7 @@ Cuando la órtesis ya llegó al tope (cerrada o abierta del todo), los pasos que
 
 ## 5. Árbol de decisión por checkpoint
 
-Un checkpoint en NO GO detiene la sesión (salvo el CP4, que solo informa). Los modelos ya calibrados quedan guardados en `modelos/`.
+Un checkpoint en NO GO detiene la sesión (salvo el CP4, que solo informa). Los modelos ya calibrados quedan guardados en `modelos/`. El tablero lo dice en grande («Sesion detenida en CP3: …») con estos mismos pasos, y el orquestador sale con el código 4; con `demo.py lanzar` y una terminal, el tablero se queda abierto hasta que pulses Enter. Solo lo ve si ya estaba abierto cuando se detuvo. Si no quedó ningún ensayo (o ninguna época) válido, la sesión se detiene **aunque uses `--forzar`** y el aviso dice CP2 (o CP3), con su motivo.
 
 ### CP1: señal por canal y latencia de la órtesis
 
@@ -145,17 +156,21 @@ El mensaje dice qué falló.
   1. Reacomoda ese electrodo, agrega gel y espera un minuto.
   2. Vuelve a lanzar el orquestador.
   3. Si sigue mal tras dos intentos, no fuerces: con un canal malo el lazo entra en pausa segura todo el tiempo. Ve al plan B.
-- **No encuentra el flujo `EEG`.** Revisa que el puente siga vivo en la terminal 1 y que ninguna otra aplicación esté conectada al casco. `python ver_flujos.py` debe mostrar un solo `EEG`.
+- **60 Hz alto en un canal** (`60 Hz 62 %`...). El 60 Hz de un electrodo cambia de una ventana a otra (P001, exploratorio: una persona, una sesión), así que el CP1 ya no decide por una sola ventana de 10 s: si un canal pasa de 50 %, mide **20 s más** (lo dice en consola: «60 Hz alto en Fz, Cz: 20 s más…») y decide por la **mediana de 3 ventanas**. Un canal que sigue en `REVISAR` tras eso puede tener el 60 Hz alto de verdad o ser un episodio largo (P001 los tuvo de decenas de segundos): **repite el CP1 una vez**; si vuelve a fallar, más gel y que el cable no cuelgue ni toque otros. Ese 60 Hz llega muy atenuado al decoder (el filtro lleva un notch de la red y un pasa-banda: de −14 a −37 dB con un seno puro, según la banda y la ventana; no medido con EEG real) y es sobre todo un indicador de contacto del electrodo.
+- **No llegaron muestras de EEG** (el CP1 lo dice así). No hay electrodos que reacomodar: revisa que el casco esté encendido y enviando, y que `python ver_flujos.py` muestre un solo `EEG` con datos. Luego vuelve a lanzar el orquestador.
+- **No encuentra el flujo `EEG`.** Revisa que el puente siga vivo en la terminal 1 y que ninguna otra aplicación esté conectada al casco. `python ver_flujos.py` debe mostrar un solo `EEG`. **Límite conocido:** este error ocurre antes del CP1 y el tablero no lo anuncia: el orquestador termina con un traceback («No encontre el flujo de EEG…») en su terminal, sin el aviso grande y sin el código de salida 4.
 - **Latencia del ACK** (MAD > 15 ms, p95 > 60 ms o más de 10 % sin ACK).
   1. Cambia el cable o el puerto USB y cierra lo que use el COM.
   2. Reinicia el ESP32 y repite `python verificar_ortesis.py --puerto COM4`.
   3. Si la órtesis no responde, haz la demo sin ella: `python orquestador.py real --ortesis-sim`. El tablero muestra todo; dilo al jurado.
+  4. Si ya ibas con `--ortesis-sim` y la latencia falla, no es la órtesis sino la laptop (saturada): cierra lo que no uses y repite. El aviso no vuelve a sugerir `--ortesis-sim`.
 
 ### CP2: imaginación motora, BA ≥ 0.70
 
 - **BA entre 0.60 y 0.70.** Repite una vez: recuérdale al piloto que imagine la sensación de cerrar la mano, sin moverla, y que relaje de verdad en `RELAJA`. Vuelve a lanzar el orquestador.
 - **Sigue por debajo de 0.70.** Cambia de piloto si hay otro disponible.
 - **No hay tiempo ni otro piloto.** `python orquestador.py real --puerto COM4 --forzar` sigue adelante con el decoder que haya. La órtesis se equivocará más; el agente lo corrige solo si el CP3 sale bien.
+- **No quedó ningún ensayo válido.** Se descartaron todos (electrodo despegado, movimiento de cabeza o EEG sin datos frescos; la consola dice cuál). **`--forzar` no lo salta**: sin decoder no hay con qué seguir, y el aviso dice CP2. Revisa los electrodos, pide al piloto que no mueva la cabeza durante la señal y repite.
 
 ### CP3: detector de ErrP, BA ≥ 0.75 y especificidad ≥ 0.90
 
@@ -175,6 +190,7 @@ Es el riesgo principal: el Unicorn tiene 3 electrodos fronto-centrales. La curva
   En la corrida de referencia contra el gemelo pasó justo esto: BA 0.85 con especificidad 0.87 (NO GO), y con ese detector el agente se recuperó en 50 s.
 - **BA por debajo de 0.65.** El detector no informa. Repite la calibración de ErrP una vez; si no mejora, ve al plan B.
 - **BA ≥ 0.75 pero especificidad < 0.85.** Demasiadas falsas alarmas: repite con `--solo-errp`.
+- **No quedó ninguna época válida.** Sin detector no hay con qué seguir: **`--forzar` tampoco lo salta**, y el aviso dice CP3. La consola dice por qué se descartaron; repite solo la calibración de ErrP con `--solo-errp`, con el piloto mirando la órtesis.
 
 ### CP4: recuperación en 120 s o menos
 
@@ -193,7 +209,7 @@ En este orden:
    python tablero.py                                              # terminal 1
    python repetir_sesion.py --ultima --velocidad 2 --puerto COM4  # terminal 2
    ```
-   `--ultima` toma la sesión real más reciente; también se le puede dar un archivo `resultados/sesion_real_<fecha>_estado.jsonl`. Empieza en el lazo y conserva los checkpoints. Es una repetición: nada se decide en vivo, y hay que decirlo. Atajo: `python demo.py planb --puerto COM4` (si no hay sesión grabada, lo dice y no abre nada).
+   `--ultima` toma la sesión real más reciente **que llegó al lazo**: ignora las que un NO GO detuvo en la calibración (no tienen ningún paso), así que tras una parada repite la última sesión buena. También se le puede dar un archivo `resultados/sesion_real_<fecha>_estado.jsonl`. Empieza en el lazo y conserva los checkpoints. Es una repetición: nada se decide en vivo, y hay que decirlo. Atajo: `python demo.py planb --puerto COM4` (si no hay ninguna sesión real grabada con lazo, lo dice y no abre nada).
 2. **El gemelo digital en vivo**, sin casco. El lazo completo corre de verdad, pero el cerebro es sintético:
    ```bash
    python cerebro_sintetico.py                 # terminal 1, en lugar del puente

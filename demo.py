@@ -83,14 +83,14 @@ def revisar_codigo(git=_git):
     return out
 
 
-def revisar_dependencias(plan, ortesis_sim, sin_tablero, importar=importlib.import_module, ortesis_udp=None):
+def revisar_dependencias(plan, ortesis_sim, sin_tablero, importar=importlib.import_module, ortesis_udp=None, mano_virtual=False):
     """Importa de verdad lo que hace falta (pylsl carga liblsl; brainflow, su biblioteca nativa)."""
     requeridas = ['numpy', 'scipy', 'sklearn', 'pylsl', 'pyriemann']
     if plan == 'casco':
         requeridas.append('brainflow')
     if not ortesis_sim and not ortesis_udp:         # por Wi-Fi no hace falta pyserial
         requeridas.append('serial')
-    if not sin_tablero:
+    if not sin_tablero or mano_virtual:             # la mano virtual tambien es una ventana Qt
         requeridas.append('pyqtgraph')
     faltan = []
     for nombre in requeridas:
@@ -225,7 +225,7 @@ def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time, 
         else:
             from verificar_unicorn import CRITICAS
             res = d.get('por_fuente', {}).get(fuente)
-            malas = sorted({r['clave'] for r in res or [] if r['clave'] in CRITICAS and r['estado'] != 'OK'}) if res else None
+            malas = sorted({r['clave'] for r in res or [] if (r['clave'] in CRITICAS and r['estado'] != 'OK') or (r['clave'] == 'toques' and r['estado'] == 'FALLA')}) if res else None
             if res is None:
                 out.append(rev('verif_casco', AVISO, f'la verificacion de hoy no probo la fuente {fuente}', f'Corre {cmd}.'))
             elif malas:
@@ -269,10 +269,12 @@ def revisar_llave():
 
 def revisar_plan_b(resultados=None, ahora=time.time):
     resultados = Path(resultados or config.RESULTADOS)
-    hay = sorted(resultados.glob('sesion_real_*' + config.SUFIJO_ESTADO), key=lambda p: p.stat().st_mtime) if resultados.exists() else []
+    import repetir_sesion
+    hay = repetir_sesion.sesiones('real', resultados) if resultados.exists() else []   # solo las que llegaron al lazo
     if not hay:
-        return [rev('plan_b', AVISO, 'no hay ninguna sesion real grabada para repetir',
-                    'Tras el primer ensayo bueno guarda resultados/sesion_real_*_estado.jsonl (es el plan B).')]
+        return [rev('plan_b', AVISO, 'no hay ninguna sesion real grabada con lazo para repetir',
+                    'Tras el primer ensayo bueno guarda resultados/sesion_real_*_estado.jsonl (es el plan B); una sesion '
+                    'detenida en la calibracion no cuenta.')]
     return [rev('plan_b', OK, f'{len(hay)} sesion(es) para repetir; la ultima: {hay[-1].name}')]
 
 
@@ -287,7 +289,8 @@ def revisar_disco(ruta=None, uso=shutil.disk_usage):
 def preflight(a):
     """Todas las comprobaciones, en el orden en que importan. Devuelve la lista de revisiones."""
     out = revisar_codigo()
-    out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero, ortesis_udp=a.ortesis_udp)
+    out += revisar_dependencias(a.plan, a.ortesis_sim, a.sin_tablero, ortesis_udp=a.ortesis_udp,
+                                mano_virtual=getattr(a, 'mano_virtual', False))
     out += revisar_modelos()
     out += revisar_flujos(a.plan)
     out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto, plan=a.plan)
@@ -337,6 +340,9 @@ def comandos(plan, a, extras=(), ahora=time.time):
         cmd['tablero'] = ('tablero.py', t)
     if a.narrador:
         cmd['narrador'] = ('narrador.py', ['--idioma', a.idioma])
+    if getattr(a, 'mano_virtual', False):                 # la mano a pantalla completa, de segunda pantalla o en lugar de la ortesis
+        pantalla = getattr(a, 'pantalla', None)
+        cmd['mano'] = ('mano_virtual.py', [] if pantalla is None else ['--pantalla', str(pantalla)])
     if a.ortesis_sim:
         orq = ['real', '--ortesis-sim']
     elif a.ortesis_udp:
@@ -345,6 +351,8 @@ def comandos(plan, a, extras=(), ahora=time.time):
         orq = ['real', '--puerto', a.puerto]
     if plan == 'unicornlsl':
         orq += ['--fuente', 'unicornlsl'] + (['--eeg-nombre', a.eeg_nombre] if a.eeg_nombre else [])
+    if getattr(a, 'mano_virtual', False):
+        orq += ['--mano-virtual']
     cmd['orquestador'] = ('orquestador.py', orq + list(extras))
     return cmd
 
@@ -449,8 +457,17 @@ def escribir_bitacora(datos, ahora=time.time, carpeta=None):
 
 
 # ====================================================================== lanzar
+def _hay_terminal():
+    """Hay alguien al teclado (stdin es una terminal). En mintty con un Python nativo de Windows puede no serlo."""
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+def _esperar_enter():
+    input()
+
+
 def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, correr_foreground=None,
-           hacer_preflight=None, resultados=None, dormir=time.sleep):
+           hacer_preflight=None, resultados=None, dormir=time.sleep, esperar_operador=None):
     """Preflight, procesos de fondo, orquestador en primer plano, cierre y bitacora. Devuelve el codigo de salida.
     Los argumentos con valor por omision existen para probarlo sin red, sin hardware y sin esperar."""
     t0 = time.time()
@@ -494,7 +511,7 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
             procesos.lanzar('fuente', nombre, args)
             esperar_flujo('EEG', resolver, procesos, 'fuente', ESPERA_FLUJO_S[a.plan], dormir=dormir)
             salida('  flujo EEG listo')
-        for clave in ('narrador', 'tablero'):
+        for clave in ('narrador', 'tablero', 'mano'):
             if clave in cmd:
                 procesos.lanzar(clave, *cmd[clave])
                 dormir(2.0)
@@ -503,6 +520,19 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
         salida('  orquestador en esta terminal (Ctrl+C para detener)\n')
         correr_foreground = correr_foreground or _correr_en_primer_plano
         codigo = correr_foreground(argv_de(*cmd['orquestador']))
+        if codigo == config.SALIDA_NO_GO:           # un NO GO detuvo la sesion: no esconderlo cerrando el tablero
+            bitacora['detenido_por_no_go'] = True
+            if procesos.vivo('tablero'):
+                if esperar_operador is None and not _hay_terminal():
+                    salida('Sesion detenida por un NO GO. Sin terminal no hay a quien esperar: el tablero se cierra con la demo '
+                           '(el motivo quedo en la consola del orquestador).')
+                else:
+                    salida('Sesion detenida por un NO GO. El tablero sigue abierto con el motivo y que hacer. '
+                           'Enter cierra todo (Ctrl+C tambien).')
+                    try:
+                        (esperar_operador or _esperar_enter)()
+                    except (EOFError, KeyboardInterrupt):
+                        pass
     except ErrorDemo as e:
         salida(f'ERROR: {e}')
         bitacora['error'] = str(e)
@@ -579,6 +609,9 @@ def argumentos(argv=None):
     p.add_argument('--copiloto', action='store_true')
     p.add_argument('--narrador', action='store_true')
     p.add_argument('--flechas', action='store_true')
+    p.add_argument('--mano-virtual', dest='mano_virtual', action='store_true',
+                   help='abre mano_virtual.py (mano a pantalla completa con las mismas ordenes que la ortesis) y lanza el orquestador con --mano-virtual')
+    p.add_argument('--pantalla', type=int, default=None, help='con --mano-virtual: pantalla donde abrir la mano (0 = la principal)')
     p.add_argument('--idioma', choices=('es', 'en'), default='es')
     p.add_argument('--ignorar-fallas', dest='ignorar_fallas', action='store_true', help='seguir aunque el preflight falle')
     p = sub.add_parser('planb', help='tablero + repeticion de la ultima sesion real', allow_abbrev=False)
