@@ -184,6 +184,17 @@ PASOS_ENSAYO = 5             # pasos por ensayo (misma meta)
 
 # ============================ Senal ============================
 RED_HZ     = 60.0            # Mexico
+# CP1, 60 Hz. La fraccion de potencia en 58-62 Hz sobre 1-100 Hz de UNA ventana de 10 s fluctua con el tiempo (P001 con
+# el casco real, 4 de octubre, 616 s, exploratorio: en Fz, Cz, C3 y PO7 ronda 0.5 y en 18 % de las ventanas de 10 s
+# algun canal pasaba de 0.5; la potencia absoluta de 60 Hz cambia de 3 a 10 uV rms entre ventanas, y no es el movimiento de la
+# cabeza ni el resto del EEG). Al decoder le llega muy atenuado, no desaparece: hardware.filtrar lleva un notch de la
+# red y la banda de MI o de ErrP, y un seno de 60 Hz de 10 uV rms sin EEG queda a -26 dB (MI) y -17 dB (ErrP) con una
+# ventana de 2 s, y a -33 y -24 dB con una de 10 s (README, seccion CP1 y el 60 Hz); no se midio con EEG real. Es un
+# indicador de contacto del electrodo, no de lo que ve el decoder, asi que no debe tumbar el CP1 por una ventana mala.
+# Procedimiento (hardware.EntradaEEG.calidad_robusta): se mide una ventana; los canales que pasan de `umbral` se miden
+# en `ventanas` ventanas seguidas (20 s mas con 3) y se decide por la MEDIANA. Con los datos de P001 simulados: falla
+# 15.6 % -> 6.5 % de los inicios y re-mide en 15.6 %. El umbral NO se movio; solo cambio el estimador.
+CP1_RED = {'umbral': 0.5, 'ventanas': 3}
 BANDA_MI   = (8.0, 30.0)
 BANDA_ERRP = (1.0, 10.0)
 

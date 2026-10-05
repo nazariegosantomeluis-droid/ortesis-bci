@@ -457,9 +457,10 @@ class BackendReal:
         abiertos) y latencia del ACK con metricas robustas (hardware.evaluar_latencias)."""
         aviso('Revisando la calidad de senal: quietos y con los ojos abiertos...')
         time.sleep(self.a.seg_revision)
-        filas = self.eeg.calidad(self.a.seg_revision)
+        filas = self.eeg.calidad_robusta(self.a.seg_revision, avisar=aviso)
         for f in filas:
-            aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%} | "
+            ventanas = f" (mediana de {', '.join(f'{v:.0%}' for v in f['red_ventanas'])})" if 'red_ventanas' in f else ''
+            aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%}{ventanas} | "
                   f"saturado {f['saturado']:4.0%} | {'bien' if f['ok'] else 'REVISAR'}")
         ok_senal = bool(filas) and all(f['ok'] for f in filas)
         malos = [f['canal'] for f in filas if not f['ok']]

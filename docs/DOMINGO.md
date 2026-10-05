@@ -156,7 +156,9 @@ El mensaje dice qué falló.
   1. Reacomoda ese electrodo, agrega gel y espera un minuto.
   2. Vuelve a lanzar el orquestador.
   3. Si sigue mal tras dos intentos, no fuerces: con un canal malo el lazo entra en pausa segura todo el tiempo. Ve al plan B.
-- **No encuentra el flujo `EEG`.** Revisa que el puente siga vivo en la terminal 1 y que ninguna otra aplicación esté conectada al casco. `python ver_flujos.py` debe mostrar un solo `EEG`.
+- **60 Hz alto en un canal** (`60 Hz 62 %`...). El 60 Hz de un electrodo cambia de una ventana a otra (P001, exploratorio: una persona, una sesión), así que el CP1 ya no decide por una sola ventana de 10 s: si un canal pasa de 50 %, mide **20 s más** (lo dice en consola: «60 Hz alto en Fz, Cz: 20 s más…») y decide por la **mediana de 3 ventanas**. Un canal que sigue en `REVISAR` tras eso puede tener el 60 Hz alto de verdad o ser un episodio largo (P001 los tuvo de decenas de segundos): **repite el CP1 una vez**; si vuelve a fallar, más gel y que el cable no cuelgue ni toque otros. Ese 60 Hz llega muy atenuado al decoder (el filtro lleva un notch de la red y un pasa-banda: de −14 a −37 dB con un seno puro, según la banda y la ventana; no medido con EEG real) y es sobre todo un indicador de contacto del electrodo.
+- **No llegaron muestras de EEG** (el CP1 lo dice así). No hay electrodos que reacomodar: revisa que el casco esté encendido y enviando, y que `python ver_flujos.py` muestre un solo `EEG` con datos. Luego vuelve a lanzar el orquestador.
+- **No encuentra el flujo `EEG`.** Revisa que el puente siga vivo en la terminal 1 y que ninguna otra aplicación esté conectada al casco. `python ver_flujos.py` debe mostrar un solo `EEG`. **Límite conocido:** este error ocurre antes del CP1 y el tablero no lo anuncia: el orquestador termina con un traceback («No encontre el flujo de EEG…») en su terminal, sin el aviso grande y sin el código de salida 4.
 - **Latencia del ACK** (MAD > 15 ms, p95 > 60 ms o más de 10 % sin ACK).
   1. Cambia el cable o el puerto USB y cierra lo que use el COM.
   2. Reinicia el ESP32 y repite `python verificar_ortesis.py --puerto COM4`.

@@ -4369,6 +4369,88 @@ def ventana_mi_lazo():
     return f'primer paso = [2, 4] s; el estudio mide pasos y ventanas (BA {ba_ant:.2f} antes del ERD, {ba_tras:.2f} sobre el)'
 
 
+@prueba
+def cp1_red_robusto():
+    """CP1, 60 Hz: una ventana mala no tumba el CP1 (decide la mediana de 3 ventanas para los canales sospechosos), un canal
+    contaminado de verdad sigue fallando, y lo que no es 60 Hz (rms, saturacion) no se toca. EEG sintetico."""
+    import types
+    import hardware as hw
+    fs, seg = 250.0, 4.0
+    n = int(seg * fs)
+    t = np.arange(n) / fs
+    nombres = config.CANALES_EEG
+    assert config.CP1_RED == {'umbral': 0.5, 'ventanas': 3}
+
+    def eeg_falso(amplitudes, saturar=()):
+        """amplitudes[w][canal] = uV del 60 Hz en la ventana w (la ultima se repite). Cada llamada a _crudo avanza una ventana."""
+        estado = {'w': -1}
+
+        def _crudo(segundos):
+            estado['w'] += 1
+            rng = np.random.default_rng(estado['w'])
+            a = amplitudes[min(estado['w'], len(amplitudes) - 1)]
+            x = rng.normal(0, 12.0, (8, n)) + 210_000.0 + np.array(a)[:, None] * np.sin(2 * np.pi * 60.0 * t)
+            for k in saturar:
+                x[k] += 1e6
+            return x, t
+        yo = types.SimpleNamespace(fs=fs, _crudo=_crudo)
+        yo.calidad = lambda s: hw.EntradaEEG.calidad(yo, s)
+        return yo
+
+    limpio, alto = [3.0] * 8, [3.0] * 8
+    alto[2] = 30.0                                              # Cz con el 60 Hz alto (fraccion ~0.8)
+    esperas, avisos = [], []
+    corre = lambda yo: hw.EntradaEEG.calidad_robusta(yo, seg, esperar=esperas.append, avisar=avisos.append)
+    # una sola ventana de 60 Hz alto (la primera) y luego normal: pasa por la mediana. Con la medicion de siempre, fallaba.
+    yo = eeg_falso([alto, limpio, limpio])
+    una = hw.EntradaEEG.calidad(eeg_falso([alto]), seg)
+    assert not una[2]['ok'] and una[2]['red'] > 0.5 and all(f['ok'] for k, f in enumerate(una) if k != 2), [f['red'] for f in una]
+    filas = corre(yo)
+    assert all(f['ok'] for f in filas) and 'red_ventanas' in filas[2] and len(filas[2]['red_ventanas']) == 3
+    assert filas[2]['red_ventanas'][0] > 0.5 > filas[2]['red_ventanas'][1] and filas[2]['red'] == np.median(filas[2]['red_ventanas'])
+    assert esperas == [seg, seg] and len(avisos) == 1 and 'Cz' in avisos[0] and 'mediana de 3' in avisos[0]
+    assert all('red_ventanas' not in f for k, f in enumerate(filas) if k != 2), 'solo se re-miden los sospechosos'
+    # contaminado de verdad (en las tres ventanas, o en dos de tres): falla, y dice cual
+    esperas.clear(), avisos.clear()
+    filas = corre(eeg_falso([alto, alto, alto]))
+    assert [f['canal'] for f in filas if not f['ok']] == ['Cz'] and filas[2]['red'] > 0.5
+    filas = corre(eeg_falso([alto, limpio, alto]))
+    assert not filas[2]['ok'], 'dos de tres ventanas altas: la mediana tambien falla'
+    # todo limpio: no espera nada
+    esperas.clear(), avisos.clear()
+    filas = corre(eeg_falso([limpio]))
+    assert all(f['ok'] for f in filas) and esperas == [] and avisos == []
+    # el que no estaba sospechoso en la primera ventana no se re-mide (y asi se documenta)
+    filas = corre(eeg_falso([limpio, alto, alto]))
+    assert all(f['ok'] for f in filas) and esperas == []
+    # lo que no es 60 Hz sigue igual: un canal saturado o con rms fuera de rango falla aunque el 60 Hz sea bajo
+    filas = corre(eeg_falso([limpio], saturar=[4]))
+    assert not filas[4]['ok'] and filas[4]['saturado'] > 0
+    assert not hw.canal_ok(2.0, 0.1, 0.0) and not hw.canal_ok(80.0, 0.1, 0.0) and hw.canal_ok(10.0, 0.49, 0.0) and not hw.canal_ok(10.0, 0.5, 0.0)
+    # sin ventanas extra (config) se comporta como calidad()
+    previo = dict(config.CP1_RED)
+    config.CP1_RED['ventanas'] = 1
+    try:
+        esperas.clear()
+        assert not corre(eeg_falso([alto]))[2]['ok'] and esperas == []
+    finally:
+        config.CP1_RED.update(previo)
+    # el simulador de estudios/red_cp1.py: un pico de una ventana tumba a la medicion de siempre y no al procedimiento robusto
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import red_cp1
+    C = np.full((60, 8), 0.2)
+    C[5, 2] = 0.9                                               # un solo pico en Cz
+    C[20:50, 3] = 0.7                                           # C4 alto durante 30 ventanas seguidas (sostenido)
+    r = red_cp1.simular(C, ventana_s=10.0, paso_s=2.0, umbral=0.5, ventanas=3)           # 50 inicios; las ventanas extra van +5 y +10 filas
+    assert len(r) == 50 and r[5].tolist() == [True, False, True] and r[0].tolist() == [False, False, False]
+    assert r[25].tolist() == [True, True, True]
+    assert r[:, 0].sum() == 1 + 30 and r[:, 1].sum() == 25, (r[:, 0].sum(), r[:, 1].sum())   # el pico aislado ya no falla; lo sostenido, si
+    # el orquestador usa la robusta
+    fuente = open(config.RAIZ / 'orquestador.py', encoding='utf-8').read()
+    assert 'self.eeg.calidad_robusta(' in fuente and 'self.eeg.calidad(self.a.seg_revision)' not in fuente
+    return 'una ventana alta se corrige con la mediana de 3; contaminacion sostenida, saturacion y rms fuera de rango siguen fallando'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -4383,7 +4465,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']
