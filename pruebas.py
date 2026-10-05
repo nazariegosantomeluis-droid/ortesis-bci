@@ -396,9 +396,46 @@ def ia_sesion():
     err = s.metrica('error', 'tras_perturbacion')
     bien = isn.auditar_texto(f"El error del agente fue {err['error_agente']:.2f} y el de la sombra {err['error_sombra']:.2f} (pasos {err['pasos'][0]} a {err['pasos'][1]}).", s)
     assert not bien['no_encontradas'] and not bien['pasos_inexistentes'], bien
+    # Claude contesta en espanol: coma decimal y el menos de Unicode (visto con la API real el 5 de octubre). Sin normalizar,
+    # «0,3227» eran dos cifras (un 0 que siempre se verifica y un 3227 que nunca); ahora es una, y se compara con el dato.
+    menos = chr(0x2212)                                                   # el menos de Unicode (U+2212): se ve igual que el '-' ASCII
+    assert isn.normalizar_cifras(f'error 0,3227 y {menos}0,01 en 71,4 s; pasos 29, 34, 52') == 'error 0.3227 y -0.01 en 71.4 s; pasos 29, 34, 52'
+    coma = lambda v: f'{v:.4f}'.replace('.', ',')
+    bien_coma = isn.auditar_texto(f"El error del agente fue {coma(err['error_agente'])} y el de la sombra {coma(err['error_sombra'])}.", s)
+    assert bien_coma['cifras'] == 2 and not bien_coma['no_encontradas'], bien_coma
+    mala_coma = isn.auditar_texto(f'El error fue 0,123456 y la diferencia {menos}0,987654.', s)
+    assert mala_coma['cifras'] == 2 and mala_coma['no_encontradas'] == ['0.123456', '-0.987654'], mala_coma
+    # con una API simulada (nunca la real): todo viene de la API; la propuesta coincide con la DECISION de las reglas aunque su
+    # redaccion no, y una cifra que solo esta en el resumen que recibio el co-investigador (exactitud = 1 - error) cuenta como real
+    import json
+    import ia
+    resumen = copiloto.resumen_para_propuesta(s)
+    reglas = ia.propuesta_por_reglas(resumen)
+    cita = f"{resumen['exactitud']:.3f}".replace('.', ',')
+
+    def api(kw):
+        formato = kw.get('output_config', {}).get('format')
+        if formato is None:                                                     # una pregunta del copiloto, sin herramientas
+            return _resp('Respuesta simulada de la API, sin cifras.')
+        if 'accion' in formato['schema']['properties']:                         # la propuesta
+            return _resp(json.dumps({**reglas, 'justificacion': f'Con una exactitud de {cita} no hay motivo para cambiar.'}))
+        return _resp(json.dumps({k: f'texto {k}' for k in copiloto.ESQUEMA_INTERPRETACION['required']}))
+    oa = isn.auditar(orq.ruta_csv, ApiSimulada(*[api] * 30))
+    ca = oa['coinvestigador']
+    assert oa['api'] is True and all(q['origen'] == 'api' for q in oa['preguntas']) and oa['informe']['origen_texto'] == 'api'
+    assert ca['origen'] == oa['informe']['origen_propuesta'] == 'api' and ca['coincide_con_reglas'] is True and ca['propuesta'] != reglas
+    assert ca['auditoria_justificacion']['cifras'] == 1 and not ca['auditoria_justificacion']['no_encontradas'], ca['auditoria_justificacion']
+    mda = isn.a_markdown(oa)
+    assert 'Preguntas respondidas por la API: 6 de 6' in mda and 'no: las reglas' not in mda     # la misma decision no es «no»
     md = isn.a_markdown(o)
     assert md.count('###') == 6 and 'sin API' in md and 'Co-investigador' in md and 'pendientes de una persona' in md
-    return f"6 preguntas auditadas ({sum(len(q['auditoria']['verificadas']) for q in o['preguntas'])} cifras verificadas), propuesta valida, cifras inventadas detectadas"
+    # una propuesta de la API que se descarto (aqui por un 400) no pasa en silencio: el informe dice por que se usaron las reglas
+    caida = {'propuesta': None, 'motivo': 'BadRequestError: 400 esquema invalido'}
+    o2 = {**o, 'api': True, 'coinvestigador': {**o['coinvestigador'], 'rechazada_api': caida}, 'informe': {**o['informe'], 'rechazada_api': caida}}
+    md2 = isn.a_markdown(o2)
+    assert md2.count('BadRequestError: 400 esquema invalido') == 2 and 'Preguntas respondidas por la API: 0 de 6' in md2 and 'BadRequestError' not in md
+    return f"6 preguntas auditadas ({sum(len(q['auditoria']['verificadas']) for q in o['preguntas'])} cifras verificadas), propuesta valida, cifras inventadas detectadas, coma decimal leida, caida de la API a reglas visible"
+@prueba
 def reporte_detector():
     """Reporte del detector al final de CAL_ERRP: cifras exactas con datos conocidos, la figura en es y en, el detector
     guarda sus probabilidades de validacion cruzada, y un fallo del reporte nunca lanza."""
@@ -1323,6 +1360,11 @@ def copiloto_api_simulada():
         assert ia.validar_propuesta(p)[0] is esperado, (nombre, ia.validar_propuesta(p))
     resumen = copiloto.resumen_para_propuesta(s, 'adaptativo')
     assert resumen['pasos'] == len(s.filas_de('adaptativo')) and 0 < resumen['fraccion_congelado'] < 1
+    # el resumen lleva el valor ACTUAL de cada parametro que se puede proponer (menos pausa_s): con la API real, sin ellos propuso
+    # «paso_max = 0.2» sin saber cuanto valia. El orquestador los pisa con los vivos (prueba coinvestigador_entre_bloques).
+    assert set(config.PARAMETROS_PROPUESTA) - {'pausa_s'} <= set(resumen), set(resumen)
+    assert (resumen['paso_visible'], resumen['paso_max'], resumen['ganancia'], resumen['ajenos_cada']) == (
+        config.PASO_VISIBLE, config.PASO_MAX, config.GANANCIA_PASO, config.AJENOS_CADA)
     r = ia.proponer(resumen, ApiSimulada(_resp(json.dumps(casos['fuera de rango'][0]))))
     assert r['origen'] == 'reglas' and r['valida'] and 'fuera del rango seguro' in r['rechazada_api']['motivo'], r
     api = ApiSimulada(_resp(json.dumps(buena)))
@@ -1361,6 +1403,69 @@ def copiloto_api_simulada():
     assert sin['origen_texto'] == 'reglas' and 'movimientos' in sin['archivos'][2].read_text(encoding='utf-8')
     return ('herramientas por la API simulada, "no hay dato" cuando falta, plantillas si la API falla, nada crudo sale, '
             '12 propuestas validadas contra los rangos, informe en 4 Markdown con propuesta pendiente')
+
+
+@prueba
+def ia_esquemas():
+    """Los esquemas de salida estructurada que salen hacia la API no usan nada que ella rechace. Con la API real (5 de octubre)
+    un `type` en lista junto a un `enum` dio un 400 que ApiSimulada no podia ver; problemas_esquema lo detecta sin red, y lo que
+    ia.proponer manda de verdad pasa esa revision."""
+    import copy
+    import json
+    import copiloto
+    import ia
+    for nombre, esq in (('propuesta', ia.ESQUEMA_PROPUESTA), ('interpretacion', copiloto.ESQUEMA_INTERPRETACION)):
+        assert ia.problemas_esquema(esq) == [], (nombre, ia.problemas_esquema(esq))
+    assert ia.ESQUEMA_PROPUESTA['properties']['parametro']['anyOf'][0]['enum'] == list(config.PARAMETROS_PROPUESTA)
+    # el esquema de antes: el que dio el 400 (type en lista con enum), mas lo que una peticion cruda no admite
+    viejo = copy.deepcopy(ia.ESQUEMA_PROPUESTA)
+    viejo['properties']['parametro'] = {'type': ['string', 'null'], 'enum': list(config.PARAMETROS_PROPUESTA) + [None]}
+    viejo['properties']['valor'] = {'type': 'number', 'minimum': 0, 'maximum': 1}
+    del viejo['additionalProperties']
+    malos = ia.problemas_esquema(viejo)
+    assert any('$.parametro' in m and "'type' en lista" in m for m in malos), malos
+    assert any("'minimum'" in m for m in malos) and any("'maximum'" in m for m in malos) and any('$: un objeto' in m for m in malos), malos
+    # lo opcional como anyOf se acepta; un objeto anidado sin additionalProperties se encuentra; una propiedad que se llama
+    # como una palabra reservada no es una palabra reservada
+    anidado = {'type': 'object', 'additionalProperties': False, 'properties': {
+        'a': {'anyOf': [{'type': 'number'}, {'type': 'null'}]}, 'b': {'type': 'array', 'items': {'type': 'object', 'properties': {}}}}}
+    assert ia.problemas_esquema(anidado) == ['$.b.items: un objeto necesita additionalProperties: false']
+    reservadas = {'type': 'object', 'additionalProperties': False, 'properties': {'minimum': {'type': 'string'}, 'type': {'type': 'string'}}}
+    assert ia.problemas_esquema(reservadas) == [] and ia.problemas_esquema(None) == []
+    # lo que ia.proponer manda de verdad
+    buena = {'accion': 'ajustar_parametro', 'parametro': 'paso_visible', 'valor': 0.1, 'justificacion': 'los pasos chicos no se ven'}
+    api = ApiSimulada(_resp(json.dumps(buena)))
+    r = ia.proponer({'pasos': 90, 'ba_viva': 0.8}, api)
+    enviado = api.peticiones[0]['output_config']['format']['schema']
+    assert r['origen'] == 'api' and enviado == ia.ESQUEMA_PROPUESTA and ia.problemas_esquema(enviado) == []
+    # las propuestas que el modelo puede devolver con ese esquema (parametro y valor en null, o con valor) siguen validandose
+    for p in ({'accion': 'continuar', 'parametro': None, 'valor': None, 'justificacion': 'sin motivo'}, buena):
+        assert ia.validar_propuesta(json.loads(json.dumps(p))) == (True, '')
+    return 'esquemas de propuesta e interpretacion sin type en lista ni restricciones; el 400 de la API real queda detectado sin red'
+
+
+@prueba
+def ia_cliente_tiempos():
+    """ia.cliente: sin llave da None; con ella, el tiempo y los reintentos que se piden. El narrador en vivo pide 0 reintentos: con
+    uno, su tope de 6 s eran 12.4 s con la API real (la peticion lenta se repetia). Crear el cliente no llama a la API."""
+    import os
+    import ia
+    previa = os.environ.pop('ANTHROPIC_API_KEY', None)
+    try:
+        assert ia.cliente() is None                                   # config.ARCHIVO_ENV apunta a un archivo que no existe
+        os.environ['ANTHROPIC_API_KEY'] = 'llave-de-mentira-para-la-prueba'
+        try:
+            import anthropic                                          # noqa: F401
+        except ImportError:
+            return 'sin el paquete anthropic: cliente() da None'
+        c, n = ia.cliente(), ia.cliente(config.NARRADOR_API_S, reintentos=0)
+        assert c.max_retries == 1 and c.timeout == config.IA_TIEMPO_MAX_S, (c.max_retries, c.timeout)
+        assert n.max_retries == 0 and n.timeout == config.NARRADOR_API_S, (n.max_retries, n.timeout)
+    finally:
+        os.environ.pop('ANTHROPIC_API_KEY', None)
+        if previa is not None:
+            os.environ['ANTHROPIC_API_KEY'] = previa
+    return f"copiloto y co-investigador: {config.IA_TIEMPO_MAX_S:.0f} s y 1 reintento; narrador: {config.NARRADOR_API_S:.0f} s y 0 reintentos"
 
 
 @prueba
@@ -1469,8 +1574,12 @@ def narrador_jurado():
     for _ in range(5):
         assert n.frase(h) == (n.plantilla(h), 'plantilla')
     p = api.peticiones[0]
-    assert p['model'] == config.IA_MODELO and json.loads(p['messages'][0]['content']) == h and 'espanol' in p['system']
+    assert p['model'] == config.IA_MODELO and json.loads(p['messages'][0]['content']) == h and nr.IDIOMAS_API['es'] in p['system'] and 'acentos' in p['system']
     assert p['output_config'] == {'effort': 'low'}
+    # el idioma va con su ortografia (con «espanol» la API real escribio frases sin acentos) y cada idioma pide el suyo
+    api_en = ApiSimulada(_resp('The agent recovered in 26 steps, about 55 seconds, guided by the pilot\'s brain.'))
+    assert nr.Narrador('en', api_en).frase(h)[1] == 'api' and nr.IDIOMAS_API['en'] in api_en.peticiones[0]['system'] and nr.IDIOMAS_API['es'] not in api_en.peticiones[0]['system']
+    assert nr.IDIOMAS_API.keys() == nr.PLANTILLAS.keys()
     assert n.frase(h, nacio=time.time() - 60) == (n.plantilla(h), 'plantilla') and len(api.peticiones) == 6   # evento viejo: ni pregunta
     assert nr.frase_valida('Fiabilidad del 70 %.', {'f': 0.7}) and not nr.frase_valida('En 3 pasos.', {'pasos': 26})
     # control causal: los pasos traen la letra del bloque; el narrador no dice cual se recupero hasta el final
@@ -1480,7 +1589,12 @@ def narrador_jurado():
     tipos = [x['evento'] for x in hechos]
     assert tipos.count('perturbacion') == 2 and 'recuperacion' not in tipos and 'congelamiento' not in tipos, tipos
     assert 'sham' in tipos
-    assert 'Causal control' in n.plantilla(next(x for x in hechos if x['evento'] == 'sham'))
+    sh = next(x for x in hechos if x['evento'] == 'sham')
+    assert 'Causal control' in n.plantilla(sh)
+    # lo que se le manda a la API dice que es cada cifra (con «agente: 0.19» la API real narro un error como si fuera un puntaje)
+    bloques = [b for b in config.BLOQUES_SHAM if b in sh]
+    assert bloques and all(set(sh[b]) == {'error_del_agente', 'pasos_para_recuperarse'} for b in bloques), sh
+    assert nr.frase_valida('Con el cerebro real el error fue 0.19 en 24 pasos.', {**sh, 'real': {'error_del_agente': 0.19, 'pasos_para_recuperarse': 24}})
     assert config.FLUJOS['Narracion'][0] == 'Markers'
     return f"sesion con caos y falla del detector: {contados}; en el control causal no delata el bloque real"
 
@@ -5323,42 +5437,6 @@ def tablero_detenida():
             'aviso grande, paneles ocultos y se quita con otra sesion (solo con un Qt de mentira: falta probarlo con PyQt)')
 
 
-# Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
-# datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
-# tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'diagnostico_errp_p001', 'barrido_paso', 'comparacion_baselines', 'reporte_detector', 'agente_aprende', 
-           'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
-           'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
-           'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
-           'paso_sin_movimiento',
-           'iic_estimador', 'gemelo_embodiment',
-           'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'plan_b_sin_sesion_detenida', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
-           'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
-           'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
-           'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida']
-CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
-           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
-LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--lsl', action='store_true', help='agrega las pruebas con LSL en tiempo real (~2.5 min)')
-    ap.add_argument('--completa', action='store_true', help='todas, con las sesiones reales contra el gemelo (~10 min)')
-    a = ap.parse_args()
-    nombres = RAPIDAS + (CON_LSL if a.lsl or a.completa else []) + (LAZO_REAL if a.completa else [])
-    print('Pruebas ortesis-bci' + (' (completas)' if a.completa else ' (con LSL)' if a.lsl else ' (rapidas)'))
-    for nombre in nombres:
-        globals()[nombre]()
-    ok = sum(RESULTADOS)
-    print(f'\n{ok}/{len(RESULTADOS)} pruebas pasaron la prueba: {100 * ok / len(RESULTADOS):.1f}%')
-    sys.exit(0 if ok == len(RESULTADOS) else 1)
-
-
-if __name__ == '__main__':
-    main()
 @prueba
 def diagnostico_errp_p001():
     """estudios/diagnostico_errp_p001.py con datos sinteticos: los estratos del diseno y la permutacion que los respeta, el t de
@@ -5474,3 +5552,39 @@ def diagnostico_errp_p001():
     return f"estratos, permutacion con maximo, ortesis simulada y barrido de desfases (ErrP inyectado a +150 ms: AUC maximo {max(sc['auc']):.2f} en {sc['desfases_s'][i] * 1e3:+.0f} ms)"
 
 
+# Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
+# datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
+# tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'diagnostico_errp_p001', 'barrido_paso', 'comparacion_baselines', 'reporte_detector', 'agente_aprende', 
+           'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
+           'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
+           'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
+           'paso_sin_movimiento',
+           'iic_estimador', 'gemelo_embodiment',
+           'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'ia_esquemas', 'ia_cliente_tiempos', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'plan_b_sin_sesion_detenida', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
+           'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
+           'estado_sistema', 'memoria_sesiones',
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida']
+CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
+           'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
+LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--lsl', action='store_true', help='agrega las pruebas con LSL en tiempo real (~2.5 min)')
+    ap.add_argument('--completa', action='store_true', help='todas, con las sesiones reales contra el gemelo (~10 min)')
+    a = ap.parse_args()
+    nombres = RAPIDAS + (CON_LSL if a.lsl or a.completa else []) + (LAZO_REAL if a.completa else [])
+    print('Pruebas ortesis-bci' + (' (completas)' if a.completa else ' (con LSL)' if a.lsl else ' (rapidas)'))
+    for nombre in nombres:
+        globals()[nombre]()
+    ok = sum(RESULTADOS)
+    print(f'\n{ok}/{len(RESULTADOS)} pruebas pasaron la prueba: {100 * ok / len(RESULTADOS):.1f}%')
+    sys.exit(0 if ok == len(RESULTADOS) else 1)
+
+
+if __name__ == '__main__':
+    main()
