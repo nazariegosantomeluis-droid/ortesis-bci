@@ -1963,7 +1963,8 @@ def calibracion_errp_fija():
     b = orquestador.BackendReal.__new__(orquestador.BackendReal)
     b.hw, b.eeg, b.ortesis, b.detector = hw, EEG(), hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0), None
     b.a = types.SimpleNamespace(ensayos_errp=60, p_error=0.3, espera=0.0, forzar=True)
-    orq = types.SimpleNamespace(salidas=Salidas())
+    import cue
+    orq = types.SimpleNamespace(salidas=Salidas(), audio_cue=cue.Audio())
     posiciones, mover = [], b.ortesis.mover
     b.ortesis.mover = lambda fraccion, *r: (posiciones.append(fraccion), mover(fraccion, *r))[1]
     assert b.calibrar_errp(orq)
@@ -3977,6 +3978,102 @@ def toques_electrodos():
     return 'C3 y C4 cruzados: FALLA con sus nombres; bien puesto 8/8; sin toque o flojo: AVISO (datos sinteticos)'
 
 
+@prueba
+def senal_neutra():
+    """CERRAR y RELAJA se ven (y suenan) igual salvo la palabra (o el orden de los dos tonos). Sin Qt: el
+    estilo del tablero sale de cue.estilo(), que no recibe la meta, y aqui se lee el codigo de Tablero._cue."""
+    import ast
+    import inspect
+    from pathlib import Path
+    import cue
+    import orquestador
+    # lo que se ve: misma hoja de estilo para las dos metas (la funcion ni siquiera recibe la meta)
+    assert not inspect.signature(cue.estilo).parameters
+    est = cue.estilo()
+    assert f"font-size:{config.CUE_VISUAL['px']}px" in est and config.CUE_VISUAL['color'] in est and 'monospace' in est
+    assert '#d62728' not in est and '#1f77b4' not in est                            # ni el rojo ni el azul de antes
+    t1, t2 = cue.texto(1), cue.texto(-1)
+    assert (t1, t2) == ('CERRAR', 'RELAJA') and len(t1) == len(t2)                    # misma cantidad de letras
+    assert cue.texto(1, visual=False) == cue.texto(-1, visual=False) == config.CUE_VISUAL['neutro']
+    assert orquestador.linea_cue(1) == '    >>> CERRAR' and orquestador.linea_cue(-1) == '    >>> RELAJA'
+    # el tablero usa esas dos funciones y no lleva un color propio segun la meta
+    fuente = open(Path(__file__).with_name('tablero.py'), encoding='utf-8').read()
+    arbol = ast.parse(fuente)
+    cuerpo = [n for c in arbol.body if isinstance(c, ast.ClassDef) and c.name == 'Tablero'
+              for n in c.body if isinstance(n, ast.FunctionDef) and n.name == '_cue'][0]
+    codigo = ast.get_source_segment(fuente, cuerpo)
+    assert 'cue.estilo()' in codigo and 'cue.texto(' in codigo and '#' not in codigo.split('"""')[2], codigo
+    # lo que se oye: los mismos dos tonos en orden contrario, misma duracion y energia, sin clic
+    a, b = cue.tonos(1), cue.tonos(-1)
+    assert a == b[::-1] and a[0][0] < a[1][0] and sum(ms for _, ms in a) == sum(ms for _, ms in b)
+    wa, wb = np.array(cue.onda(1), dtype=float), np.array(cue.onda(-1), dtype=float)
+    assert len(wa) == len(wb) and abs((wa ** 2).sum() / (wb ** 2).sum() - 1) < 0.01
+    assert abs(wa[0]) < 5 and abs(wa[-1]) < 5 and np.abs(wa).max() <= 0.4 * 32767 + 1
+    # --cue-audio: apagado por defecto y solo con el casco; suena en un hilo; un fallo no detiene nada
+    assert not orquestador.audio_activo(orquestador.argumentos(['real']))
+    assert orquestador.audio_activo(orquestador.argumentos(['real', '--cue-audio']))
+    assert not orquestador.audio_activo(orquestador.argumentos(['sim', '--cue-audio']))
+    sonado, avisos = [], []
+    mudo = cue.Audio(False, reproducir=lambda m: sonado.append(m) or True)
+    mudo.sonar(1)
+    assert sonado == [] and mudo.sonadas == []
+    activo = cue.Audio(True, reproducir=lambda m: sonado.append(m) or True, avisar=avisos.append)
+    activo.sonar(1)
+    activo.esperar()
+    activo.sonar(-1)
+    activo.esperar()
+    assert sonado == [1, -1] and avisos == [] and activo.fallo is None
+    roto = cue.Audio(True, reproducir=lambda m: 1 / 0, avisar=avisos.append)
+    roto.sonar(1)
+    roto.esperar()
+    roto.sonar(-1)
+    roto.esperar()
+    assert len(avisos) == 1 and 'ZeroDivisionError' in avisos[0] and 'visual sigue' in avisos[0], avisos     # una vez
+    sin_audio = cue.Audio(True, reproducir=lambda m: False, avisar=avisos.append)
+    sin_audio.sonar(1)
+    sin_audio.esperar()
+    assert len(avisos) == 2 and sin_audio.fallo
+    # el evento de Estado: --cue-sin-visual lo dice y el tablero muestra solo el '+'
+    assert orquestador.evento_cue(orquestador.argumentos(['real']), 1) == {'tipo': 'cue', 'meta': 1}
+    ev = orquestador.evento_cue(orquestador.argumentos(['real', '--cue-sin-visual']), -1)
+    assert ev == {'tipo': 'cue', 'meta': -1, 'visual': False}
+    assert orquestador.evento_cue(type('A', (), {})(), 1) == {'tipo': 'cue', 'meta': 1}   # Namespace de prueba sin la bandera
+    return 'CERRAR/RELAJA: mismo estilo, misma forma de linea, tonos espejo con la misma energia; audio opcional que no detiene la sesion'
+
+
+@prueba
+def decoder_canales_mi():
+    """El decoder de MI usa solo C3, Cz y C4 por defecto (--decoder-canales mi). En el gemelo no cuesta CP2;
+    que quite una pista visual de los canales posteriores NO se puede ver aqui (el gemelo no la tiene): sale de
+    los datos del casco real (un participante, exploratorio)."""
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import orquestador
+    assert orquestador.argumentos(['real']).decoder_canales == config.DECODER_CANALES_DEFECTO == 'mi'
+    assert orquestador.argumentos(['real', '--decoder-canales', 'auto']).decoder_canales == 'auto'
+    solo = config.candidatos('decoder', 'mi')
+    assert list(solo) == ['C3/Cz/C4'] and solo['C3/Cz/C4'] == config.indices('mi') == [1, 2, 3]
+    assert list(config.candidatos('decoder', 'todos')) == ['8 canales']
+    assert list(config.candidatos('decoder')) == list(config.candidatos('decoder', 'auto')) == ['C3/Cz/C4', '8 canales']   # estudios y banco: como siempre
+    try:
+        config.candidatos('decoder', 'pz')
+        raise AssertionError('debia rechazar un valor desconocido')
+    except ValueError:
+        pass
+    # el decoder queda con C3/Cz/C4, ignora cualquier otro canal (aunque sea un desastre) y pasa CP2 en el gemelo
+    bas = []
+    for semilla in range(4):
+        X, y = cs.sesion_mi(40, semilla=semilla)
+        d = hw.DecoderIM().ajustar(X, y, config.candidatos('decoder', 'mi'))
+        assert d.canales == [1, 2, 3] and d.eleccion == 'C3/Cz/C4' and list(d.puntajes) == ['C3/Cz/C4']
+        roto = X.copy()
+        roto[:, [0, 4, 5, 6, 7]] = 1e6 * np.random.default_rng(semilla).normal(size=roto[:, [0, 4, 5, 6, 7]].shape)
+        assert np.allclose(d.phi(roto[0], actualizar_centro=False), d.phi(X[0], actualizar_centro=False)), 'los canales fuera de C3/Cz/C4 no deben entrar'
+        bas.append(d.ba)
+    assert np.mean(bas) >= config.MI_EXACTITUD_MIN, bas
+    return f'C3/Cz/C4: BA {np.mean(bas):.2f} en el gemelo (4 sujetos, 40 ensayos); los demas canales no entran'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -3991,7 +4088,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

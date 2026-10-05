@@ -382,6 +382,19 @@ python tablero.py --narrador          # franja con la última frase
 
 Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas, contra una sesión del simulador en vivo por LSL. **Sin probar con la API real.**
 
+## Señal de CERRAR y RELAJA neutra, señal auditiva y decoder de MI en C3/Cz/C4
+
+**Qué pasó.** Con el casco real (un participante, la noche del 4 de octubre; **exploratorio**, no es una conclusión sobre personas) la potencia en PO8 y Pz salió más alta en los ensayos de «cerrar» que en los de «relajar» (d de Cohen cerca de +0.5), y la señal del tablero era **roja** para CERRAR y **azul** para RELAJA. Un decoder que mire los canales posteriores puede aprender esa pista visual en lugar del ERD motor, y el CP2 saldría bien por la razón equivocada.
+
+**Qué cambia** (el contrato está en `config.CUE_VISUAL`, `config.CUE_AUDIO` y `config.DECODER_CANALES`; la lógica en `cue.py`):
+
+- **Señal visual idéntica.** CERRAR y RELAJA tienen el mismo color (gris oscuro), tamaño, grosor y ancho (letra monoespaciada y palabras de 6 letras). Solo cambia la palabra. `cue.estilo()` ni siquiera recibe la meta, y una prueba lee el código de `Tablero._cue` para comprobar que no lleva un color propio. La consola usa la misma forma de línea para las dos (`>>> CERRAR` / `>>> RELAJA`); la explicación de qué imaginar se imprime una vez, antes de la primera señal.
+- **Señal auditiva opcional** (`--cue-audio`, solo con el casco): dos tonos seguidos (660 y 990 Hz, 150 ms cada uno), **los mismos en las dos señales y en orden contrario** (sube = CERRAR, baja = RELAJA). Duran lo mismo y suenan igual de fuerte. En Windows suena con `winsound`; en otros sistemas, con `afplay`, `paplay` o `aplay` si existen. Si el sistema no puede sonar, lo dice una vez y la sesión sigue con la señal visual. Suena en un hilo aparte: no frena el lazo.
+- **Solo auditiva** (`--cue-sin-visual`, con `--cue-audio`): el tablero muestra un `+` fijo y la meta llega por el oído. El evento de `Estado` lleva `visual: false`. La consola del operador sí dice la palabra: no se la enseñes al piloto.
+- **Decoder de MI en C3, Cz y C4 por defecto** (`--decoder-canales mi`). Sin elección entre canales, así que la BA que reporta el CP2 es la de la validación cruzada simple. `--decoder-canales auto` vuelve a elegir por validación cruzada anidada entre C3/Cz/C4 y los 8; `todos` fija los 8. Con `--preentrenado` el decoder sigue usando los 8 canales con los que se entrenó (el orquestador lo avisa).
+
+**Lo que sí y lo que no se midió.** En el gemelo (8 sujetos, 60 ensayos) C3/Cz/C4 da BA 0.813 y los 8 canales 0.818, y el CP2 (≥ 0.70) pasa 8 de 8 con cualquiera de los dos: restringir los canales no cuesta nada ahí. **El gemelo no tiene la pista visual posterior**, así que no puede mostrar la ventaja; esa justificación sale solo de los datos del casco real de un participante. Hace falta repetirlo con más personas, y con la señal ya neutra, antes de afirmar que quita el sesgo.
+
 ## Transferencia desde PhysioNet: arrancar la calibración con un decoder pre-entrenado (`--preentrenado`)
 
 ¿Cuántos ensayos de calibración de imaginación motora ahorra empezar con un decoder entrenado con otras personas? Se midió con la **EEG Motor Movement/Imagery Database** (Schalk et al. 2004; PhysioNet, vía `mne.datasets.eegbci`): «mano derecha imaginada» contra «reposo» (corridas 4, 8 y 12), con los 8 canales del Unicorn remuestreados a 250 Hz y la misma ventana y banda del lazo. El decoder es el del proyecto (covarianzas → recentrado riemanniano → espacio tangente → regresión logística). El recentrado es lo que permite transferir: cada persona queda centrada en la identidad, así que un clasificador ajustado con otras se le aplica tal cual; la persona nueva solo aporta su centro, que sale de EEG **sin etiquetas** (su minuto de reposo, o sus propios ensayos).

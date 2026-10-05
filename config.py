@@ -47,12 +47,25 @@ UBICACION_ELECTRODO = {
 }
 
 
-def candidatos(modelo):
+# Canales del decoder de MI en el orquestador (--decoder-canales). 'mi' (por defecto): solo C3, Cz y C4,
+# sin eleccion: con el casco real (P001, exploratorio) la potencia posterior de "cerrar" salio mas alta
+# que la de "relajar", y un decoder con PO7/Oz/PO8/Pz puede aprender esa pista visual en lugar del ERD
+# motor. 'auto': elige por validacion cruzada anidada entre C3/Cz/C4 y los 8 (como antes). 'todos': los 8.
+DECODER_CANALES = ('mi', 'auto', 'todos')
+DECODER_CANALES_DEFECTO = 'mi'
+
+
+def candidatos(modelo, canales='auto'):
     """Configuraciones entre las que elige la calibracion real por validacion cruzada (anidada
-    para reportar): los canales del papel contra los 8 y, en el detector, dos contra tres vistas."""
+    para reportar): los canales del papel contra los 8 y, en el detector, dos contra tres vistas.
+    canales (solo el decoder): 'auto' los dos candidatos, 'mi' solo C3/Cz/C4, 'todos' solo los 8. Con un
+    solo candidato no hay eleccion y la BA es la de la validacion cruzada simple."""
     todos = list(range(len(CANALES_EEG)))
     if modelo == 'decoder':
-        return {'C3/Cz/C4': indices('mi'), '8 canales': todos}
+        if canales not in DECODER_CANALES:
+            raise ValueError(f'canales del decoder: {canales!r}; valores: {DECODER_CANALES}')
+        completo = {'C3/Cz/C4': indices('mi'), '8 canales': todos}
+        return {'mi': {'C3/Cz/C4': completo['C3/Cz/C4']}, 'todos': {'8 canales': todos}}.get(canales, completo)
     return {f'{nc}, {nv} vistas': (c, nv) for nc, c in (('Fz/Cz/Pz', indices('errp')), ('8 canales', todos))
             for nv in ('dos', 'tres')}
 
@@ -96,6 +109,21 @@ def crear_info(nombre):
 # ============================ Marcadores ============================
 CUE_CERRAR      = 'cue_cerrar'
 CUE_RELAJA      = 'cue_relaja'
+
+# Como se ve y se oye la senal de CERRAR / RELAJA. Con el casco real (4 de octubre, P001, exploratorio) la
+# potencia posterior (PO8/Pz) de "cerrar" salio mas alta que la de "relajar" (d ~ +0.5), y la senal era
+# roja contra azul: color y tamano son una pista visual que el decoder puede aprender en lugar del ERD
+# motor. Por eso las dos senales son IDENTICAS en color, tamano, grosor y ancho (letra monoespaciada y
+# palabras de 6 letras): solo cambia la palabra. Con --cue-sin-visual la pantalla muestra solo un "+" fijo
+# y la meta llega por el oido.
+CUE_VISUAL = {
+    'texto': {1: 'CERRAR', -1: 'RELAJA'},
+    'neutro': '+',                           # lo que se ve cuando la senal es solo auditiva
+    'color': '#222222', 'px': 28, 'familia': 'Consolas, "Courier New", monospace',
+}
+# Senal auditiva (--cue-audio): dos tonos seguidos, los MISMOS dos en cada senal y en el orden contrario
+# (sube = CERRAR, baja = RELAJA). Asi duran lo mismo, suenan igual de fuerte y solo difiere el orden.
+CUE_AUDIO = {'frecuencias_hz': (660, 990), 'tono_ms': 150, 'volumen': 0.4}
 PERTURBACION_ON = 'perturbacion:on'
 CENTRADO        = 'centrado'       # la ortesis vuelve al punto medio antes del cue (no es un paso)
 AVISO_AJENO     = 'aviso_ajeno'    # la pantalla anuncia un movimiento ajeno (Tarea 2)

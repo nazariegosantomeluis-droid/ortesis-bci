@@ -52,6 +52,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from pylsl import StreamInlet, resolve_byprop
 
 import config
+import cue
 
 N = 300          # pasos visibles
 COLORES_SALUD = {config.VERDE: '#2ca02c', config.AMARILLO: '#e6b800', config.ROJO: '#d62728',
@@ -87,6 +88,7 @@ class Tablero(QtWidgets.QWidget):
         cab = QtWidgets.QHBoxLayout()
         self.lbl_estado = QtWidgets.QLabel('Esperando al orquestador...')
         self.lbl_cue = QtWidgets.QLabel('')
+        self._cue_visual = True
         self.lbl_cp = QtWidgets.QLabel('')
         for w, tam in ((self.lbl_estado, 16), (self.lbl_cue, 28), (self.lbl_cp, 12)):
             w.setStyleSheet(f'font-size:{tam}px; font-weight:bold; padding:4px;')
@@ -355,6 +357,7 @@ class Tablero(QtWidgets.QWidget):
                 self.lbl_estado.setStyleSheet(f'font-size:16px;font-weight:bold;padding:4px;'
                                               f'color:{COLORES_SALUD[config.ROJO]};')
         elif tipo == 'cue':
+            self._cue_visual = e.get('visual', True)             # --cue-sin-visual: solo el '+'
             self._cue(e['meta'])
         elif tipo == 'aviso_ajeno':                              # Tarea 2: la ortesis se movera sola
             self.lbl_cue.setText('AUTOMATICO')
@@ -447,10 +450,10 @@ class Tablero(QtWidgets.QWidget):
         self.lbl_sham.setText('Control causal · ' + '   |   '.join(partes))
 
     def _cue(self, meta):
-        cerrar = meta > 0
-        self.lbl_cue.setText('CERRAR' if cerrar else 'RELAJA')
-        self.lbl_cue.setStyleSheet(f'font-size:28px;font-weight:bold;padding:4px;'
-                                   f'color:{"#d62728" if cerrar else "#1f77b4"};')
+        """La senal de la meta. Las dos metas se ven IDENTICAS (mismo color, tamano y ancho: cue.estilo no
+        recibe la meta); solo cambia la palabra, o es un '+' fijo si la senal es solo auditiva."""
+        self.lbl_cue.setText(cue.texto(meta, self._cue_visual))
+        self.lbl_cue.setStyleSheet(cue.estilo())
 
     def _iic(self, r):
         if not r or r.get('iic') is None:

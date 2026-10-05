@@ -130,7 +130,7 @@ También acepta `--narrador`, `--copiloto`, `--flechas`, `--idioma en`, `--serie
 | Fase | Duración | Qué hace el piloto |
 |---|---|---|
 | CP1: señal y latencia | 1 min | Quieto, ojos abiertos. Luego la órtesis se mueve sola 40 veces. |
-| Calibración de MI (CP2) | 3 a 6 min | Con `CERRAR`, imagina cerrar la mano derecha (sin moverla); con `RELAJA`, descansa. |
+| Calibración de MI (CP2) | 3 a 6 min | Con `CERRAR`, imagina cerrar la mano derecha (sin moverla); con `RELAJA`, descansa. Las dos palabras se ven idénticas (mismo color y tamaño). Con `--cue-audio` suenan dos tonos: sube = CERRAR, baja = RELAJA; con `--cue-sin-visual` la pantalla solo muestra un `+`. El decoder usa solo C3, Cz y C4 (`--decoder-canales auto` para volver a elegir). |
 | Calibración de ErrP (CP3) | 5 min | Mira la órtesis. La consola dice hacia dónde debe moverse; a veces se equivoca a propósito. |
 | Lazo estático (30 pasos) | 1 min | Igual que en MI: imagina o relaja según la señal. La órtesis ya obedece. |
 | Lazo adaptativo (120 pasos) | 4 min | Igual. En el paso 40 llega la perturbación. Cuando el tablero diga `AUTOMATICO`, la órtesis se mueve sola: solo obsérvala. |

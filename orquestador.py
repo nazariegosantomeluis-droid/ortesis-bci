@@ -46,6 +46,7 @@ import numpy as np
 from pylsl import StreamOutlet, local_clock
 
 import config
+import cue
 import embodiment as emb
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, SenalSham, sigmoide
 from caos import PlanCaos
@@ -54,6 +55,26 @@ from salud import Vigilante
 
 def aviso(txt):
     print(txt, flush=True)
+
+
+INSTRUCCION_CUE = ('Senales: CERRAR = imagina que cierras la mano; RELAJA = imagina que abres y relajas la mano. '
+                   'Las dos se ven y suenan igual salvo la palabra (o el orden de los dos tonos).')
+
+
+def linea_cue(meta):
+    """La linea de consola de una senal: la misma forma para las dos metas."""
+    return f'    >>> {cue.texto(meta)}'
+
+
+def audio_activo(a):
+    """--cue-audio solo suena con el casco (backend real): el simulador no hace ruido."""
+    return bool(getattr(a, 'cue_audio', False)) and getattr(a, 'backend', 'real') == 'real'
+
+
+def evento_cue(a, meta):
+    """El evento de Estado de una senal. Con --cue-sin-visual lleva visual=False y el tablero muestra
+    solo el '+': la meta llega por el oido."""
+    return {'tipo': 'cue', 'meta': meta, **({'visual': False} if getattr(a, 'cue_sin_visual', False) else {})}
 
 
 # ======================================================================
@@ -514,6 +535,10 @@ class BackendReal:
         elif getattr(self.a, 'preentrenado', False):   # arranca del decoder de otras personas (PhysioNet)
             pre = self.hw.cargar(config.DECODER_PREENTRENADO)
             aviso(f"Calibracion de MI desde el decoder pre-entrenado ({pre['personas']} personas; {pre['origen']}).")
+            if getattr(self.a, 'decoder_canales', config.DECODER_CANALES_DEFECTO) == 'mi':
+                aviso('    AVISO: el decoder pre-entrenado usa los 8 canales (se entreno asi); --decoder-canales mi no aplica con '
+                      '--preentrenado. Para C3/Cz/C4 solamente, calibra sin --preentrenado.')
+        aviso(INSTRUCCION_CUE)
         for k in range(self.a.ensayos_mi):
             clase = 1 - y[-1] if (k % 2 and y) else int(rng.permutation([0, 1])[0])   # pares balanceados
 
@@ -521,9 +546,9 @@ class BackendReal:
                 aviso(f'[{k + 1}] preparate...')
                 time.sleep(self.a.espera)
                 orq.salidas.marcador(config.CUE_CERRAR if clase else config.CUE_RELAJA)
-                orq.salidas.estado(tipo='cue', meta=1 if clase else -1)
-                aviso('    >>> CERRAR: imagina que cierras la mano' if clase
-                      else '    >>> RELAJA: imagina que abres y relajas la mano')
+                orq.salidas.estado(**evento_cue(self.a, 1 if clase else -1))
+                orq.audio_cue.sonar(1 if clase else -1)
+                aviso(linea_cue(1 if clase else -1))
                 time.sleep(self.a.duracion_mi)
                 fin = self.eeg.ultimo_t()
                 if self._canales_malos() or self._cabeza_movida(fin - config.VENTANA_MI, fin):
@@ -537,7 +562,8 @@ class BackendReal:
             n = k + 1
             if (n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi) and self._ajustable(y):
                 self.decoder = (self.hw.DecoderIM().ajustar_desde(pre, np.array(X), np.array(y), peso=peso) if pre is not None
-                                else self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos('decoder')))
+                                else self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos(
+                                    'decoder', getattr(self.a, 'decoder_canales', config.DECODER_CANALES_DEFECTO))))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
                                              config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
                 if r != 'seguir':
@@ -583,8 +609,9 @@ class BackendReal:
                     self.ortesis.mover(theta[0], config.CENTRADO_DURACION_MS)
                     time.sleep(min(self.a.espera, config.CENTRADO_DURACION_MS / 1000))
                 aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
-                orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
+                orq.salidas.estado(**evento_cue(self.a, 1 if obj else -1))
                 orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
+                orq.audio_cue.sonar(1 if obj else -1)
                 time.sleep(self.a.espera)
                 theta[0] = float(np.clip(theta[0] + paso, 0.1, 0.9))
                 orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, paso])
@@ -760,7 +787,7 @@ class BackendReal:
 
     # ---------------- lazo ----------------
     def cue(self, meta):
-        aviso('    >>> CERRAR' if meta > 0 else '    >>> RELAJA')
+        aviso(linea_cue(meta))
         time.sleep(config.VENTANA_MI + config.ESPERA_PRIMER_PASO_S)   # la ventana ya en estado estable
 
     def phi(self, meta):
@@ -838,6 +865,8 @@ class Orquestador:
         """inst: instantanea de una sesion a reanudar (cargar_instantanea()), o None."""
         self.b, self.a, self.inst = backend, a, inst
         self.salidas = Salidas()
+        # senal auditiva opcional (--cue-audio); solo con el casco, nunca en el simulador
+        self.audio_cue = cue.Audio(audio_activo(a), avisar=aviso)
         time.sleep(0.5)                              # dar tiempo a que LabRecorder/tablero se conecten
         self.fsm = MaquinaEstados(self.salidas, inst['estado'] if inst else None)
         self.angulo, self.filas, self.desplazamiento = 0.5, [], 0.0
@@ -1349,7 +1378,8 @@ class Orquestador:
 
     def presentar(self, meta):
         self.salidas.marcador(config.CUE_CERRAR if meta > 0 else config.CUE_RELAJA)
-        self.salidas.estado(tipo='cue', meta=meta)
+        self.salidas.estado(**evento_cue(self.a, meta))
+        self.audio_cue.sonar(meta)
         self.b.cue(meta)
 
     # ---------------- evaluacion ----------------
@@ -1585,6 +1615,14 @@ def argumentos(argv=None):
     ap.add_argument('--min_mi', type=int, default=36)
     ap.add_argument('--ensayos_errp', type=int, default=120,
                     help='epocas de calibracion de ErrP; siempre se usan todas (sin parada temprana)')
+    ap.add_argument('--decoder-canales', dest='decoder_canales', choices=config.DECODER_CANALES,
+                    default=config.DECODER_CANALES_DEFECTO,
+                    help='canales del decoder de MI: mi = solo C3/Cz/C4 (por defecto), auto = elige entre eso y los 8 '
+                         'por validacion cruzada, todos = los 8')
+    ap.add_argument('--cue-audio', dest='cue_audio', action='store_true',
+                    help='cada senal de CERRAR/RELAJA tambien suena: dos tonos, sube = CERRAR, baja = RELAJA (solo con el casco)')
+    ap.add_argument('--cue-sin-visual', dest='cue_sin_visual', action='store_true',
+                    help='la pantalla muestra solo un "+" y la meta llega por el oido (usar con --cue-audio)')
     ap.add_argument('--duracion_mi', type=float, default=4.0)
     ap.add_argument('--espera', type=float, default=1.5)
     ap.add_argument('--p_error', type=float, default=0.3)
