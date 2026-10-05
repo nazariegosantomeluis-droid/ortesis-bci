@@ -27,6 +27,11 @@ def filtrar(x, banda, fs, red=config.RED_HZ):
     return sosfiltfilt(sos, sosfiltfilt(tf2sos(b, a), x, axis=-1), axis=-1)
 
 
+def canal_ok(rms_uv, red, saturado):
+    """CP1: un canal esta bien si su rms (1-40 Hz) esta entre 3 y 60 uV, su 60 Hz bajo el umbral y no se satura."""
+    return bool(3 < rms_uv < 60 and red < config.CP1_RED['umbral'] and saturado == 0)
+
+
 def potencia_alfa(x, fs, canales=config.PAPELES['alfa'], banda=config.BANDA_ALFA):
     """Potencia alfa media (uV^2/Hz) de los canales occipitales (semaforo PILOTO), con Welch
     de 2 s. x: canales x muestras, crudo. None con menos de 4 s."""
@@ -395,7 +400,35 @@ class EntradaEEG:
         for i, (r, z, s) in enumerate(zip(xf.std(1), red, sat)):
             nombre = config.CANALES_EEG[i] if i < len(config.CANALES_EEG) else f'ch{i}'
             filas.append({'canal': nombre, 'rms_uv': float(r), 'red': float(z),
-                          'saturado': float(s), 'ok': bool(3 < r < 60 and z < 0.5 and s == 0)})
+                          'saturado': float(s), 'ok': canal_ok(r, z, s)})
+        return filas
+
+    def calidad_robusta(self, segundos=10.0, esperar=time.sleep, avisar=None):
+        """calidad() para el CP1, con el 60 Hz medido de forma robusta: los canales que pasan del umbral en la primera
+        ventana se miden en config.CP1_RED['ventanas'] ventanas seguidas y deciden por la MEDIANA (ver config). Sin canales
+        sospechosos no espera nada. La fila trae `red_ventanas` (las fracciones de cada ventana) en los re-medidos.
+        El rms sale de la primera ventana y la saturacion es la peor de todas."""
+        filas = self.calidad(segundos)
+        umbral, n_vent = config.CP1_RED['umbral'], config.CP1_RED['ventanas']
+        dudosos = [k for k, f in enumerate(filas) if f['red'] >= umbral]
+        if not dudosos or n_vent < 2:
+            return filas
+        if avisar:
+            avisar(f"  60 Hz alto en {', '.join(filas[k]['canal'] for k in dudosos)}: {(n_vent - 1) * segundos:.0f} s mas "
+                   f'para decidir por la mediana de {n_vent} ventanas...')
+        reds = {k: [filas[k]['red']] for k in dudosos}
+        sat = {k: filas[k]['saturado'] for k in dudosos}
+        for _ in range(n_vent - 1):
+            esperar(segundos)
+            otra = self.calidad(segundos)
+            for k in dudosos:
+                if k < len(otra):
+                    reds[k].append(otra[k]['red'])
+                    sat[k] = max(sat[k], otra[k]['saturado'])
+        for k in dudosos:
+            f = filas[k]
+            f['red_ventanas'], f['red'], f['saturado'] = reds[k], float(np.median(reds[k])), sat[k]
+            f['ok'] = canal_ok(f['rms_uv'], f['red'], f['saturado'])
         return filas
 
     def cerrar(self):
@@ -1132,6 +1165,7 @@ class DetectorErrP:
         self.canales, self.vistas = list(candidatos[self.eleccion][0]), candidatos[self.eleccion][1]
         self.p_error_cal = float(y.mean())
         self.umbral = self._umbral_neyman_pearson(p_todo[self.eleccion], y)
+        self.p_cv = p_todo[self.eleccion]            # probabilidad por epoca con un modelo que no la vio (reporte_detector.py)
         self.y_cal = y
         if evaluar:
             self.sens = float((self.pred_cv[y == 1] == 1).mean())

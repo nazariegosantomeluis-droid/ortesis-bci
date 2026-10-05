@@ -34,9 +34,31 @@ def leer(ruta):
     return eventos
 
 
+def tiene_pasos(ruta):
+    """True si la sesion grabada llego al lazo (hay al menos un paso). Una sesion que un NO GO detuvo en la calibracion
+    no tiene nada que repetir en el lazo, y NO debe ser la 'ultima' del plan B."""
+    try:
+        with open(ruta, encoding='utf-8') as f:
+            for linea in f:
+                if '"paso"' in linea or '"ajeno"' in linea:
+                    d = json.loads(linea)
+                    if d.get('evento', {}).get('tipo') in ('paso', 'ajeno'):
+                        return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def sesiones(backend='real', carpeta=None):
+    """Las sesiones grabadas de ese backend que llegaron al lazo, de la mas vieja a la mas reciente."""
+    carpeta = Path(carpeta or config.RESULTADOS)
+    rutas = sorted(carpeta.glob(f'sesion_{backend}_*{config.SUFIJO_ESTADO}'), key=lambda r: r.stat().st_mtime)
+    return [r for r in rutas if tiene_pasos(r)]
+
+
 def ultima(backend='real'):
-    """La sesion grabada mas reciente de ese backend, o None."""
-    rutas = sorted(config.RESULTADOS.glob(f'sesion_{backend}_*{config.SUFIJO_ESTADO}'), key=lambda r: r.stat().st_mtime)
+    """La sesion grabada mas reciente de ese backend que llego al lazo, o None."""
+    rutas = sesiones(backend)
     return rutas[-1] if rutas else None
 
 
@@ -87,7 +109,7 @@ def repetir(ruta, velocidad=1.0, completa=False, publicar=None, ortesis=None, do
 def main():
     ap = argparse.ArgumentParser(description='Plan B: repite una sesion grabada en el tablero')
     ap.add_argument('archivo', nargs='?', help=f'resultados/sesion_..{config.SUFIJO_ESTADO}')
-    ap.add_argument('--ultima', action='store_true', help='la sesion grabada mas reciente')
+    ap.add_argument('--ultima', action='store_true', help='la sesion grabada mas reciente que llego al lazo')
     ap.add_argument('--backend', choices=['real', 'sim'], default='real', help='con --ultima: de que tipo')
     ap.add_argument('--velocidad', type=float, default=1.0, help='1 = ritmo original; 2 = al doble; 0 = sin esperas')
     ap.add_argument('--completa', action='store_true', help='tambien la calibracion (por defecto, desde el lazo)')

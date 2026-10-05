@@ -399,6 +399,61 @@ def ia_sesion():
     md = isn.a_markdown(o)
     assert md.count('###') == 6 and 'sin API' in md and 'Co-investigador' in md and 'pendientes de una persona' in md
     return f"6 preguntas auditadas ({sum(len(q['auditoria']['verificadas']) for q in o['preguntas'])} cifras verificadas), propuesta valida, cifras inventadas detectadas"
+def reporte_detector():
+    """Reporte del detector al final de CAL_ERRP: cifras exactas con datos conocidos, la figura en es y en, el detector
+    guarda sus probabilidades de validacion cruzada, y un fallo del reporte nunca lanza."""
+    import tempfile
+    from pathlib import Path
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import reporte_detector as rd
+    # 10 errores y 20 aciertos con puntajes conocidos; umbral 0.5
+    y = np.r_[np.ones(10, int), np.zeros(20, int)]
+    p = np.r_[np.linspace(0.45, 0.95, 10), np.linspace(0.05, 0.60, 20)]
+    r = rd.calcular(p, y, 0.5, None)
+    esperado = {'tp': 9, 'fn': 1, 'fp': int((p[10:] > 0.5).sum())}
+    assert (r['tp'], r['fn'], r['fp']) == (esperado['tp'], esperado['fn'], esperado['fp']), r
+    assert r['tn'] == 20 - r['fp'] and abs(r['sens'] - 0.9) < 1e-9 and abs(r['espec'] - r['tn'] / 20) < 1e-9
+    assert abs(r['ba'] - 0.5 * (r['sens'] + r['espec'])) < 1e-9 and 0.8 < r['auc'] < 1.0 and 0 <= r['ece'] <= 1
+    mp, fr, nc = r['confiabilidad']
+    assert nc.sum() == 30 and np.all(np.diff(mp) >= 0) and np.all((fr >= 0) & (fr <= 1))        # casillas con las 30 epocas, de menor a mayor
+    # con las decisiones de la validacion anidada (las que da el CP3), esas mandan en sens / espec / falsos positivos
+    anid = np.zeros(30, int); anid[:5] = 1; anid[10] = 1
+    r2 = rd.calcular(p, y, 0.5, anid)
+    assert (r2['tp'], r2['fn'], r2['fp'], r2['tn']) == (5, 5, 1, 19)
+    for malo in ((p, np.ones(30, int)), (p[:5], y)):
+        try:
+            rd.calcular(malo[0], malo[1], 0.5, None)
+            raise AssertionError('debia rechazar')
+        except ValueError:
+            pass
+    # un detector de verdad: guarda p_cv y la figura se dibuja en los dos idiomas
+    X, ye = cs.sesion_errp(60, semilla=3)
+    det = hw.DetectorErrP().ajustar(X, ye, config.candidatos('detector'))
+    assert det.p_cv is not None and len(det.p_cv) == len(ye) and 0 <= det.p_cv.min() and det.p_cv.max() <= 1
+    with tempfile.TemporaryDirectory() as d:
+        ruta, res = rd.desde_detector(det, Path(d) / 'det.png')
+        assert ruta is not None and ruta.stat().st_size > 30_000 and abs(res['umbral'] - det.umbral) < 1e-12
+        assert abs(res['sens'] - det.sens) < 1e-9 and abs(res['espec'] - det.espec) < 1e-9       # las del CP3, no las de p_cv
+        assert rd.figura(res, Path(d) / 'en.png', 'en', det.eleccion).stat().st_size > 30_000
+        # nunca lanza: sin probabilidades, o con un detector roto
+        det2 = hw.DetectorErrP()
+        ruta2, motivo = rd.desde_detector(det2, Path(d) / 'no.png')
+        assert ruta2 is None and isinstance(motivo, str) and not (Path(d) / 'no.png').exists()
+        assert rd.desde_detector(None, Path(d) / 'no.png')[0] is None
+        # el gancho de CAL_ERRP: la bandera existe y el metodo del backend dibuja y avisa sin lanzar
+        import orquestador
+        assert orquestador.argumentos(['real']).sin_reporte_detector is False
+        assert orquestador.argumentos(['real', '--sin-reporte-detector']).sin_reporte_detector is True
+        viejo, config.RESULTADOS = config.RESULTADOS, Path(d)
+        try:
+            orquestador.BackendReal.reporte_detector(type('B', (), {'detector': det})(), 123)
+            assert (Path(d) / 'detector_errp_123.png').exists()
+            orquestador.BackendReal.reporte_detector(type('B', (), {'detector': hw.DetectorErrP()})(), 124)    # sin p_cv: avisa, no lanza
+            assert not (Path(d) / 'detector_errp_124.png').exists()
+        finally:
+            config.RESULTADOS = viejo
+    return f"umbral {det.umbral:.2f}, sens {det.sens:.2f}, espec {det.espec:.2f}: figura de confiabilidad, ROC y umbral (es y en)"
 
 
 @prueba
@@ -722,6 +777,72 @@ def repetir_sesion():
         t.close()
     assert rs.ultima('sim').name == ruta.name
     return f'{n} eventos grabados y repetidos ({tipos.count("paso")} pasos, {tipos.count("ajeno")} ajenos); el tablero y la ortesis los siguen'
+
+
+@prueba
+def plan_b_sin_sesion_detenida():
+    """repetir_sesion.tiene_pasos / sesiones / ultima, sin Qt ni LSL: el plan B nunca es una sesion que un NO GO detuvo
+    antes del lazo (solo checkpoint y detenida), un archivo vacio o roto. Cuenta tanto 'paso' como 'ajeno', separa los
+    backends 'real' y 'sim' y lee config.RESULTADOS al llamarla (no al importar)."""
+    import json
+    import tempfile
+    from pathlib import Path
+    import detencion
+    import repetir_sesion as rs
+    suf = config.SUFIJO_ESTADO
+    with tempfile.TemporaryDirectory() as d:
+        carpeta = Path(d)
+
+        def sesion(nombre, tipos, mtime, **extra):
+            return _grabar_estado_falso(carpeta / (nombre + suf), tipos, mtime=mtime, **extra)
+        ajena = sesion('sesion_real_E', ['cue', 'ajeno'], 500)                       # solo un movimiento ajeno: llego al lazo
+        buena = sesion('sesion_real_A', ['checkpoint', 'cue', 'paso', 'paso'], 1000)
+        detenida = sesion('sesion_real_B', ['checkpoint', 'detenida'], 2000, detenida=detencion.evento(3, 'ErrP: BA 0.60', {'ba': 0.6}))
+        vacia = carpeta / ('sesion_real_C' + suf)
+        vacia.write_text('', encoding='utf-8')
+        os.utime(vacia, (3000, 3000))
+        rota = carpeta / ('sesion_real_D' + suf)                                      # la linea de paso quedo a medias
+        rota.write_text('{"t": 1.0, "evento": {"tipo": "paso", \n', encoding='utf-8')
+        os.utime(rota, (4000, 4000))
+        no_json = carpeta / ('sesion_real_H' + suf)
+        no_json.write_text('esto no es json\n\n', encoding='utf-8')
+        os.utime(no_json, (4100, 4100))
+        # lineas que dicen "paso" sin ser un paso: un checkpoint con esa clave y un marcador llamado asi
+        engano = carpeta / ('sesion_real_I' + suf)
+        engano.write_text(json.dumps({'t': 1.0, 'evento': {'tipo': 'checkpoint', 'paso': 3, 'ajeno': 1}}) + '\n'
+                          + json.dumps({'t': 2.0, 'marcador': 'paso'}) + '\n', encoding='utf-8')
+        os.utime(engano, (4200, 4200))
+        sim = sesion('sesion_sim_F', ['checkpoint', 'paso'], 5000)
+        (carpeta / 'sesion_real_G.csv').write_text('a,b\n1,2\n', encoding='utf-8')   # otro archivo de la sesion: no cuenta
+        # una escritura interrumpida despues de un paso valido: la sesion ya llego al lazo
+        cortada = carpeta / ('sesion_real_J' + suf)
+        cortada.write_text(json.dumps({'t': 1.0, 'evento': {'tipo': 'paso', 'paso': 1}}) + '\n{"t": 2.0, "evento": {"tipo": "pa', encoding='utf-8')
+        os.utime(cortada, (600, 600))
+
+        # tiene_pasos: paso y ajeno cuentan; checkpoint y detenida, vacio, roto, un archivo que no existe, no
+        assert rs.tiene_pasos(buena) and rs.tiene_pasos(ajena) and rs.tiene_pasos(sim) and rs.tiene_pasos(cortada)
+        for no in (detenida, vacia, rota, no_json, engano, carpeta / 'no_existe_estado.jsonl'):
+            assert not rs.tiene_pasos(no), no.name
+        # sesiones: solo las que llegaron al lazo, de la mas vieja a la mas reciente, y cada backend por separado
+        assert rs.sesiones('real', carpeta) == [ajena, cortada, buena], [r.name for r in rs.sesiones('real', carpeta)]
+        assert rs.sesiones('sim', carpeta) == [sim] and rs.sesiones('otro', carpeta) == []
+        assert rs.sesiones('real', carpeta / 'no_existe') == []
+        # ultima(): la buena aunque la detenida (y los archivos vacios y rotos) sean mas nuevos; lee config.RESULTADOS al llamarla
+        anterior = config.RESULTADOS
+        config.RESULTADOS = carpeta
+        try:
+            assert rs.ultima('real') == buena and rs.ultima('sim') == sim and rs.ultima() == buena
+            os.utime(buena, (550, 550))                                               # la buena deja de ser la ultima: gana la otra mas nueva
+            assert rs.ultima('real') == cortada
+            os.utime(buena, (1000, 1000))
+            # solo detenidas, vacias o rotas: no hay ultima (None), no una sesion que no sirve
+            for nombre in (buena, ajena, cortada):
+                nombre.unlink()
+            assert rs.ultima('real') is None and rs.sesiones('real') == [] and rs.ultima('sim') == sim
+        finally:
+            config.RESULTADOS = anterior
+        assert config.RESULTADOS == anterior
+    return 'detenida, vacia, rota y enganos no cuentan; paso y ajeno si; real y sim separados; ultima() usa config.RESULTADOS'
 
 
 @prueba
@@ -2151,7 +2272,8 @@ def calibracion_errp_fija():
     b = orquestador.BackendReal.__new__(orquestador.BackendReal)
     b.hw, b.eeg, b.ortesis, b.detector = hw, EEG(), hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0), None
     b.a = types.SimpleNamespace(ensayos_errp=60, p_error=0.3, espera=0.0, forzar=True)
-    orq = types.SimpleNamespace(salidas=Salidas())
+    import cue
+    orq = types.SimpleNamespace(salidas=Salidas(), audio_cue=cue.Audio())
     posiciones, mover = [], b.ortesis.mover
     b.ortesis.mover = lambda fraccion, *r: (posiciones.append(fraccion), mover(fraccion, *r))[1]
     assert b.calibrar_errp(orq)
@@ -3601,6 +3723,24 @@ def memoria_sesiones():
 
 
 # ------------------------------------------------------------ modo demo automatico (demo.py)
+def _grabar_estado_falso(ruta, tipos, mtime=None, **extra):
+    """Escribe una sesion grabada falsa (_estado.jsonl, como Salidas._registrar): una linea {'t', 'evento'} por evento,
+    con la hora creciente, y la fija con `mtime` si se da. `tipos` son tipos de evento ('paso', 'ajeno', 'checkpoint',
+    'detenida'...); un 'paso' o 'ajeno' trae su numero. Para probar el plan B sin correr una sesion."""
+    import json
+    lineas = []
+    for k, tipo in enumerate(tipos):
+        ev = {'tipo': tipo, **extra.get(tipo, {})}
+        if tipo in ('paso', 'ajeno'):
+            ev.setdefault('paso', k + 1)
+        lineas.append(json.dumps({'t': float(k + 1), 'evento': ev}))
+        lineas.append(json.dumps({'t': float(k + 1), 'marcador': f'm{k}'}))          # los marcadores tambien van en el archivo
+    ruta.write_text('\n'.join(lineas) + '\n', encoding='utf-8')
+    if mtime is not None:
+        os.utime(ruta, (mtime, mtime))
+    return ruta
+
+
 class _ProcesosFalsos:
     """Hace de demo.Procesos sin lanzar nada: anota que se pidio, en que orden, y si se cerro."""
 
@@ -3851,12 +3991,24 @@ def demo_revisiones():
 
         assert demo.revisar_plan_b(carpeta / 'no_existe')[0]['estado'] == 'AVISO'
         assert demo.revisar_plan_b(carpeta)[0]['estado'] == 'AVISO'
-        (carpeta / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        # una sesion detenida por un NO GO (solo checkpoint y detenida, ningun paso) no es plan B, aunque sea la unica o la mas nueva
+        sufijo = config.SUFIJO_ESTADO
+        solo_detenida = carpeta / 'solo_detenida'
+        solo_detenida.mkdir()
+        _grabar_estado_falso(solo_detenida / ('sesion_real_20261004_120000' + sufijo), ['checkpoint', 'detenida'], mtime=2000)
+        r = demo.revisar_plan_b(solo_detenida)[0]
+        assert r['estado'] == 'AVISO' and 'no hay ninguna sesion real grabada' in r['texto'] and 'no cuenta' in r['que_hacer'], r
+        # la buena (con al menos un paso), mas vieja que la detenida: se elige la buena
+        buena = _grabar_estado_falso(carpeta / ('sesion_real_20261004_100000' + sufijo), ['checkpoint', 'paso'], mtime=1000)
         r = demo.revisar_plan_b(carpeta)[0]
-        assert r['estado'] == 'OK' and 'sesion_real_20261004_100000' in r['texto']
-        # el plan B de una sesion simulada no vale como respaldo de la demo
-        (carpeta / ('sesion_sim_20261004_110000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
-        assert '1 sesion(es)' in demo.revisar_plan_b(carpeta)[0]['texto']
+        assert r['estado'] == 'OK' and 'sesion_real_20261004_100000' in r['texto'] and '1 sesion(es)' in r['texto']
+        _grabar_estado_falso(carpeta / ('sesion_real_20261004_120000' + sufijo), ['checkpoint', 'detenida'], mtime=2000)
+        r = demo.revisar_plan_b(carpeta)[0]
+        assert r['estado'] == 'OK' and '1 sesion(es)' in r['texto'] and buena.name in r['texto'] and '120000' not in r['texto'], r
+        # el plan B de una sesion simulada no vale como respaldo de la demo (aunque tenga pasos)
+        _grabar_estado_falso(carpeta / ('sesion_sim_20261004_110000' + sufijo), ['checkpoint', 'paso'], mtime=3000)
+        r = demo.revisar_plan_b(carpeta)[0]
+        assert '1 sesion(es)' in r['texto'] and buena.name in r['texto'] and 'sesion_sim' not in r['texto'], r
 
         assert demo.revisar_disco(carpeta, lambda ruta: type('U', (), {'free': 10 * 10 ** 9})())[0]['estado'] == 'OK'
         r = demo.revisar_disco(carpeta, lambda ruta: type('U', (), {'free': 100 * 10 ** 6})())[0]
@@ -4019,6 +4171,82 @@ def demo_lanzar_simulado():
         assert 'Bitacora' in lineas[-1] and any('gemelo digital, no una persona' in l for l in lineas)
         # el codigo de salida del orquestador es el de la demo (un CP en NO GO se ve, no se esconde)
         assert lanzar(['--plan', 'gemelo', '--ortesis-sim', '--sin-tablero'], correr_foreground=correr(codigo=1))[0] == 1
+        # un NO GO detuvo la sesion (el orquestador sale con config.SALIDA_NO_GO): el tablero se queda abierto con el aviso
+        # hasta que el operador pulse Enter; si no, la demo lo cerraria en el mismo instante y nadie lo veria
+        esperas, falsos = [], _ProcesosFalsos(res / 'logs')
+        codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO),
+                           procesos=falsos, esperar_operador=lambda: esperas.append(falsos.cerrado))      # aun no se cerro nada
+        assert codigo == config.SALIDA_NO_GO and esperas == [False] and p.cerrado and any('tablero sigue abierto' in l for l in lineas)
+        b = json.loads(bitacoras()[-1].read_text(encoding='utf-8'))
+        assert b['detenido_por_no_go'] is True and b['codigo_orquestador'] == config.SALIDA_NO_GO
+        # sin tablero vivo no hay nada que mantener abierto; una sesion normal o interrumpida tampoco espera
+        for kw in (dict(procesos=_ProcesosFalsos(res / 'logs', mueren=['tablero'])), dict(correr_foreground=correr(codigo=0))):
+            kw.setdefault('correr_foreground', correr(codigo=config.SALIDA_NO_GO))
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], esperar_operador=lambda: esperas.append('no debia esperar'), **kw)
+            assert esperas == [False] and p.cerrado, esperas
+        # Ctrl+C o sin teclado durante la espera: se cierra todo igual y el codigo sigue siendo el del NO GO
+        for error in (KeyboardInterrupt(), EOFError()):
+            def interrumpe(error=error):
+                raise error
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), esperar_operador=interrumpe)
+            assert codigo == config.SALIDA_NO_GO and p.cerrado
+        # sin `esperar_operador` decide la terminal: _hay_terminal mira sys.stdin y _esperar_enter es un input() (probados con falsos)
+        import builtins
+
+        class Entrada:
+            def __init__(self, tty):
+                self.tty = tty
+
+            def isatty(self):
+                return self.tty
+        stdin, hay_terminal, input_real = sys.stdin, demo._hay_terminal, builtins.input
+        llamadas = []
+
+        def input_falso(*args):
+            llamadas.append((args, falsos.cerrado))
+            return ''
+        try:
+            sys.stdin = Entrada(True)
+            assert demo._hay_terminal() is True
+            sys.stdin = Entrada(False)
+            assert demo._hay_terminal() is False
+            sys.stdin = None                                       # pythonw o un proceso sin stdin
+            assert demo._hay_terminal() is False
+            falsos = _ProcesosFalsos(res / 'logs')
+            builtins.input = input_falso
+            demo._esperar_enter()
+            assert llamadas == [((), False)], llamadas                # un solo input(), sin texto
+            # sin terminal: lo dice, no espera, cierra todo y el codigo sigue siendo el del NO GO
+            demo._hay_terminal = lambda: False
+            llamadas.clear()
+            falsos = _ProcesosFalsos(res / 'logs')
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), procesos=falsos)
+            assert codigo == config.SALIDA_NO_GO and not llamadas and p.cerrado, llamadas
+            assert any('Sin terminal' in l for l in lineas) and not any('tablero sigue abierto' in l for l in lineas), lineas
+            assert json.loads(bitacoras()[-1].read_text(encoding='utf-8'))['detenido_por_no_go'] is True
+            # con terminal: espera UN Enter con el tablero todavia abierto y despues cierra todo
+            demo._hay_terminal = lambda: True
+            falsos = _ProcesosFalsos(res / 'logs')
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), procesos=falsos)
+            assert codigo == config.SALIDA_NO_GO and llamadas == [((), False)] and p.cerrado, llamadas
+            assert any('tablero sigue abierto' in l for l in lineas) and not any('Sin terminal' in l for l in lineas), lineas
+            # con terminal pero sin teclado a media espera (EOF o Ctrl+C): se cierra igual
+            for error in (EOFError(), KeyboardInterrupt()):
+                def input_roto(*args, error=error):
+                    raise error
+                builtins.input = input_roto
+                falsos = _ProcesosFalsos(res / 'logs')
+                codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=config.SALIDA_NO_GO), procesos=falsos)
+                assert codigo == config.SALIDA_NO_GO and p.cerrado
+            # una sesion normal no espera a nadie, haya o no terminal
+            builtins.input = input_falso
+            llamadas.clear()
+            falsos = _ProcesosFalsos(res / 'logs')
+            codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(codigo=0), procesos=falsos)
+            assert codigo == 0 and not llamadas and p.cerrado
+        finally:
+            sys.stdin, demo._hay_terminal, builtins.input = stdin, hay_terminal, input_real
+        assert demo._hay_terminal is hay_terminal and builtins.input is input_real
         # Ctrl+C: 130, y los procesos de fondo se cierran igual
         codigo, p = lanzar(['--plan', 'gemelo', '--ortesis-sim'], correr_foreground=correr(error=KeyboardInterrupt()))
         assert codigo == 130 and p.cerrado
@@ -4040,7 +4268,16 @@ def demo_lanzar_simulado():
         p = _ProcesosFalsos(res / 'logs')
         assert demo.planb(a, salida=lineas.append, resultados=vacia, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 1
         assert p.pedidos == [] and 'No hay plan B' in lineas[-1]
-        (res / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO)).write_text('{}', encoding='utf-8')
+        # una sesion que un NO GO detuvo antes del lazo (solo checkpoint y detenida) no es plan B: planb no abre nada
+        solo = res / 'solo_detenida'
+        solo.mkdir()
+        _grabar_estado_falso(solo / ('sesion_real_20261004_120000' + config.SUFIJO_ESTADO), ['checkpoint', 'detenida'], mtime=2000)
+        foreground.clear()
+        assert demo.planb(a, salida=lineas.append, resultados=solo, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 1
+        assert p.pedidos == [] and not foreground and 'No hay plan B' in lineas[-1]
+        # con una buena (tiene pasos), aunque la detenida sea mas nueva, si hay plan B
+        _grabar_estado_falso(res / ('sesion_real_20261004_100000' + config.SUFIJO_ESTADO), ['checkpoint', 'paso'], mtime=1000)
+        _grabar_estado_falso(res / ('sesion_real_20261004_120000' + config.SUFIJO_ESTADO), ['checkpoint', 'detenida'], mtime=2000)
         foreground.clear()
         assert demo.planb(a, salida=lineas.append, resultados=res, procesos=p, dormir=lambda s: None, correr_foreground=correr()) == 0
         assert p.pedidos == [('tablero', 'tablero.py', [])] and p.cerrado
@@ -4075,21 +4312,1032 @@ def demo_gemelo_en_vivo():
     return 'gemelo lanzado, visto y cerrado por PID'
 
 
+@prueba
+def toques_electrodos():
+    """La prueba de toques de verificar_unicorn.py: el pico debe salir en el canal tocado. Datos
+    SINTETICOS (ruido, 60 Hz, offset de continua y golpecitos de 150 uV en el canal tocado, 40 uV en sus
+    vecinos): valida la logica, no cuanto responde un electrodo real. Cubre el caso que importa: C3 y C4
+    intercambiados."""
+    import verificar_unicorn as vu
+    fs = 250.0
+    nombres = [n for n, _, _ in vu.fases(solo_toques=True)]
+    segs = [s for _, s, _ in vu.fases(solo_toques=True)]
+    assert nombres[0] == 'reposo' and nombres[1:5] == ['toque_Fz', 'suelta_Fz', 'toque_C3', 'suelta_C3'] and len(nombres) == 17
+    assert [n for n, _, _ in vu.fases(toques=True)][:4] == ['reposo', 'parpadeo', 'cerrados', 'cabeza'] and 'toque_PO8' in [n for n, _, _ in vu.fases(toques=True)]
+    assert 'toque_Fz' not in [n for n, _, _ in vu.fases()]
+    assert all('IZQUIERDA' in t for n, _, t in vu.fases(solo_toques=True) if n == 'toque_C3') and any('DERECHA' in t for n, _, t in vu.fases(solo_toques=True))
+    fase = np.concatenate([np.full(int(s * fs), k) for k, s in enumerate(segs)])
+
+    def senal(semilla=0, intercambio=(), sin_toque=(), debil=()):
+        rng = np.random.default_rng(semilla)
+        n = len(fase)
+        t = np.arange(n) / fs
+        x = rng.normal(0, 8, (8, n)) + 210_000.0 + 20 * np.sin(2 * np.pi * 60 * t)
+        for k, c in enumerate(config.CANALES_EEG):
+            if c in sin_toque:
+                continue
+            ini = np.where(fase == nombres.index(f'toque_{c}'))[0]
+            for t0 in ini[int(0.6 * fs)::int(0.33 * fs)]:                  # golpecitos desde 0.6 s, tres por segundo
+                m = min(int(0.12 * fs), n - t0)
+                golpe = np.exp(-np.arange(m) / (0.03 * fs)) * np.sin(2 * np.pi * 9 * np.arange(m) / fs)
+                x[k, t0:t0 + m] += (60 if c in debil else 150) * golpe
+                for v in (k - 1, k + 1):
+                    if 0 <= v < 8:
+                        x[v, t0:t0 + m] += (35 if c in debil else 40) * golpe
+        for a, b in intercambio:                                            # como si las filas del casco vinieran cruzadas
+            i, j = config.CANALES_EEG.index(a), config.CANALES_EEG.index(b)
+            x[[i, j]] = x[[j, i]]
+        return x
+    est = lambda res: {r['clave']: r['estado'] for r in res}
+    # bien puesto: los 8 en OK y el resumen en OK, con su matriz
+    res = vu.evaluar_toques(senal(), fase, nombres, fs)
+    assert est(res)['toques'] == 'OK' and all(est(res)[f'toque_{c}'] == 'OK' for c in config.CANALES_EEG), res
+    mat = np.array(res[-1]['matriz'])
+    assert mat.shape == (8, 8) and all(np.argmax(mat[k]) == k for k in range(8))
+    # C3 y C4 intercambiados: lo dice con sus nombres, en FALLA, y el veredicto no deja usar la fuente
+    res = vu.evaluar_toques(senal(intercambio=[('C3', 'C4')]), fase, nombres, fs)
+    e = est(res)
+    assert e['toques'] == 'FALLA' and e['toque_C3'] == 'FALLA' and e['toque_C4'] == 'FALLA' and e['toque_Cz'] == 'OK', res
+    assert 'C3 y C4' in res[-1]['texto'] and 'intercambiados' in res[-1]['texto'], res[-1]['texto']
+    assert 'tocaste C3 y respondio mas C4' in [r for r in res if r['clave'] == 'toque_C3'][0]['texto']
+    crit = [{'clave': k, 'estado': 'OK', 'texto': ''} for k in vu.CRITICAS]
+    assert 'usa BrainFlow' in vu.veredicto({'brainflow': crit + [dict(r, estado='OK') for r in res[-1:]]}, None)
+    v = vu.veredicto({'brainflow': crit + res}, None)
+    assert 'NO uses' in v and 'toques' in v and 'C3 y C4' in v, v
+    # un electrodo que no se toco (o no se vio) no se da por bueno ni por malo: AVISO
+    res = vu.evaluar_toques(senal(sin_toque=['Pz']), fase, nombres, fs)
+    e = est(res)
+    assert e['toque_Pz'] == 'AVISO' and e['toques'] == 'AVISO' and e['toque_Cz'] == 'OK', res
+    # toque flojo, con los vecinos casi igual de fuertes: AVISO (margen), nunca FALLA
+    res = vu.evaluar_toques(senal(debil=['Oz']), fase, nombres, fs)
+    assert est(res)['toque_Oz'] in ('AVISO', 'OK') and est(res)['toques'] != 'FALLA'
+    # sin reposo ni pausas con que comparar: no inventa nada
+    assert vu.evaluar_toques(senal(), fase, ['toque_Fz'] * 1, fs)[0]['estado'] == 'AVISO'
+    # la fuente completa pasa por evaluar() (17 canales como la app de g.tec) y los cruzados la tumban
+    n = len(fase)
+
+    def datos17(x):
+        z = np.zeros((17, n))
+        z[:8] = x
+        z[8:11] = np.array([[0.0], [0.0], [1.0]])                           # ~1 g en reposo
+        z[11:14] = 1.0                                                      # giroscopio quieto
+        z[14], z[15], z[16] = 90.0, np.arange(n), 1.0
+        return {'x': z, 'fs': fs, 'fase': fase, 'fases': nombres, 'llegada': np.arange(n) / fs, 'modulo': None,
+                'mapa': {k: config.FUENTES_EEG['unicornlsl'][k] for k in ('eeg', 'imu', 'bateria', 'contador', 'validez')}}
+    ok = {r['clave']: r for r in vu.evaluar(datos17(senal()))}
+    assert ok['toques']['estado'] == 'OK' and ok['eeg_unidades']['estado'] == 'OK' and ok['contador']['estado'] == 'OK', ok
+    cruz = {r['clave']: r for r in vu.evaluar(datos17(senal(intercambio=[('C3', 'C4')])))}
+    assert cruz['toques']['estado'] == 'FALLA' and 'NO uses' in vu.veredicto({'lsl': list(cruz.values())}, 'X')
+    # el preflight de demo.py tambien lo ve
+    import demo
+    import json
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / 'verificacion_unicorn.json').write_text(json.dumps(
+            {'t': 1_000_000.0, 'por_fuente': {'brainflow': [{'clave': k, 'estado': 'OK', 'texto': ''} for k in vu.CRITICAS]
+                                              + [{'clave': 'toques', 'estado': 'FALLA', 'texto': 'x'}]}}), encoding='utf-8')
+        r = demo.revisar_verificaciones('casco', True, Path(d), lambda: 1_000_100.0)[0]
+        assert r['estado'] == 'FALLA' and 'toques' in r['texto'], r
+    return 'C3 y C4 cruzados: FALLA con sus nombres; bien puesto 8/8; sin toque o flojo: AVISO (datos sinteticos)'
+
+
+@prueba
+def senal_neutra():
+    """CERRAR y RELAJA se ven (y suenan) igual salvo la palabra (o el orden de los dos tonos). Sin Qt: el
+    estilo del tablero sale de cue.estilo(), que no recibe la meta, y aqui se lee el codigo de Tablero._cue."""
+    import ast
+    import inspect
+    from pathlib import Path
+    import cue
+    import orquestador
+    # lo que se ve: misma hoja de estilo para las dos metas (la funcion ni siquiera recibe la meta)
+    assert not inspect.signature(cue.estilo).parameters
+    est = cue.estilo()
+    assert f"font-size:{config.CUE_VISUAL['px']}px" in est and config.CUE_VISUAL['color'] in est and 'monospace' in est
+    assert '#d62728' not in est and '#1f77b4' not in est                            # ni el rojo ni el azul de antes
+    t1, t2 = cue.texto(1), cue.texto(-1)
+    assert (t1, t2) == ('CERRAR', 'RELAJA') and len(t1) == len(t2)                    # misma cantidad de letras
+    assert cue.texto(1, visual=False) == cue.texto(-1, visual=False) == config.CUE_VISUAL['neutro']
+    assert orquestador.linea_cue(1) == '    >>> CERRAR' and orquestador.linea_cue(-1) == '    >>> RELAJA'
+    # el tablero usa esas dos funciones y no lleva un color propio segun la meta
+    fuente = open(Path(__file__).with_name('tablero.py'), encoding='utf-8').read()
+    arbol = ast.parse(fuente)
+    cuerpo = [n for c in arbol.body if isinstance(c, ast.ClassDef) and c.name == 'Tablero'
+              for n in c.body if isinstance(n, ast.FunctionDef) and n.name == '_cue'][0]
+    codigo = ast.get_source_segment(fuente, cuerpo)
+    assert 'cue.estilo()' in codigo and 'cue.texto(' in codigo and '#' not in codigo.split('"""')[2], codigo
+    # lo que se oye: los mismos dos tonos en orden contrario, misma duracion y energia, sin clic
+    a, b = cue.tonos(1), cue.tonos(-1)
+    assert a == b[::-1] and a[0][0] < a[1][0] and sum(ms for _, ms in a) == sum(ms for _, ms in b)
+    wa, wb = np.array(cue.onda(1), dtype=float), np.array(cue.onda(-1), dtype=float)
+    assert len(wa) == len(wb) and abs((wa ** 2).sum() / (wb ** 2).sum() - 1) < 0.01
+    assert abs(wa[0]) < 5 and abs(wa[-1]) < 5 and np.abs(wa).max() <= 0.4 * 32767 + 1
+    # --cue-audio: apagado por defecto y solo con el casco; suena en un hilo; un fallo no detiene nada
+    assert not orquestador.audio_activo(orquestador.argumentos(['real']))
+    assert orquestador.audio_activo(orquestador.argumentos(['real', '--cue-audio']))
+    assert not orquestador.audio_activo(orquestador.argumentos(['sim', '--cue-audio']))
+    sonado, avisos = [], []
+    mudo = cue.Audio(False, reproducir=lambda m: sonado.append(m) or True)
+    mudo.sonar(1)
+    assert sonado == [] and mudo.sonadas == []
+    activo = cue.Audio(True, reproducir=lambda m: sonado.append(m) or True, avisar=avisos.append)
+    activo.sonar(1)
+    activo.esperar()
+    activo.sonar(-1)
+    activo.esperar()
+    assert sonado == [1, -1] and avisos == [] and activo.fallo is None
+    roto = cue.Audio(True, reproducir=lambda m: 1 / 0, avisar=avisos.append)
+    roto.sonar(1)
+    roto.esperar()
+    roto.sonar(-1)
+    roto.esperar()
+    assert len(avisos) == 1 and 'ZeroDivisionError' in avisos[0] and 'visual sigue' in avisos[0], avisos     # una vez
+    sin_audio = cue.Audio(True, reproducir=lambda m: False, avisar=avisos.append)
+    sin_audio.sonar(1)
+    sin_audio.esperar()
+    assert len(avisos) == 2 and sin_audio.fallo
+    # el evento de Estado: --cue-sin-visual lo dice y el tablero muestra solo el '+'
+    assert orquestador.evento_cue(orquestador.argumentos(['real']), 1) == {'tipo': 'cue', 'meta': 1}
+    ev = orquestador.evento_cue(orquestador.argumentos(['real', '--cue-sin-visual']), -1)
+    assert ev == {'tipo': 'cue', 'meta': -1, 'visual': False}
+    assert orquestador.evento_cue(type('A', (), {})(), 1) == {'tipo': 'cue', 'meta': 1}   # Namespace de prueba sin la bandera
+    return 'CERRAR/RELAJA: mismo estilo, misma forma de linea, tonos espejo con la misma energia; audio opcional que no detiene la sesion'
+
+
+@prueba
+def decoder_canales_mi():
+    """El decoder de MI usa solo C3, Cz y C4 por defecto (--decoder-canales mi). En el gemelo no cuesta CP2;
+    que quite una pista visual de los canales posteriores NO se puede ver aqui (el gemelo no la tiene): sale de
+    los datos del casco real (un participante, exploratorio)."""
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import orquestador
+    assert orquestador.argumentos(['real']).decoder_canales == config.DECODER_CANALES_DEFECTO == 'mi'
+    assert orquestador.argumentos(['real', '--decoder-canales', 'auto']).decoder_canales == 'auto'
+    solo = config.candidatos('decoder', 'mi')
+    assert list(solo) == ['C3/Cz/C4'] and solo['C3/Cz/C4'] == config.indices('mi') == [1, 2, 3]
+    assert list(config.candidatos('decoder', 'todos')) == ['8 canales']
+    assert list(config.candidatos('decoder')) == list(config.candidatos('decoder', 'auto')) == ['C3/Cz/C4', '8 canales']   # estudios y banco: como siempre
+    try:
+        config.candidatos('decoder', 'pz')
+        raise AssertionError('debia rechazar un valor desconocido')
+    except ValueError:
+        pass
+    # el decoder queda con C3/Cz/C4, ignora cualquier otro canal (aunque sea un desastre) y pasa CP2 en el gemelo
+    bas = []
+    for semilla in range(4):
+        X, y = cs.sesion_mi(40, semilla=semilla)
+        d = hw.DecoderIM().ajustar(X, y, config.candidatos('decoder', 'mi'))
+        assert d.canales == [1, 2, 3] and d.eleccion == 'C3/Cz/C4' and list(d.puntajes) == ['C3/Cz/C4']
+        roto = X.copy()
+        roto[:, [0, 4, 5, 6, 7]] = 1e6 * np.random.default_rng(semilla).normal(size=roto[:, [0, 4, 5, 6, 7]].shape)
+        assert np.allclose(d.phi(roto[0], actualizar_centro=False), d.phi(X[0], actualizar_centro=False)), 'los canales fuera de C3/Cz/C4 no deben entrar'
+        bas.append(d.ba)
+    assert np.mean(bas) >= config.MI_EXACTITUD_MIN, bas
+    return f'C3/Cz/C4: BA {np.mean(bas):.2f} en el gemelo (4 sujetos, 40 ensayos); los demas canales no entran'
+
+
+@prueba
+def mano_virtual_logica():
+    """La mano virtual sin pantalla: geometria, animacion, eventos de Estado, dibujo contra un pintor de registro,
+    el espejo de la ortesis y que la ventana Qt hable el mismo idioma que el pintor. La parte Qt no corre aqui."""
+    import ast
+    import types
+    from pathlib import Path
+    import cue
+    import demo
+    import hardware as hw
+    import mano_virtual as mv
+    import orquestador
+    # geometria: la punta de cada dedo baja y se acerca a la palma al cerrar, sin saltos; cabe en la caja
+    prev = None
+    for c in np.linspace(0, 1, 11):
+        pts = mv.punta_de_dedos(c)
+        if prev is not None:
+            if c <= 0.81:                                    # al final la yema se mete hacia la palma y sube un poco: es el puno
+                assert all(p[1] <= q[1] + 1e-9 for p, q in zip(pts[:4], prev[:4])), f'las puntas de los dedos suben al cerrar ({c:.1f})'
+            assert max(np.hypot(p[0] - q[0], p[1] - q[1]) for p, q in zip(pts, prev)) < 0.45, 'salto de una punta entre dos cierres'
+        prev = pts
+    abierta, cerrada = mv.punta_de_dedos(0.0), mv.punta_de_dedos(1.0)
+    assert all(p[1] > mv.PALMA[-1][1] + 0.5 for p in abierta[:4]), 'abierta, los dedos salen de la palma'
+    assert all(p[1] < mv.PALMA[-1][1] - 0.1 for p in cerrada[:4]), 'cerrada, las puntas quedan por debajo de los nudillos'
+    xmin, ymin, xmax, ymax = mv.CAJA
+    for c in (0.0, 0.5, 1.0):
+        for f in mv.primitivas(c):
+            for x, y in f[1]:
+                assert xmin <= x <= xmax and ymin <= y <= ymax, (c, f[0], x, y)
+    # animacion: arranca de golpe (en 25 ms ya recorrio mas del 15 % de una orden de 250 ms), llega y no retrocede en el tiempo
+    an = mv.Animacion(0.0)
+    an.ir_a(1.0, 0.25, 10.0)
+    assert an.valor(9.9) == 0.0 and an.valor(10.0) == 0.0 and an.valor(10.025) > 0.15 and an.valor(10.125) > 0.7
+    assert abs(an.valor(10.25) - 1.0) < 1e-12 and an.valor(99.0) == 1.0
+    an.ir_a(0.0, 0.25, 10.125)                              # una orden nueva con la anterior a medias: sale de donde esta
+    assert abs(an.valor(10.125) - 0.75) < 1e-9 and an.valor(10.4) == 0.0
+    an.ir_a(5.0, 0.2, 11.0)
+    assert an.destino() == 1.0, 'el destino se recorta a 0..1'
+    # estado: el evento 'mano' manda; 'paso' y 'ajeno' solo valen mientras no haya llegado ninguno
+    st = mv.EstadoMano()
+    st.procesar({'tipo': 'paso', 'angulo': 0.8}, 100.0)
+    assert st.cierre(100.3) == 0.8 and not st.exacto
+    st.procesar({'tipo': 'mano', 'angulo': 0.2, 'ms': 250, 'inicio': 100.4}, 100.35)
+    assert st.exacto and st.cierre(100.39) == 0.8 and abs(st.cierre(100.66) - 0.2) < 1e-9, 'arranca en el inicio que dice el orquestador'
+    st.procesar({'tipo': 'paso', 'angulo': 1.0}, 101.0)
+    assert abs(st.cierre(101.5) - 0.2) < 1e-9, "con el evento 'mano', el 'paso' ya no mueve la mano"
+    st.procesar({'tipo': 'mano', 'angulo': 1.0, 'ms': 250, 'inicio': 7.0}, 102.0)          # de otro reloj: se ignora, arranca ya
+    assert st.cierre(102.3) == 1.0 and st.cierre(102.01) > 0.2
+    st.procesar({'tipo': 'mano', 'angulo': 0.0, 'ms': 5}, 103.0)                              # 5 ms se alarga a lo minimo visible
+    assert 0.2 < st.cierre(103.06) and st.cierre(103.2) == 0.0
+    for raro in ({}, {'tipo': 'salud'}, {'tipo': 'paso'}, {'tipo': 'checkpoint', 'ok': False}):
+        st.procesar(raro, 104.0)                                                              # ni se cae ni mueve la mano
+    assert st.cierre(105.0) == 0.0
+    # la senal de arriba: la misma para las dos metas, salvo la palabra; AUTOMATICO en un movimiento ajeno
+    st = mv.EstadoMano()
+    assert st.rotulo()[0] == ''
+    st.procesar({'tipo': 'cue', 'meta': 1}, 1.0)
+    r1 = st.rotulo()
+    st.procesar({'tipo': 'cue', 'meta': -1}, 2.0)
+    r2 = st.rotulo()
+    assert (r1[0], r2[0]) == ('CERRAR', 'RELAJA') and r1[1] == r2[1], 'mismo color para las dos metas'
+    st.procesar({'tipo': 'cue', 'meta': 1, 'visual': False}, 3.0)
+    assert st.rotulo()[0] == cue.texto(1, visual=False) == '+'
+    st.procesar({'tipo': 'aviso_ajeno'}, 4.0)
+    assert st.rotulo()[0] == 'AUTOMATICO'
+    st.procesar({'tipo': 'ajeno', 'angulo': 0.5}, 5.0)
+    assert st.rotulo()[0] == '+'
+    # dibujo: todo cabe en el cuadro (con su grosor) en pantallas anchas, altas y chicas, y la barra sigue al cierre
+    for w, h in ((1920, 1080), (1080, 1920), (800, 600)):
+        for c in (0.0, 0.5, 1.0):
+            e = mv.EstadoMano()
+            e.animacion = mv.Animacion(c)
+            e.procesar({'tipo': 'cue', 'meta': 1 if c >= 0.5 else -1}, 0.0)
+            pintor = mv.PintorRegistro()
+            mv.dibujar(pintor, w, h, e, 1.0)
+            assert pintor.ordenes[0] == ('rellenar', mv.COLOR_FONDO)
+            for o in pintor.ordenes:
+                if o[0] == 'poligono':
+                    assert all(-1 <= x <= w + 1 and -1 <= y <= h + 1 for x, y in o[1]), (w, h, c)
+                elif o[0] == 'cadena':
+                    g = o[2]
+                    assert all(g / 2 <= x <= w - g / 2 and g / 2 <= y <= h - g / 2 for x, y in o[1]), (w, h, c, 'la mano se sale del cuadro')
+            textos = [o[1] for o in pintor.ordenes if o[0] == 'texto']
+            assert ('CERRAR' if c >= 0.5 else 'RELAJA') in textos and f'{c * 100:.0f} % cerrada' in textos
+            barra = [o for o in pintor.ordenes if o[0] == 'poligono' and o[2] == mv.COLOR_BANDA and o[1][0][1] == o[1][1][1] and len(o[1]) == 4][-1]
+            assert abs((barra[1][1][0] - barra[1][0][0]) - c * 0.5 * w) < 1e-6
+    e = mv.EstadoMano()
+    pintor = mv.PintorRegistro()
+    mv.dibujar(pintor, 800, 600, e, 0.0, conectado=False)
+    assert 'Esperando al orquestador...' in [o[1] for o in pintor.ordenes if o[0] == 'texto']
+    # la imagen de verificacion no necesita Qt
+    import tempfile
+    ruta = Path(tempfile.mkdtemp()) / 'mano.png'
+    e.animacion = mv.Animacion(1.0)
+    mv.imagen(e, ruta, 300, 350)
+    assert ruta.read_bytes()[:8] == b'\x89PNG\r\n\x1a\n' and ruta.stat().st_size > 3000
+    # espejo de la ortesis: publica cada orden con su inicio y deja todo lo demas de la ortesis como estaba
+    pub = []
+    sim = hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0, semilla=3)
+    espejo = mv.espejar(sim, lambda **d: pub.append(d), lambda seq: hw.latencia_mecanica_simulada(seq, sim.semilla))
+    assert espejo is sim and isinstance(sim, hw.OrtesisSimulada)
+    seq, t_ack, _ = sim.mover(0.7)
+    seq2, t_ack2, _ = sim.mover(0.5, config.CENTRADO_DURACION_MS)
+    assert [p['tipo'] for p in pub] == ['mano', 'mano'] and pub[0]['angulo'] == 0.7 and pub[0]['seq'] == seq and pub[0]['ack']
+    assert pub[0]['ms'] == config.DURACION_PASO_MS and pub[1]['ms'] == config.CENTRADO_DURACION_MS
+    lo, hi = config.LATENCIA_MECANICA_SIM_MS
+    assert lo / 1000 <= pub[0]['inicio'] - t_ack <= hi / 1000 + 1e-9 and sim.angulo == 0.5
+    sim.seq = 40                                             # la reanudacion fija el seq en la ortesis, no en el espejo
+    assert sim.mover(0.4)[0] == 41 and pub[-1]['seq'] == 41
+    perdida = types.SimpleNamespace(mover=lambda f, d=250: (9, None, None))             # un ACK perdido tambien se publica
+    pub2 = []
+    mv.espejar(perdida, lambda **d: pub2.append(d))
+    assert perdida.mover(0.3)[0] == 9 and pub2[0]['inicio'] is None and pub2[0]['ack'] is False
+    roto = types.SimpleNamespace(mover=lambda f, d=250: (1, 5.0, None))
+    mv.espejar(roto, lambda **d: 1 / 0)
+    assert roto.mover(0.1) == (1, 5.0, None), 'un fallo al publicar no detiene la sesion'
+    # el orquestador lo cablea con --mano-virtual (apagado por defecto) y el simulador avisa que no tiene ortesis
+    assert not orquestador.argumentos(['real']).mano_virtual and orquestador.argumentos(['real', '--mano-virtual']).mano_virtual
+    avisos, eventos = [], []
+    backend = types.SimpleNamespace(hw=hw, ortesis=hw.OrtesisSimulada(latencia_ms=0.1, jitter_ms=0.0))
+    assert orquestador.espejar_ortesis(backend, types.SimpleNamespace(estado=lambda **d: eventos.append(d)), avisar=avisos.append) is True
+    backend.ortesis.mover(0.6)
+    assert eventos and eventos[0]['tipo'] == 'mano' and 'mano_virtual.py' in avisos[0]
+    assert orquestador.espejar_ortesis(types.SimpleNamespace(hw=hw), None, avisar=avisos.append) is False and 'simulador' in avisos[-1]
+    # demo.py: la abre con --pantalla y lanza el orquestador con --mano-virtual; Qt se exige tambien con --sin-tablero
+    a = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-sim', '--mano-virtual', '--pantalla', '1'])
+    cmd = demo.comandos('gemelo', a)
+    assert cmd['mano'] == ('mano_virtual.py', ['--pantalla', '1']) and cmd['orquestador'][1] == ['real', '--ortesis-sim', '--mano-virtual']
+    assert 'mano' not in demo.comandos('gemelo', demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-sim']))
+    vistos = []
+    demo.revisar_dependencias('gemelo', True, True, importar=vistos.append, mano_virtual=True)
+    assert 'pyqtgraph' in vistos
+    # la ventana Qt traduce el mismo pintor que se probo aqui: mismos metodos, y el codigo al menos se puede leer
+    fuente = Path(mv.__file__).read_text(encoding='utf-8')
+    arbol = ast.parse(fuente)
+    clases = {n.name: n for f in ast.walk(arbol) if isinstance(f, ast.FunctionDef) and f.name == '_crear_ventana'
+              for n in ast.walk(f) if isinstance(n, ast.ClassDef)}
+    metodos = lambda c: {m.name for m in c.body if isinstance(m, ast.FunctionDef) and not m.name.startswith('_')}
+    assert metodos(clases['PintorQt']) == metodos(ast.parse(fuente).body[[getattr(n, 'name', '') for n in arbol.body].index('PintorRegistro')]) - {'ordenes'}
+    import importlib
+    spec = importlib.util.find_spec('pyqtgraph')
+    return 'cierre 0-1 sin saltos, cabe en 3 formatos de pantalla, espejo con inicio = ACK + latencia mecanica' + ('' if spec else ' (la ventana Qt no se pudo correr aqui)')
+
+
+@prueba
+def mano_virtual_ventana_falsa():
+    """Corre el codigo de la ventana Qt contra un Qt de mentira que solo anota las llamadas: atrapa nombres mal escritos,
+    argumentos que no cuadran y errores de logica de la ventana. NO prueba que Qt de verdad dibuje eso (hay que abrirla)."""
+    import sys
+    import types
+    import mano_virtual as mv
+
+    llamadas = []
+
+    class Anota:
+        """Cualquier atributo es una funcion que anota su llamada y devuelve otro Anota."""
+        def __init__(self, nombre='Qt'):
+            self._n = nombre
+
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return Anota(f'{self._n}.{k}')
+
+        def __call__(self, *a, **kw):
+            llamadas.append((self._n, a, kw))
+            return Anota(self._n + '()')
+
+    class Widget:
+        def __init__(self):
+            self.cerrado, self.pantalla_completa, self._w, self._h = False, False, 900, 600
+
+        def width(self):
+            return self._w
+
+        def height(self):
+            return self._h
+
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return lambda *a, **kw: llamadas.append((k, a, kw))
+
+        def close(self):
+            self.cerrado = True
+
+        def isFullScreen(self):
+            return self.pantalla_completa
+
+        def showFullScreen(self):
+            self.pantalla_completa = True
+
+        def showNormal(self):
+            self.pantalla_completa = False
+
+    class Timer:
+        def __init__(self):
+            self.timeout = Anota('timeout')
+            self.periodo = None
+
+        def start(self, ms):
+            self.periodo = ms
+
+    class Pintor(Anota):
+        def viewport(self):
+            return 'viewport'
+    Qt = types.SimpleNamespace(SolidLine=1, RoundCap=2, RoundJoin=3, NoBrush=4, AlignCenter=5, Key_Escape=27, Key_F=70)
+    QtCore = types.SimpleNamespace(Qt=Qt, QTimer=Timer, QPointF=lambda x, y: (x, y), QRectF=lambda *a: a)
+    QtGui = types.SimpleNamespace(QColor=lambda c: c, QPen=lambda *a: ('pluma',) + a, QBrush=lambda c: ('brocha', c),
+                                  QPolygonF=lambda p: list(p), QPainterPath=lambda: Anota('ruta'),
+                                  QFont=lambda *a: Anota('fuente'), QPainter=type('QPainter', (Pintor,), {'Antialiasing': 1}))
+    pantalla = types.SimpleNamespace(geometry=lambda: types.SimpleNamespace(x=lambda: 1920, y=lambda: 0))
+    QtWidgets = types.SimpleNamespace(QWidget=Widget, QApplication=types.SimpleNamespace(screens=lambda: [pantalla, pantalla]))
+    qt = types.ModuleType('pyqtgraph.Qt')
+    qt.QtCore, qt.QtGui, qt.QtWidgets = QtCore, QtGui, QtWidgets
+    pg = types.ModuleType('pyqtgraph')
+    pg.Qt = qt
+    previos = {k: sys.modules.get(k) for k in ('pyqtgraph', 'pyqtgraph.Qt')}
+    sys.modules['pyqtgraph'], sys.modules['pyqtgraph.Qt'] = pg, qt
+    try:
+        st = mv.EstadoMano()
+        v = mv._crear_ventana(st, demo=True, ventana=False, pantalla=1)
+        assert v.pantalla_completa and ('move', (1920, 0), {}) in llamadas and v.timer.periodo == 8
+        v._cuadro()                                          # el guion de --demo da la primera orden
+        assert st.ordenes == 1 and st.rotulo()[0] == 'CERRAR'
+        for _ in range(3):
+            llamadas.clear()
+            v.paintEvent(None)
+            nombres = [n for n, _, _ in llamadas]
+            assert 'viewport' not in nombres and any(n.endswith('drawPolygon') for n in nombres) and any(n.endswith('drawPath') for n in nombres)
+            assert any(n.endswith('drawText') for n in nombres) and any(n.endswith('fillRect') for n in nombres)
+        v.keyPressEvent(types.SimpleNamespace(key=lambda: 70))
+        assert not v.pantalla_completa
+        v.keyPressEvent(types.SimpleNamespace(key=lambda: 70))
+        assert v.pantalla_completa
+        v.keyPressEvent(types.SimpleNamespace(key=lambda: 27))
+        assert v.cerrado
+        w = mv._crear_ventana(mv.EstadoMano(), demo=False, ventana=True)
+        assert not w.pantalla_completa and ('resize', (900, 900), {}) in llamadas
+    finally:
+        for k, m in previos.items():
+            if m is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = m
+    return 'la ventana corre entera contra un Qt de mentira (demo, dibujo, teclas, pantalla 1); falta abrirla con Qt de verdad'
+
+
+@prueba
+def ventana_mi_lazo():
+    """La ventana de MI del primer paso del lazo es la de la calibracion ([2, 4] s tras la senal), el estudio la mide
+    desde los marcadores de una sesion y mide la BA por ventana en un EEG continuo con el ERD solo de 2 s en adelante."""
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import ventana_mi_lazo as vm
+    # las constantes: la calibracion decide con los ultimos VENTANA_MI s de DURACION_MI_S y el primer paso del lazo con lo mismo
+    assert config.MI_VENTANA_OBJETIVO_S == (2.0, 4.0)
+    assert (config.DURACION_MI_S - config.VENTANA_MI, config.DURACION_MI_S) == config.MI_VENTANA_OBJETIVO_S
+    assert vm.primera_ventana_esperada() == config.MI_VENTANA_OBJETIVO_S
+    assert config.VENTANA_MI + config.ESPERA_PRIMER_PASO_S == config.DURACION_MI_S
+    import orquestador
+    assert orquestador.argumentos(['real']).duracion_mi == config.DURACION_MI_S
+    # solapamiento con [2, 4]
+    assert abs(vm.solapamiento(1.05, 3.05) - 1.05) < 1e-9 and vm.solapamiento(2, 4) == 2.0 and vm.solapamiento(4.8, 6.8) == 0.0
+    # marcadores de un lazo con 2 ensayos (el centrado y las ordenes de CP1 y de la calibracion de ErrP no cuentan)
+    reg = [{'t': 0.5, 'marcador': config.CUE_CERRAR}, {'t': 0.9, 'marcador': 'paso_ack:1'},
+           {'t': 5.0, 'marcador': 'bloque:LAZO_ESTATICO'}]
+    for base in (10.0, 20.0):
+        reg += [{'t': base, 'marcador': config.CUE_CERRAR}, {'t': base + 4.05, 'marcador': 'paso_ack:7'},
+                {'t': base + 5.1, 'marcador': 'paso_quieto:8'}, {'t': base + 6.2, 'marcador': 'paso_ack:9'},
+                {'t': base + 6.3, 'evento': {'tipo': 'paso'}}]
+    por = vm.ventanas_por_paso(reg)
+    assert sorted(por) == [1, 2, 3] and all(len(v) == 2 for v in por.values()), por
+    filas = vm.tabla_sesion(por)
+    assert abs(filas[0]['ini'] - 2.05) < 1e-9 and abs(filas[0]['fin'] - 4.05) < 1e-9 and filas[0]['cubre_s'] > 1.94
+    assert filas[1]['cubre_s'] < 1.0 and filas[2]['cubre_s'] == 0.0
+    # BA por ventana: EEG continuo de 250 Hz con 36 ensayos de 4 s; el ERD (potencia 8-30 Hz en C3) solo de 2 s en adelante
+    fs = 250.0
+    rng = np.random.default_rng(0)
+    n = int(fs * 36 * 7)
+    x = rng.normal(0, 1.0, (8, n))
+    t = np.arange(n) / fs
+    cues = [(3.0 + 7.0 * k, 1 if k % 2 == 0 else -1) for k in range(36)]
+    ritmo = np.sin(2 * np.pi * 11 * t)
+    for c, meta in cues:
+        if meta > 0:                                            # una clase deja un ritmo de 11 Hz en C3, pero solo de 2 a 4 s
+            i0, i1 = int((c + 2.0) * fs), int((c + 4.0) * fs)
+            x[1, i0:i1] += 3.0 * ritmo[i0:i1]
+    import hardware as hw
+    xf = hw.filtrar(x, config.BANDA_MI, fs)
+    filas = vm.ba_por_ventana(xf, t, cues, fs, ventanas=((0, 2), (2, 4)), repeticiones=3, permutaciones=20)
+    ba_ant, ba_tras = filas[0][2], filas[1][2]
+    assert ba_tras > 0.85 and ba_ant < 0.75 and filas[1][3] < 0.1 and filas[0][3] > 0.1, filas
+    return f'primer paso = [2, 4] s; el estudio mide pasos y ventanas (BA {ba_ant:.2f} antes del ERD, {ba_tras:.2f} sobre el)'
+
+
+@prueba
+def cp1_red_robusto():
+    """CP1, 60 Hz: una ventana mala no tumba el CP1 (decide la mediana de 3 ventanas para los canales sospechosos), un canal
+    contaminado de verdad sigue fallando, y lo que no es 60 Hz (rms, saturacion) no se toca. EEG sintetico."""
+    import types
+    import hardware as hw
+    fs, seg = 250.0, 4.0
+    n = int(seg * fs)
+    t = np.arange(n) / fs
+    nombres = config.CANALES_EEG
+    assert config.CP1_RED == {'umbral': 0.5, 'ventanas': 3}
+
+    def eeg_falso(amplitudes, saturar=()):
+        """amplitudes[w][canal] = uV del 60 Hz en la ventana w (la ultima se repite). Cada llamada a _crudo avanza una ventana."""
+        estado = {'w': -1}
+
+        def _crudo(segundos):
+            estado['w'] += 1
+            rng = np.random.default_rng(estado['w'])
+            a = amplitudes[min(estado['w'], len(amplitudes) - 1)]
+            x = rng.normal(0, 12.0, (8, n)) + 210_000.0 + np.array(a)[:, None] * np.sin(2 * np.pi * 60.0 * t)
+            for k in saturar:
+                x[k] += 1e6
+            return x, t
+        yo = types.SimpleNamespace(fs=fs, _crudo=_crudo)
+        yo.calidad = lambda s: hw.EntradaEEG.calidad(yo, s)
+        return yo
+
+    limpio, alto = [3.0] * 8, [3.0] * 8
+    alto[2] = 30.0                                              # Cz con el 60 Hz alto (fraccion ~0.8)
+    esperas, avisos = [], []
+    corre = lambda yo: hw.EntradaEEG.calidad_robusta(yo, seg, esperar=esperas.append, avisar=avisos.append)
+    # una sola ventana de 60 Hz alto (la primera) y luego normal: pasa por la mediana. Con la medicion de siempre, fallaba.
+    yo = eeg_falso([alto, limpio, limpio])
+    una = hw.EntradaEEG.calidad(eeg_falso([alto]), seg)
+    assert not una[2]['ok'] and una[2]['red'] > 0.5 and all(f['ok'] for k, f in enumerate(una) if k != 2), [f['red'] for f in una]
+    filas = corre(yo)
+    assert all(f['ok'] for f in filas) and 'red_ventanas' in filas[2] and len(filas[2]['red_ventanas']) == 3
+    assert filas[2]['red_ventanas'][0] > 0.5 > filas[2]['red_ventanas'][1] and filas[2]['red'] == np.median(filas[2]['red_ventanas'])
+    assert esperas == [seg, seg] and len(avisos) == 1 and 'Cz' in avisos[0] and 'mediana de 3' in avisos[0]
+    assert all('red_ventanas' not in f for k, f in enumerate(filas) if k != 2), 'solo se re-miden los sospechosos'
+    # contaminado de verdad (en las tres ventanas, o en dos de tres): falla, y dice cual
+    esperas.clear(), avisos.clear()
+    filas = corre(eeg_falso([alto, alto, alto]))
+    assert [f['canal'] for f in filas if not f['ok']] == ['Cz'] and filas[2]['red'] > 0.5
+    filas = corre(eeg_falso([alto, limpio, alto]))
+    assert not filas[2]['ok'], 'dos de tres ventanas altas: la mediana tambien falla'
+    # todo limpio: no espera nada
+    esperas.clear(), avisos.clear()
+    filas = corre(eeg_falso([limpio]))
+    assert all(f['ok'] for f in filas) and esperas == [] and avisos == []
+    # el que no estaba sospechoso en la primera ventana no se re-mide (y asi se documenta)
+    filas = corre(eeg_falso([limpio, alto, alto]))
+    assert all(f['ok'] for f in filas) and esperas == []
+    # lo que no es 60 Hz sigue igual: un canal saturado o con rms fuera de rango falla aunque el 60 Hz sea bajo
+    filas = corre(eeg_falso([limpio], saturar=[4]))
+    assert not filas[4]['ok'] and filas[4]['saturado'] > 0
+    assert not hw.canal_ok(2.0, 0.1, 0.0) and not hw.canal_ok(80.0, 0.1, 0.0) and hw.canal_ok(10.0, 0.49, 0.0) and not hw.canal_ok(10.0, 0.5, 0.0)
+    # sin ventanas extra (config) se comporta como calidad()
+    previo = dict(config.CP1_RED)
+    config.CP1_RED['ventanas'] = 1
+    try:
+        esperas.clear()
+        assert not corre(eeg_falso([alto]))[2]['ok'] and esperas == []
+    finally:
+        config.CP1_RED.update(previo)
+    # el simulador de estudios/red_cp1.py: un pico de una ventana tumba a la medicion de siempre y no al procedimiento robusto
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import red_cp1
+    C = np.full((60, 8), 0.2)
+    C[5, 2] = 0.9                                               # un solo pico en Cz
+    C[20:50, 3] = 0.7                                           # C4 alto durante 30 ventanas seguidas (sostenido)
+    r = red_cp1.simular(C, ventana_s=10.0, paso_s=2.0, umbral=0.5, ventanas=3)           # 50 inicios; las ventanas extra van +5 y +10 filas
+    assert len(r) == 50 and r[5].tolist() == [True, False, True] and r[0].tolist() == [False, False, False]
+    assert r[25].tolist() == [True, True, True]
+    assert r[:, 0].sum() == 1 + 30 and r[:, 1].sum() == 25, (r[:, 0].sum(), r[:, 1].sum())   # el pico aislado ya no falla; lo sostenido, si
+    # el orquestador usa la robusta
+    fuente = open(config.RAIZ / 'orquestador.py', encoding='utf-8').read()
+    assert 'self.eeg.calidad_robusta(' in fuente and 'self.eeg.calidad(self.a.seg_revision)' not in fuente
+    return 'una ventana alta se corrige con la mediana de 3; contaminacion sostenida, saturacion y rms fuera de rango siguen fallando'
+
+
+@prueba
+def detencion_texto():
+    """detencion.py: que dice la parada de cada CP (el arbol de docs/DOMINGO.md, seccion 5), con los numeros que decidieron el NO GO."""
+    import json
+    import detencion as dt
+    todo = lambda l: ' '.join(l)
+    # CP1: segun lo que fallo, y con el COM solo si la ortesis va por USB
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': ['Fz', 'Cz'], 'latencia_ok': True})
+    assert 'Fz, Cz' in p[0] and 'gel' in p[0] and 'demo.py planb' in todo(p) and 'ESP32' not in todo(p)
+    p = dt.pasos(1, {'senal_ok': True, 'canales_malos': [], 'latencia_ok': False}, 'COM4')
+    assert 'verificar_ortesis.py --puerto COM4' in todo(p) and '--ortesis-sim' in todo(p) and 'gel' not in todo(p)
+    assert 'verificar_ortesis' not in todo(dt.pasos(1, {'latencia_ok': False}, None)) and 'ortesis' in todo(dt.pasos(1, {'latencia_ok': False}))
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': ['C3'], 'latencia_ok': False}, 'COM4')
+    assert 'gel' in todo(p) and 'COM4' in todo(p)
+    # CP1 sin muestras de EEG: el casco no esta enviando, no hay electrodos que reacomodar
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': [], 'sin_muestras': True, 'latencia_ok': True})
+    assert 'No llegaron muestras' in todo(p) and 'ver_flujos.py' in todo(p) and 'REVISAR' not in todo(p) and 'gel' not in todo(p), p
+    p = dt.pasos(1, {'senal_ok': False, 'canales_malos': [], 'sin_muestras': True, 'latencia_ok': False}, 'COM4')
+    assert 'No llegaron muestras' in todo(p) and 'verificar_ortesis.py --puerto COM4' in todo(p) and 'REVISAR' not in todo(p), p
+    assert 'REVISAR' in todo(dt.pasos(1, {'senal_ok': False, 'canales_malos': [], 'sin_muestras': False}))      # mal sin canal nombrado
+    # CP1 con la ortesis simulada: la latencia mala es de la laptop, y no se sugiere pasar a la simulada porque ya lo es
+    p = dt.pasos(1, {'senal_ok': True, 'canales_malos': [], 'latencia_ok': False}, None, simulada=True)
+    assert 'simulada' in todo(p) and 'saturada' in todo(p) and '--ortesis-sim' not in todo(p) and 'verificar_ortesis' not in todo(p), p
+    assert '--ortesis-sim' in todo(dt.pasos(1, {'latencia_ok': False}, None, simulada=False))
+    assert dt.evento(1, 'x', {'latencia_ok': False}, None, True)['que_hacer'] == p              # evento() la pasa tal cual
+    # CP2
+    p = dt.pasos(2, {'ba': 0.65})
+    assert 'cambia de piloto' in todo(p) and '--forzar' in todo(p) and 'sin moverla' in todo(p)
+    assert 'ningun ensayo valido' in todo(dt.pasos(2, {'sin_ensayos': True}))
+    # CP3: las ramas del DOMINGO.md
+    p = todo(dt.pasos(3, {'ba': 0.60, 'espec': 0.95}))
+    assert 'no informa' in p and '--solo-errp' in p and 'planb' in p and '--saltar-calibracion' not in p
+    p = todo(dt.pasos(3, {'ba': 0.80, 'espec': 0.80}))
+    assert 'falsas alarmas' in p and '--solo-errp' in p and '--saltar-calibracion' not in p
+    for ba, espec in ((0.70, 0.95), (0.85, 0.87), (0.70, 0.80), (0.65, 0.90)):       # dos caminos
+        p = todo(dt.pasos(3, {'ba': ba, 'espec': espec}))
+        assert '--solo-errp' in p and '--saltar-calibracion' in p and 'Dos caminos' in p and 'CP4 puede dar NO GO' in p, (ba, espec)
+    assert '--solo-errp' in todo(dt.pasos(3, {'sin_epocas': True}))
+    # los cortes del CP3 son los de config (no numeros sueltos en detencion.py): moverlos mueve las ramas, y en el corte exacto no cambia de rama
+    corte_ba, corte_espec = config.DETENCION_CP3_BA_NO_INFORMA, config.DETENCION_CP3_ESPEC_FALSAS_ALARMAS
+    assert 'no informa' in todo(dt.pasos(3, {'ba': corte_ba - 0.01, 'espec': 0.95})) and 'no informa' not in todo(dt.pasos(3, {'ba': corte_ba, 'espec': 0.95}))
+    ba_alta = config.BA_MIN + 0.05
+    assert 'falsas alarmas' in todo(dt.pasos(3, {'ba': ba_alta, 'espec': corte_espec - 0.01}))
+    assert 'falsas alarmas' not in todo(dt.pasos(3, {'ba': ba_alta, 'espec': corte_espec}))
+    try:
+        config.DETENCION_CP3_BA_NO_INFORMA, config.DETENCION_CP3_ESPEC_FALSAS_ALARMAS = 0.50, 0.70
+        assert 'no informa' not in todo(dt.pasos(3, {'ba': 0.60, 'espec': 0.95})) and 'Dos caminos' in todo(dt.pasos(3, {'ba': 0.60, 'espec': 0.95}))
+        assert 'falsas alarmas' not in todo(dt.pasos(3, {'ba': 0.80, 'espec': 0.80}))
+        assert 'no informa' in todo(dt.pasos(3, {'ba': 0.45, 'espec': 0.95}))
+    finally:
+        config.DETENCION_CP3_BA_NO_INFORMA, config.DETENCION_CP3_ESPEC_FALSAS_ALARMAS = corte_ba, corte_espec
+    # el DOMINGO.md dice los mismos cortes: un umbral movido en config.py sin tocar el arbol (o al reves) se detecta
+    dom = (config.RAIZ / 'docs' / 'DOMINGO.md').read_text(encoding='utf-8')
+    assert '### CP3' in dom and '### CP4' in dom, 'el arbol del DOMINGO.md cambio de forma: ajusta esta prueba'
+    cp3 = dom.split('### CP3')[1].split('### CP4')[0]
+    titulo = cp3.split('\n')[0]
+    assert f'{config.BA_MIN:.2f}' in titulo and f'{config.ESPEC_MIN:.2f}' in titulo, titulo
+    # cada corte aparece en CADA rama del arbol que lo usa (el 0.65 en dos, el 0.85 en dos): cambiar uno solo de los dos numeros se detecta
+    import re
+    llano = ' '.join(re.sub(r'[*_`]', '', cp3).split())                          # sin negritas ni saltos de linea
+    ba, es, ba_min, es_min = (f'{x:.2f}' for x in (corte_ba, corte_espec, config.BA_MIN, config.ESPEC_MIN))
+    for frase in (f'BA entre {ba} y {ba_min}', f'BA por debajo de {ba}', f'especificidad entre {es} y {es_min}', f'especificidad < {es}'):
+        assert frase in llano, f'DOMINGO.md, seccion CP3, ya no dice "{frase}": el arbol y config.DETENCION_CP3_* deben decir lo mismo'
+    # lo que dice el texto existe: cada bandera esta en el arbol del DOMINGO.md y en el orquestador
+    fuente = (config.RAIZ / 'orquestador.py').read_text(encoding='utf-8')
+    for bandera in ('--solo-errp', '--saltar-calibracion', '--forzar', '--ortesis-sim'):
+        assert bandera in dom and f"'{bandera}'" in fuente, bandera
+    assert 'verificar_ortesis.py' in dom and (config.RAIZ / 'verificar_ortesis.py').exists()
+    # sin CP conocido no inventa uno
+    ev = dt.evento(None, 'se detuvo', None)
+    assert ev['titulo'] == 'Sesion detenida' and ev['n'] is None and 'DOMINGO.md' in todo(ev['que_hacer'])
+    assert dt.pasos(4) == dt.pasos(None)
+    # el evento: titulo con el CP, serializable, todo ASCII (regla del proyecto) y escapado para el tablero
+    ev = dt.evento(3, 'ErrP: sens 0.83, espec 0.87, BA 0.85 con 120 epocas (<b>x</b> & y)', {'ba': 0.85, 'espec': 0.87})
+    assert ev['tipo'] == 'detenida' and ev['n'] == 3 and ev['titulo'] == 'Sesion detenida en CP3' and len(ev['que_hacer']) == 3
+    assert json.loads(json.dumps(ev)) == ev
+    for n, datos in ((1, {'senal_ok': False, 'canales_malos': ['Fz']}), (2, {'ba': 0.6}), (3, {'ba': 0.7, 'espec': 0.88}), (3, {'ba': 0.5})):
+        assert all(ord(c) < 128 for c in json.dumps(dt.evento(n, 'x', datos, 'COM4'), ensure_ascii=False))
+    h = dt.html(ev)
+    assert 'Sesion detenida en CP3: ErrP: sens 0.83' in h and '&lt;b&gt;x&lt;/b&gt; &amp; y' in h and '<b>x</b>' not in h
+    assert all(dt.html(dt.evento(3, 'x', {'ba': 0.7, 'espec': 0.88})).count(f) >= 1 for f in ('--solo-errp', '--saltar-calibracion'))
+    c = dt.texto_consola(ev)
+    assert c.startswith('Sesion detenida en CP3: ErrP') and 'Que hacer:' in c and '--solo-errp' in c and 'DOMINGO.md' in c
+    return 'CP1 (con y sin muestras, simulada) a CP3 con sus ramas del arbol, cortes iguales a config y a DOMINGO.md, sin CP no inventa, escapado y ASCII'
+
+
+@prueba
+def detencion_orquestador():
+    """Un NO GO que detiene la sesion se anuncia en Estado (tipo 'detenida') y el orquestador sale con config.SALIDA_NO_GO."""
+    import contextlib
+    import io
+    import types
+    import detencion as dt
+    import orquestador
+    visto = []
+    sal = types.SimpleNamespace(estado=lambda **d: visto.append(d), no_go=None)
+    silencio = lambda: contextlib.redirect_stdout(io.StringIO())
+    # checkpoint(): solo un NO GO sin --forzar deja dicho el motivo
+    with silencio():
+        assert orquestador.checkpoint(sal, 3, True, 'bien', False, datos={'ba': 0.9}) and sal.no_go is None
+        assert orquestador.checkpoint(sal, 3, False, 'mal', True, datos={'ba': 0.6}) and sal.no_go is None
+        assert not orquestador.checkpoint(sal, 4, False, 'lento', False, informativo=True) and sal.no_go is None
+        assert orquestador.checkpoint(sal, 2, False, 'x', False, informativo=True) is False and sal.no_go is None
+        assert not orquestador.checkpoint(sal, 3, False, 'ErrP: sens 0.83, espec 0.87, BA 0.85', False, datos={'ba': 0.85, 'espec': 0.87})
+    assert sal.no_go == {'n': 3, 'motivo': 'ErrP: sens 0.83, espec 0.87, BA 0.85', 'datos': {'ba': 0.85, 'espec': 0.87}}
+    assert [e['ok'] for e in visto if e['tipo'] == 'checkpoint'][-1] is False
+    # anunciar_detencion(): lo publica y lo dice en la terminal
+    orq = types.SimpleNamespace(salidas=sal, fsm=types.SimpleNamespace(estado='CAL_ERRP'))
+    a = orquestador.argumentos(['real', '--puerto', 'COM9'])
+    visto.clear()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ev = orquestador.anunciar_detencion(orq, a)
+    assert visto == [ev] and ev['tipo'] == 'detenida' and ev['n'] == 3 and 'espec 0.87' in ev['motivo'], visto
+    assert '--saltar-calibracion' in buf.getvalue() and 'Sesion detenida en CP3' in buf.getvalue()
+    # CP1 por latencia: el COM de la ortesis por USB, y nada de COM si va simulada o por Wi-Fi AUNQUE se haya dado --puerto
+    sal.no_go = {'n': 1, 'motivo': 'latencia', 'datos': {'senal_ok': True, 'canales_malos': [], 'latencia_ok': False}}
+    for args, hay_com, sugiere_sim, verificar in ((['real', '--puerto', 'COM9'], True, True, True),
+                                                   (['real', '--puerto', 'COM9', '--ortesis-sim'], False, False, False),
+                                                   (['real', '--puerto', 'COM9', '--ortesis-udp'], False, True, False),
+                                                   (['real', '--ortesis-udp', '--puerto', 'COM9'], False, True, False),
+                                                   (['real'], False, True, True)):                     # sin --puerto: el de config
+        with silencio():
+            ev = orquestador.anunciar_detencion(orq, orquestador.argumentos(args))
+        texto = ' '.join(ev['que_hacer'])
+        assert ev['n'] == 1 and ev['titulo'] == 'Sesion detenida en CP1', ev
+        assert ('COM9' in texto) == hay_com, (args, texto)
+        assert ('verificar_ortesis.py' in texto) == verificar and ('--ortesis-sim' in texto) == sugiere_sim, (args, texto)
+        if args == ['real']:
+            assert config.PUERTO_ORTESIS in texto, texto
+        if '--ortesis-sim' in args:                         # la simulada no puede sugerirse a si misma
+            assert 'simulada' in texto, texto
+    # sin motivo dicho: el CP sale del estado de la maquina; sin estado conocido, no inventa
+    sal.no_go = None
+    for estado, n in (('IMPEDANCIAS', 1), ('CAL_MI', 2), ('CAL_ERRP', 3), ('LAZO_ESTATICO', None)):
+        orq.fsm.estado = estado
+        with silencio():
+            ev = orquestador.anunciar_detencion(orq, a)
+        assert ev['n'] == n and 'consola dice por que' in ev['motivo'], (estado, ev)
+
+    # correr(): devuelve SALIDA_NO_GO si preparar() se detuvo, y publica la parada antes de cerrar
+    class Parado:
+        prog, sham, lista = None, None, False
+
+        def __init__(self):
+            self.salidas = types.SimpleNamespace(estado=lambda **d: visto.append(d), no_go={'n': 2, 'motivo': 'MI: BA 0.55', 'datos': {'ba': 0.55}})
+            self.fsm = types.SimpleNamespace(estado='CAL_MI', ir_a=lambda n: None)
+            self.evaluados = self.cerrados = 0
+
+        def preparar(self):
+            return None
+
+        def evaluar(self):
+            self.evaluados += 1
+
+        def cerrar(self):
+            self.cerrados += 1
+    p = Parado()
+    visto.clear()
+    with silencio():
+        codigo = orquestador.correr(p, a)
+    assert codigo == config.SALIDA_NO_GO == 4 and [e['tipo'] for e in visto] == ['detenida'] and visto[0]['n'] == 2
+    assert p.evaluados == 1 and p.cerrados == 1                       # sigue cerrando como siempre
+    # si el aviso mismo falla (Estado caido, por ejemplo) la sesion igual se cierra y sale con 4
+    def estado_roto(**d):
+        raise OSError('Estado caido')
+    p = Parado()
+    p.salidas.estado = estado_roto
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert orquestador.correr(p, a) == config.SALIDA_NO_GO
+    assert p.evaluados == 1 and p.cerrados == 1 and 'no se pudo anunciar la detencion' in buf.getvalue() and 'Estado caido' in buf.getvalue()
+    # una sesion completa sale con 0 (las pruebas del simulador la corren de verdad)
+    b = orquestador.argumentos(['sim', '--ciclo', '0', '--pasos_estatico', '6', '--pasos_adaptativo', '6', '--sin_perturbacion'])
+    with silencio():
+        assert orquestador.correr(orquestador.Orquestador(orquestador.BackendSim(b), b), b) == 0
+    # main(): ese codigo es el de salida del proceso
+    originales = orquestador.BackendSim, orquestador.Orquestador, orquestador.correr
+    try:
+        orquestador.BackendSim, orquestador.Orquestador = (lambda a: None), (lambda *x: None)
+        for devuelve, sale in ((config.SALIDA_NO_GO, config.SALIDA_NO_GO), (0, None)):
+            orquestador.correr = lambda orq, a, d=devuelve: d
+            try:
+                orquestador.main(['sim'])
+                codigo = None
+            except SystemExit as e:
+                codigo = e.code
+            assert codigo == sale, (devuelve, codigo)
+    finally:
+        orquestador.BackendSim, orquestador.Orquestador, orquestador.correr = originales
+    # el cableado, con AST: toda llamada a checkpoint() de un CP que detiene (1, 2 o 3) pasa `datos=`; sin eso detencion.pasos
+    # no sabe que fallo y cae en el texto generico. El CP4 solo informa y no lo necesita
+    import ast
+    arbol = ast.parse((config.RAIZ / 'orquestador.py').read_text(encoding='utf-8'))
+    con_datos = {}
+    for nodo in ast.walk(arbol):
+        nombre = getattr(nodo.func, 'id', getattr(nodo.func, 'attr', None)) if isinstance(nodo, ast.Call) else None
+        if nombre == 'checkpoint' and len(nodo.args) >= 2 and isinstance(nodo.args[1], ast.Constant):
+            con_datos.setdefault(nodo.args[1].value, []).append('datos' in {k.arg for k in nodo.keywords})
+    assert {1, 2, 3, 4} <= set(con_datos), con_datos                    # si no hay llamadas, esta revision no miraria nada
+    for n in (1, 2, 3):
+        assert all(con_datos[n]), f'una llamada a checkpoint() del CP{n} no pasa datos=: {con_datos}'
+
+    # el cableado de BackendReal, con falsos (sin casco, sin ortesis y sin tardar): CP1, CP2 y CP3 dejan el motivo y los numeros
+    import hardware
+
+    class EEGFalso:
+        def __init__(self, filas):
+            self.filas = filas
+
+        def calidad_robusta(self, segundos, esperar=None, avisar=None):
+            return self.filas
+
+    class OrtesisFalsa:
+        def __init__(self, con_ack=True):
+            self.con_ack, self.movimientos = con_ack, []
+
+        def mover(self, fraccion, dur_ms=None):
+            self.movimientos.append(fraccion)
+            return len(self.movimientos), (1.0 if self.con_ack else None), 8.0 + len(self.movimientos) % 2     # ACK de 8 a 9 ms
+
+    def fila(canal, ok=True):
+        return {'canal': canal, 'rms_uv': 12.0, 'red': 0.1 if ok else 0.7, 'saturado': 0.0, 'ok': ok,
+                **({} if ok else {'red_ventanas': [0.7, 0.6, 0.7]})}
+
+    def backend(*argv, filas=(), con_ack=True, hw=hardware):
+        b = object.__new__(orquestador.BackendReal)                       # sin __init__: no conecta a nada
+        b.a = orquestador.argumentos(['real', '--ortesis-sim', '--seg_revision', '0', *argv])
+        b.hw, b.eeg, b.ortesis, b.decoder, b.detector = hw, EEGFalso(list(filas)), OrtesisFalsa(con_ack), None, None
+        sal = types.SimpleNamespace(estado=lambda **d: visto.append(d), no_go=None, marcador=lambda *a, **k: None)
+        return b, types.SimpleNamespace(salidas=sal, fsm=types.SimpleNamespace(estado='IMPEDANCIAS', ir_a=lambda n: pasos_fsm.append(n)))
+    pasos_fsm = []
+    buenas, una_mala = [fila('Fz'), fila('C3')], [fila('Fz'), fila('C3', False), fila('Oz', False)]
+    esperado = {'ok': dict(senal_ok=True, canales_malos=[], sin_muestras=False, latencia_ok=True),
+                'canal': dict(senal_ok=False, canales_malos=['C3', 'Oz'], sin_muestras=False, latencia_ok=True),
+                'vacia': dict(senal_ok=False, canales_malos=[], sin_muestras=True, latencia_ok=True),
+                'sin_ack': dict(senal_ok=True, canales_malos=[], sin_muestras=False, latencia_ok=False),
+                'ambos': dict(senal_ok=False, canales_malos=['C3', 'Oz'], sin_muestras=False, latencia_ok=False)}
+    casos = (('canal', una_mala, True), ('vacia', [], True), ('sin_ack', buenas, False), ('ambos', una_mala, False))
+    movimientos = config.CP1_MOVIMIENTOS
+    config.CP1_MOVIMIENTOS = 2
+    try:
+        with silencio():
+            b, o = backend(filas=buenas)
+            assert b.revisar(o) is True and o.salidas.no_go is None and len(b.ortesis.movimientos) == 2
+            assert [e['ok'] for e in visto if e['tipo'] == 'checkpoint'][-1] is True
+            for clave, filas, con_ack in casos:
+                b, o = backend(filas=filas, con_ack=con_ack)
+                assert b.revisar(o) is False, clave
+                ng = o.salidas.no_go
+                assert ng['n'] == 1 and ng['datos'] == esperado[clave], (clave, ng)
+                assert ('revisar C3, Oz' in ng['motivo']) == (clave in ('canal', 'ambos')) and 'calidad de senal ok' in ng['motivo'], ng
+                # y de ahi sale el texto del tablero: lo que fallo, no el generico
+                dicho = ' '.join(dt.pasos(1, ng['datos']))
+                assert ('No llegaron muestras' in dicho) == (clave == 'vacia') and ('REVISAR' in dicho) is False, (clave, dicho)
+                assert ('Reacomoda C3, Oz' in dicho) == (clave in ('canal', 'ambos')), (clave, dicho)
+                assert ('Revisa la alimentacion' in dicho) == (not esperado[clave]['latencia_ok']), (clave, dicho)
+                # con --forzar el NO GO no detiene y no queda nada que anunciar
+                b, o = backend('--forzar', filas=filas, con_ack=con_ack)
+                assert b.revisar(o) is True and o.salidas.no_go is None, clave
+    finally:
+        config.CP1_MOVIMIENTOS = movimientos
+    assert config.CP1_MOVIMIENTOS == movimientos
+
+    # CP2 y CP3 sin ensayos o sin epocas: no hay modelo con que seguir, asi que paran aunque haya --forzar y sin pasar por checkpoint()
+    sin_decoder = types.SimpleNamespace(cargar=lambda nombre: types.SimpleNamespace(ba=0.9))       # --solo-errp lo carga de modelos/
+    for forzar in ([], ['--forzar']):
+        visto.clear()
+        pasos_fsm.clear()
+        with silencio():
+            b, o = backend('--ensayos_mi', '0', *forzar)
+            assert b.calibrar_mi(o) is False
+            assert o.salidas.no_go['n'] == 2 and o.salidas.no_go['datos'] == {'sin_ensayos': True}, o.salidas.no_go
+            assert 'ningun ensayo valido' in ' '.join(orquestador.anunciar_detencion(o, b.a)['que_hacer'])
+            b, o = backend('--ensayos_mi', '0', *forzar)
+            b.revisar = lambda orq: True                                   # CP1 ya paso: preparar() sigue a la calibracion de MI
+            assert b.preparar(o) is None and pasos_fsm == ['CAL_MI'] and o.salidas.no_go['n'] == 2, (forzar, pasos_fsm)
+            b, o = backend('--ensayos_errp', '0', *forzar)
+            assert b.calibrar_errp(o) is False
+            assert o.salidas.no_go['n'] == 3 and o.salidas.no_go['datos'] == {'sin_epocas': True}, o.salidas.no_go
+            assert 'ninguna epoca valida' in ' '.join(orquestador.anunciar_detencion(o, b.a)['que_hacer'])
+            pasos_fsm.clear()
+            b, o = backend('--solo-errp', '--ensayos_errp', '0', *forzar, hw=sin_decoder)
+            b.revisar = lambda orq: True
+            assert b.preparar(o) is None and pasos_fsm == ['CAL_MI', 'CAL_ERRP'] and o.salidas.no_go['n'] == 3, (forzar, pasos_fsm)
+        assert not [e for e in visto if e['tipo'] == 'checkpoint'], 'estas rutas no pasan por checkpoint()'
+    # el contrato: ese codigo no choca con los otros que usa el proyecto
+    assert config.SALIDA_NO_GO not in (0, 1, 2, 3, 130)
+    return 'NO GO sin --forzar: se anuncia con el CP y que hacer (cableado de revisar/calibrar_mi/calibrar_errp y de checkpoint(datos=)), y el proceso sale con el codigo 4; --forzar y los CP informativos no paran'
+
+
+@prueba
+def tablero_detenida():
+    """El aviso grande de 'Sesion detenida en CPx' del tablero: aparece con el evento 'detenida', ocupa el lugar de los
+    paneles y se quita cuando empieza otra sesion. Con un Qt de mentira (corre sin pantalla ni PyQt); si PyQt esta, tambien con el de verdad."""
+    import importlib
+    import sys
+    import types
+    import detencion as dt
+
+    class Anota:
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return Anota()
+
+        def __call__(self, *a, **kw):
+            return Anota()
+
+    class Etiqueta:
+        """Un QLabel que recuerda lo que se le puso; cualquier otro metodo de Qt es un no-op."""
+        def __init__(self, texto=''):
+            self._t, self._oculto, self._estilo = texto, False, ''
+
+        def setText(self, t):
+            self._t = t
+
+        def text(self):
+            return self._t
+
+        def setVisible(self, v):
+            self._oculto = not v
+
+        def isHidden(self):
+            return self._oculto
+
+        def setStyleSheet(self, s):
+            self._estilo = s
+
+        def styleSheet(self):
+            return self._estilo
+
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return Anota()                                          # setWordWrap, toggled.connect, ...
+
+    class Grafica(Etiqueta):
+        def addPlot(self, **kw):
+            return Anota()
+
+    class Capa:
+        def __getattr__(self, k):
+            if k.startswith('__'):
+                raise AttributeError(k)
+            return lambda *a, **kw: 0
+
+    class Ventana:
+        """Un QWidget: solo los metodos que el tablero usa; un nombre mal escrito en el tablero aqui SI falla."""
+        def __init__(self, *a):
+            pass
+
+        def resize(self, *a):
+            pass
+
+        def setWindowTitle(self, *a):
+            pass
+
+    class Reloj:
+        timeout = Anota()
+
+        def start(self, ms):
+            pass
+
+        def stop(self):
+            pass
+
+    class Constantes:
+        def __getattr__(self, k):
+            return k
+
+    def con_qt(QtCore, QtWidgets, pg):
+        """Corre la comprobacion con ese Qt y devuelve el tablero ya probado."""
+        tab_viejo = sys.modules.pop('tablero', None)
+        previos = {k: sys.modules.get(k) for k in ('pyqtgraph', 'pyqtgraph.Qt')}
+        if pg is not None:
+            qt = types.ModuleType('pyqtgraph.Qt')
+            qt.QtCore, qt.QtWidgets = QtCore, QtWidgets
+            pg.Qt = qt
+            sys.modules['pyqtgraph'], sys.modules['pyqtgraph.Qt'] = pg, qt
+        try:
+            tablero = importlib.import_module('tablero')
+            tablero.resolve_byprop = lambda *a, **k: []              # que el hilo de conexion no busque flujos de verdad
+            t = tablero.Tablero()
+            try:
+                t.timer.stop()
+                assert t.lbl_detenida.isHidden() and not t.g.isHidden() and not t.lbl_detenida.text()
+                ev = dt.evento(3, 'ErrP: sens 0.83, espec 0.87, BA 0.85 con 120 epocas (x)', {'ba': 0.85, 'espec': 0.87})
+                t._procesar({'tipo': 'checkpoint', 'n': 3, 'ok': False, 'texto': '[CP3] ErrP: ... -> NO GO'})
+                t._procesar(ev)
+                assert not t.lbl_detenida.isHidden() and t.g.isHidden()                       # el aviso ocupa el lugar de los paneles
+                txt = t.lbl_detenida.text()
+                assert 'Sesion detenida en CP3' in txt and 'espec 0.87' in txt and '--solo-errp' in txt and '--saltar-calibracion' in txt, txt
+                assert 'CP3' in t.lbl_estado.text() and tablero.COLORES_SALUD[config.ROJO] in t.lbl_estado.styleSheet()
+                t._procesar(ev)                                                             # repetido: sigue igual
+                assert not t.lbl_detenida.isHidden() and t.g.isHidden()
+                t._procesar({'tipo': 'salud', 'estado': 'IMPEDANCIAS', 'motivo': '', 'escalon': 0, 'colores': {}, 'detalle': {}})
+                assert not t.lbl_detenida.isHidden()                                        # otros eventos no lo quitan
+                for nuevo in ({'tipo': 'checkpoint', 'n': 1, 'ok': True, 'texto': '[CP1] ok'}, {'tipo': 'cue', 'meta': 1},
+                              {'tipo': 'paso', 'paso': 1, 'estado': 'LAZO_ESTATICO', 'meta': 1, 'angulo': 0.5, 'p_crudo': 0.6,
+                               'b': 0.5, 'p_prima': 0.6, 'P_hat': None, 'error': 0, 'error_sombra': 0, 'beta': 0.1, 'sd_beta': 0.5,
+                               'youden': 0.6, 'fiabilidad': 1.0, 'congelado': False, 'cambio': '', 'latencia_ms': None,
+                               'perturbado': False}):
+                    t._procesar(ev)
+                    assert not t.lbl_detenida.isHidden()
+                    t._procesar(nuevo)                                                      # empezo otra sesion: el aviso se va
+                    assert t.lbl_detenida.isHidden() and not t.g.isHidden(), nuevo['tipo']
+                t._procesar({'tipo': 'detenida', 'n': 1, 'titulo': 'Sesion detenida en CP1', 'motivo': '<script>x</script>',
+                             'que_hacer': ['a & b']})                                       # el motivo es texto libre: se escapa
+                assert '&lt;script&gt;' in t.lbl_detenida.text() and '<script>' not in t.lbl_detenida.text()
+            finally:
+                if hasattr(t, 'close'):
+                    t.close()
+        finally:
+            sys.modules.pop('tablero', None)
+            if tab_viejo is not None:
+                sys.modules['tablero'] = tab_viejo
+            for k, v in previos.items():
+                if pg is None:
+                    break
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    pg = types.ModuleType('pyqtgraph')
+    for nombre in ('setConfigOptions', 'mkPen', 'FillBetweenItem', 'InfiniteLine', 'PlotCurveItem', 'ScatterPlotItem'):
+        setattr(pg, nombre, Anota())
+    pg.GraphicsLayoutWidget = Grafica
+    QtCore = types.SimpleNamespace(Qt=Constantes(), QTimer=Reloj)
+    QtWidgets = types.SimpleNamespace(QWidget=Ventana, QVBoxLayout=lambda *a: Capa(), QHBoxLayout=lambda *a: Capa(), QLabel=Etiqueta,
+                                      QPushButton=lambda *a: Etiqueta(*a), QLineEdit=lambda *a: Etiqueta())
+    real = False
+    con_qt(QtCore, QtWidgets, pg)
+    try:
+        import pyqtgraph                                                                    # noqa: F401  (esta el de verdad?)
+        from pyqtgraph.Qt import QtWidgets as QtW
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        app = QtW.QApplication.instance() or QtW.QApplication([])                           # noqa: F841
+        real = True
+    except Exception:
+        pass
+    if real:
+        con_qt(None, None, None)
+    return ('aviso grande, paneles ocultos y se quita con otra sesion (Qt de mentira + el de verdad)' if real else
+            'aviso grande, paneles ocultos y se quita con otra sesion (solo con un Qt de mentira: falta probarlo con PyQt)')
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'barrido_paso', 'comparacion_baselines', 'reporte_detector', 'agente_aprende', 
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',
            'paso_sin_movimiento',
            'iic_estimador', 'gemelo_embodiment',
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
-           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
+           'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'plan_b_sin_sesion_detenida', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

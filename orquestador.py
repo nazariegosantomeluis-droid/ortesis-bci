@@ -46,7 +46,10 @@ import numpy as np
 from pylsl import StreamOutlet, local_clock
 
 import config
+import cue
+import detencion
 import embodiment as emb
+import mano_virtual
 from agente_errp import AgenteErrP, ConfigAgente, ConfianzaDetector, SenalSham, sigmoide
 from caos import PlanCaos
 from salud import Vigilante
@@ -54,6 +57,41 @@ from salud import Vigilante
 
 def aviso(txt):
     print(txt, flush=True)
+
+
+INSTRUCCION_CUE = ('Senales: CERRAR = imagina que cierras la mano; RELAJA = imagina que abres y relajas la mano. '
+                   'Las dos se ven y suenan igual salvo la palabra (o el orden de los dos tonos).')
+
+
+def linea_cue(meta):
+    """La linea de consola de una senal: la misma forma para las dos metas."""
+    return f'    >>> {cue.texto(meta)}'
+
+
+def espejar_ortesis(backend, salidas, avisar=aviso):
+    """--mano-virtual: cada orden a la ortesis tambien sale en Estado (evento 'mano') para mano_virtual.py. Con la
+    ortesis simulada el movimiento visible empieza cuando empezaria el mecanico (la misma latencia que usa el
+    gemelo), que es el ancla de la epoca del ErrP. El simulador no tiene ortesis: ahi la mano sigue los pasos."""
+    o = getattr(backend, 'ortesis', None)
+    if o is None:
+        avisar('Mano virtual: en el simulador no hay ortesis; la mano sigue los eventos de cada paso.')
+        return False
+    hw = backend.hw
+    latencia = (lambda seq: hw.latencia_mecanica_simulada(seq, o.semilla)) if isinstance(o, hw.OrtesisSimulada) else None
+    mano_virtual.espejar(o, salidas.estado, latencia)
+    avisar('Mano virtual: lanza python mano_virtual.py (--pantalla N para la del piloto); sigue las mismas ordenes que la ortesis.')
+    return True
+
+
+def audio_activo(a):
+    """--cue-audio solo suena con el casco (backend real): el simulador no hace ruido."""
+    return bool(getattr(a, 'cue_audio', False)) and getattr(a, 'backend', 'real') == 'real'
+
+
+def evento_cue(a, meta):
+    """El evento de Estado de una senal. Con --cue-sin-visual lleva visual=False y el tablero muestra
+    solo el '+': la meta llega por el oido."""
+    return {'tipo': 'cue', 'meta': meta, **({'visual': False} if getattr(a, 'cue_sin_visual', False) else {})}
 
 
 # ======================================================================
@@ -84,6 +122,7 @@ class Salidas:
         self.est = StreamOutlet(config.crear_info('Estado'))
         self.marcadores = []                       # copia local, para evaluar y probar
         self.registro = None                       # archivo con cada evento de Estado (plan B)
+        self.no_go = None                          # el NO GO que detuvo la sesion (checkpoint()), para anunciarlo al final
 
     def registrar_en(self, ruta):
         """Desde ahora cada evento de Estado tambien se guarda en ruta, con su hora, para poder
@@ -138,13 +177,20 @@ def texto_edad_modelos():
     return txt
 
 
-def checkpoint(salidas, n, ok, detalle, forzar, informativo=False):
+def registrar_no_go(salidas, n, motivo, datos=None):
+    """Deja dicho por que se detiene la sesion: `anunciar_detencion` lo publica cuando el orquestador se para."""
+    salidas.no_go = {'n': n, 'motivo': motivo, 'datos': datos or {}}
+
+
+def checkpoint(salidas, n, ok, detalle, forzar, informativo=False, datos=None):
+    """`datos`: los numeros que decidieron el NO GO (detencion.pasos los usa para decir que hacer)."""
     txt = f'[CP{n}] {detalle} -> {"GO" if ok else "NO GO"}'
     aviso(txt)
     salidas.estado(tipo='checkpoint', n=n, ok=bool(ok), texto=txt)
     if informativo:
         return ok
     if not ok and not forzar:
+        registrar_no_go(salidas, n, detalle, datos)
         return False
     if not ok:
         aviso(f'  (--forzar: se continua a pesar del NO GO en CP{n})')
@@ -420,9 +466,10 @@ class BackendReal:
         abiertos) y latencia del ACK con metricas robustas (hardware.evaluar_latencias)."""
         aviso('Revisando la calidad de senal: quietos y con los ojos abiertos...')
         time.sleep(self.a.seg_revision)
-        filas = self.eeg.calidad(self.a.seg_revision)
+        filas = self.eeg.calidad_robusta(self.a.seg_revision, avisar=aviso)
         for f in filas:
-            aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%} | "
+            ventanas = f" (mediana de {', '.join(f'{v:.0%}' for v in f['red_ventanas'])})" if 'red_ventanas' in f else ''
+            aviso(f"  {f['canal']:>4}: {f['rms_uv']:6.1f} uV RMS | 60 Hz {f['red']:4.0%}{ventanas} | "
                   f"saturado {f['saturado']:4.0%} | {'bien' if f['ok'] else 'REVISAR'}")
         ok_senal = bool(filas) and all(f['ok'] for f in filas)
         malos = [f['canal'] for f in filas if not f['ok']]
@@ -435,7 +482,9 @@ class BackendReal:
             latencias.append(lat if t_ack is not None else float('nan'))
             time.sleep(0.15)
         r = self.hw.evaluar_latencias(latencias)
-        return checkpoint(orq.salidas, 1, ok_senal and r['ok'], f"{txt_senal}; {r['texto']}", self.a.forzar)
+        return checkpoint(orq.salidas, 1, ok_senal and r['ok'], f"{txt_senal}; {r['texto']}", self.a.forzar,
+                          datos={'senal_ok': ok_senal, 'canales_malos': malos, 'sin_muestras': not filas,
+                                 'latencia_ok': bool(r['ok'])})
 
     def activar_caos(self, momento):
         """El caos de la ortesis simulada empieza en la calibracion o en el lazo (--caos-desde)."""
@@ -514,6 +563,10 @@ class BackendReal:
         elif getattr(self.a, 'preentrenado', False):   # arranca del decoder de otras personas (PhysioNet)
             pre = self.hw.cargar(config.DECODER_PREENTRENADO)
             aviso(f"Calibracion de MI desde el decoder pre-entrenado ({pre['personas']} personas; {pre['origen']}).")
+            if getattr(self.a, 'decoder_canales', config.DECODER_CANALES_DEFECTO) == 'mi':
+                aviso('    AVISO: el decoder pre-entrenado usa los 8 canales (se entreno asi); --decoder-canales mi no aplica con '
+                      '--preentrenado. Para C3/Cz/C4 solamente, calibra sin --preentrenado.')
+        aviso(INSTRUCCION_CUE)
         for k in range(self.a.ensayos_mi):
             clase = 1 - y[-1] if (k % 2 and y) else int(rng.permutation([0, 1])[0])   # pares balanceados
 
@@ -521,9 +574,9 @@ class BackendReal:
                 aviso(f'[{k + 1}] preparate...')
                 time.sleep(self.a.espera)
                 orq.salidas.marcador(config.CUE_CERRAR if clase else config.CUE_RELAJA)
-                orq.salidas.estado(tipo='cue', meta=1 if clase else -1)
-                aviso('    >>> CERRAR: imagina que cierras la mano' if clase
-                      else '    >>> RELAJA: imagina que abres y relajas la mano')
+                orq.salidas.estado(**evento_cue(self.a, 1 if clase else -1))
+                orq.audio_cue.sonar(1 if clase else -1)
+                aviso(linea_cue(1 if clase else -1))
                 time.sleep(self.a.duracion_mi)
                 fin = self.eeg.ultimo_t()
                 if self._canales_malos() or self._cabeza_movida(fin - config.VENTANA_MI, fin):
@@ -537,13 +590,15 @@ class BackendReal:
             n = k + 1
             if (n >= self.a.min_mi and n % 6 == 0 or n == self.a.ensayos_mi) and self._ajustable(y):
                 self.decoder = (self.hw.DecoderIM().ajustar_desde(pre, np.array(X), np.array(y), peso=peso) if pre is not None
-                                else self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos('decoder')))
+                                else self.hw.DecoderIM().ajustar(np.array(X), np.array(y), config.candidatos(
+                                    'decoder', getattr(self.a, 'decoder_canales', config.DECODER_CANALES_DEFECTO))))
                 r = self._decidir_secuencial(np.array(y), self.decoder.pred_cv,
                                              config.MI_EXACTITUD_MIN, n, self.a.ensayos_mi, self.a.min_mi)
                 if r != 'seguir':
                     break
         if self.decoder is None:
             aviso('No se pudo calibrar MI: no quedaron ensayos validos.')
+            registrar_no_go(orq.salidas, 2, 'no quedaron ensayos validos de MI', {'sin_ensayos': True})
             return False
         np.savez(config.RESULTADOS / f'calibracion_mi_{int(time.time())}.npz', X=np.array(X), y=np.array(y))
         self.cal_mi = (np.array(X), np.array(y))     # para la memoria de la sesion (--guardar-memoria)
@@ -552,7 +607,7 @@ class BackendReal:
                           f'MI: BA {self.decoder.ba:.2f} con {len(y)} ensayos '
                           f"({'calibracion corta de largo fijo' if mem is not None else 'calibracion secuencial'}; "
                           f'canales: {self.decoder.eleccion})',
-                          self.a.forzar)
+                          self.a.forzar, datos={'ba': float(self.decoder.ba)})
 
     def calibrar_errp(self, orq):
         rng = np.random.default_rng()
@@ -583,8 +638,9 @@ class BackendReal:
                     self.ortesis.mover(theta[0], config.CENTRADO_DURACION_MS)
                     time.sleep(min(self.a.espera, config.CENTRADO_DURACION_MS / 1000))
                 aviso(f'[{n}] la ortesis debe {"CERRAR" if obj else "ABRIR"}: mirala')
-                orq.salidas.estado(tipo='cue', meta=1 if obj else -1)
+                orq.salidas.estado(**evento_cue(self.a, 1 if obj else -1))
                 orq.salidas.marcador(config.CUE_CERRAR if obj else config.CUE_RELAJA)
+                orq.audio_cue.sonar(1 if obj else -1)
                 time.sleep(self.a.espera)
                 theta[0] = float(np.clip(theta[0] + paso, 0.1, 0.9))
                 orq.salidas.paso.push_sample([float(d), 1.0 if d else -1.0, paso])
@@ -633,9 +689,13 @@ class BackendReal:
                   + (' -> AVISO: el detector se equivoca mas hacia un lado' if fisher['avisa'] else ''))
         if self.detector is None:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
+            registrar_no_go(orq.salidas, 3, 'no quedaron epocas validas para el detector de ErrP', {'sin_epocas': True})
             return False
-        np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y),
+        marca = int(time.time())
+        np.savez(config.RESULTADOS / f'calibracion_errp_{marca}.npz', X=np.array(X), y=np.array(y),
                  direccion=np.array(dirs))
+        if not getattr(self.a, 'sin_reporte_detector', False):
+            self.reporte_detector(marca)
         config.MODELOS.mkdir(exist_ok=True)
         np.savez(config.MODELOS / 'detector_errp_datos.npz', X=X_det, y=y_det)   # para co-adaptar (con las de la memoria)
         self.hw.guardar(self.detector, 'detector_errp.pkl')
@@ -644,7 +704,18 @@ class BackendReal:
         return checkpoint(orq.salidas, 3, ok,
                           f'ErrP: sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f} con {len(y)} epocas '
                           f'({d.eleccion})',
-                          self.a.forzar)
+                          self.a.forzar, datos={'ba': float(d.ba), 'espec': float(d.espec)})
+
+    def reporte_detector(self, marca):
+        """Figura del detector al final de CAL_ERRP (reporte_detector.py): confiabilidad, ROC, umbral, sens, espec y
+        falsos positivos. Nunca detiene la calibracion."""
+        import reporte_detector
+        ruta, r = reporte_detector.desde_detector(self.detector, config.RESULTADOS / f'detector_errp_{marca}.png')
+        if ruta is None:
+            aviso(f'    (sin figura del detector: {r})')
+        else:
+            aviso(f"    figura del detector: {ruta} (umbral {r['umbral']:.2f}, sens {r['sens']:.2f}, espec {r['espec']:.2f}, "
+                  f"falsos positivos {r['fp']} de {r['neg']}, AUC {r['auc']:.2f})")
 
     def preparar(self, orq):
         if not self.revisar(orq):
@@ -760,7 +831,7 @@ class BackendReal:
 
     # ---------------- lazo ----------------
     def cue(self, meta):
-        aviso('    >>> CERRAR' if meta > 0 else '    >>> RELAJA')
+        aviso(linea_cue(meta))
         time.sleep(config.VENTANA_MI + config.ESPERA_PRIMER_PASO_S)   # la ventana ya en estado estable
 
     def phi(self, meta):
@@ -838,6 +909,10 @@ class Orquestador:
         """inst: instantanea de una sesion a reanudar (cargar_instantanea()), o None."""
         self.b, self.a, self.inst = backend, a, inst
         self.salidas = Salidas()
+        # senal auditiva opcional (--cue-audio); solo con el casco, nunca en el simulador
+        self.audio_cue = cue.Audio(audio_activo(a), avisar=aviso)
+        if getattr(a, 'mano_virtual', False):
+            espejar_ortesis(backend, self.salidas)
         time.sleep(0.5)                              # dar tiempo a que LabRecorder/tablero se conecten
         self.fsm = MaquinaEstados(self.salidas, inst['estado'] if inst else None)
         self.angulo, self.filas, self.desplazamiento = 0.5, [], 0.0
@@ -1349,7 +1424,8 @@ class Orquestador:
 
     def presentar(self, meta):
         self.salidas.marcador(config.CUE_CERRAR if meta > 0 else config.CUE_RELAJA)
-        self.salidas.estado(tipo='cue', meta=meta)
+        self.salidas.estado(**evento_cue(self.a, meta))
+        self.audio_cue.sonar(meta)
         self.b.cue(meta)
 
     # ---------------- evaluacion ----------------
@@ -1578,6 +1654,8 @@ def argumentos(argv=None):
                     help='con --desde-sesion: epocas de la calibracion corta de ErrP')
     ap.add_argument('--control-reposo', dest='control_reposo', action='store_true',
                     help='tras calibrar, la ortesis se mueve sola con el piloto en reposo: p(t) no debe seguirla (~2 min)')
+    ap.add_argument('--sin-reporte-detector', dest='sin_reporte_detector', action='store_true',
+                    help='no dibujar la figura del detector (curva de confiabilidad, ROC, umbral) al final de CAL_ERRP')
     ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
                     help='el detector de ErrP no se re-entrena en el lazo (por defecto si lo hace)')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')
@@ -1585,7 +1663,19 @@ def argumentos(argv=None):
     ap.add_argument('--min_mi', type=int, default=36)
     ap.add_argument('--ensayos_errp', type=int, default=120,
                     help='epocas de calibracion de ErrP; siempre se usan todas (sin parada temprana)')
-    ap.add_argument('--duracion_mi', type=float, default=4.0)
+    ap.add_argument('--decoder-canales', dest='decoder_canales', choices=config.DECODER_CANALES,
+                    default=config.DECODER_CANALES_DEFECTO,
+                    help='canales del decoder de MI: mi = solo C3/Cz/C4 (por defecto), auto = elige entre eso y los 8 '
+                         'por validacion cruzada, todos = los 8')
+    ap.add_argument('--mano-virtual', dest='mano_virtual', action='store_true',
+                    help='publica en Estado cada orden a la ortesis para mano_virtual.py (mano a pantalla completa; sirve '
+                         'de ortesis visible para calibrar el ErrP con --ortesis-sim)')
+    ap.add_argument('--cue-audio', dest='cue_audio', action='store_true',
+                    help='cada senal de CERRAR/RELAJA tambien suena: dos tonos, sube = CERRAR, baja = RELAJA (solo con el casco)')
+    ap.add_argument('--cue-sin-visual', dest='cue_sin_visual', action='store_true',
+                    help='la pantalla muestra solo un "+" y la meta llega por el oido (usar con --cue-audio)')
+    ap.add_argument('--duracion_mi', type=float, default=config.DURACION_MI_S,
+                    help='segundos de la senal de MI en la calibracion; se decide con los ultimos config.VENTANA_MI')
     ap.add_argument('--espera', type=float, default=1.5)
     ap.add_argument('--p_error', type=float, default=0.3)
     ap.add_argument('--seg_revision', type=float, default=10.0)
@@ -1602,10 +1692,27 @@ def argumentos(argv=None):
     return a
 
 
+def anunciar_detencion(orq, a):
+    """La sesion se detuvo por un NO GO: lo dice en la terminal y lo publica en Estado (tipo 'detenida') para que el
+    tablero muestre en grande en que CP fue, por que y que hacer, en vez de dejar los paneles vacios (detencion.py).
+    Si nadie dejo dicho el motivo (orq.salidas.no_go) deduce el CP del estado de la maquina, sin inventar numeros."""
+    ng = getattr(orq.salidas, 'no_go', None)
+    if ng is None:
+        n = config.DETENCION_CP_POR_ESTADO.get(orq.fsm.estado)
+        ng = {'n': n, 'motivo': 'la sesion se detuvo antes del lazo; la consola dice por que', 'datos': {}}
+    usb = not (getattr(a, 'ortesis_sim', False) or getattr(a, 'ortesis_udp', None))
+    ev = detencion.evento(ng['n'], ng['motivo'], ng['datos'], getattr(a, 'puerto', None) if usb else None,
+                          simulada=bool(getattr(a, 'ortesis_sim', False)))
+    orq.salidas.estado(**ev)
+    aviso('\n' + detencion.texto_consola(ev))
+    return ev
+
+
 def correr(orq, a):
     """La sesion completa. Pase lo que pase (incluido Ctrl+C dentro de una pausa segura)
-    termina en EVALUACION, con el resumen impreso y el CSV cerrado."""
-    completa, sigue = False, True
+    termina en EVALUACION, con el resumen impreso y el CSV cerrado. Devuelve config.SALIDA_NO_GO si un NO GO la
+    detuvo (CP1 a CP3 sin --forzar) y 0 en cualquier otro caso."""
+    completa, sigue, detenida = False, True, False
     try:
         if orq.preparar():
             if orq.prog is None or orq.prog['bloque'] == 'estatico':
@@ -1629,8 +1736,12 @@ def correr(orq, a):
                 orq.coinvestigador('adaptativo', ultimo=True)
             completa = True
         else:
-            aviso('Detenido por NO GO. Que hacer en cada caso: docs/DOMINGO.md. Plan B: repetir una sesion '
-                  'grabada en el tablero (python repetir_sesion.py --ultima).')
+            detenida = True
+            try:
+                anunciar_detencion(orq, a)
+            except Exception as e:                  # el aviso es una cortesia: nunca debe impedir cerrar la sesion
+                aviso(f'  AVISO: no se pudo anunciar la detencion en el tablero ({type(e).__name__}: {e}); '
+                      f'el motivo esta en las lineas de arriba y en docs/DOMINGO.md, seccion 5.')
     except KeyboardInterrupt:
         aviso('\nInterrumpido por el usuario.'
               + (' Para continuar esta sesion: el mismo comando con --reanudar.' if orq.lista else ''))
@@ -1648,6 +1759,7 @@ def correr(orq, a):
             cuestionario(orq.ruta_csv.with_name(orq.ruta_csv.stem + '_cuestionario.json'), iic=orq.iic)
         except (EOFError, KeyboardInterrupt):
             aviso('  Cuestionario sin contestar.')
+    return config.SALIDA_NO_GO if detenida else 0
 
 
 def argumentos_reanudados(inst, a):
@@ -1674,7 +1786,9 @@ def main(argv=None):
         inst = cargar_instantanea()
         a = argumentos_reanudados(inst, a)
     backend = BackendSim(a) if a.backend == 'sim' else BackendReal(a)
-    correr(Orquestador(backend, a, inst), a)
+    codigo = correr(Orquestador(backend, a, inst), a)
+    if codigo:
+        sys.exit(codigo)                              # un NO GO detuvo la sesion: quien la lanzo lo sabe
 
 
 if __name__ == '__main__':
