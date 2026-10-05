@@ -805,6 +805,13 @@ Están en `docs/figuras/` y cada una se regenera con su estudio. Todas son del s
 | `potencia_iic.png` | Cuántos movimientos ajenos pide el IIC para un intervalo de ±0.2 y para un Spearman significativo. | `python estudios/potencia_iic.py` |
 | `agente_lento.png` | Figura técnica: por qué el agente era lento y por qué se descartó la corrección del prior. | `python estudios/agente_lento.py informe` |
 
+## Reporte del detector de ErrP al final de CAL_ERRP
+
+Al terminar la calibración de ErrP el orquestador dibuja `resultados/detector_errp_<marca>.png` (`reporte_detector.py`): **curva de confiabilidad**, **curva ROC** con el punto de operación, **histograma de puntajes con el umbral elegido** y, arriba, el umbral, la sensibilidad, la especificidad, los **falsos positivos** (n de aciertos y %), los falsos negativos, la AUC y el error de calibración (ECE). Se apaga con `--sin-reporte-detector`; si falla (por ejemplo, un detector que viene de la memoria de otra sesión y no guardó `p_cv`), avisa y la calibración sigue.
+
+- **De dónde salen las cifras.** Sensibilidad, especificidad y falsos positivos son los de la **validación anidada** (los mismos que el CP3): el umbral y la configuración se eligen sin ver la época que se juzga. La confiabilidad y la ROC usan `DetectorErrP.p_cv`, la probabilidad de cada época con un modelo que no la vio; el umbral del lazo se eligió sobre esos mismos puntajes, así que el punto de operación de la ROC (naranja) puede verse algo mejor que el de la validación anidada (rombo rojo). La figura lo dice al pie.
+- Con 120 épocas la curva de confiabilidad usa 6 casillas de 20 épocas: es una curva gruesa, no una calibración fina. Prueba `reporte_detector`; ejemplo en el gemelo (120 épocas, semilla 0): umbral 0.42, sensibilidad 0.68, especificidad 0.91, 7 falsos positivos de 82 aciertos, AUC 0.91 (`docs/figuras/detector_errp_ejemplo.png`, **del gemelo, no de una persona**).
+
 ## Protocolo del ESP32 (para P2)
 
 ```
