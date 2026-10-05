@@ -289,6 +289,64 @@ def barrido_paso():
 
 
 @prueba
+def reporte_detector():
+    """Reporte del detector al final de CAL_ERRP: cifras exactas con datos conocidos, la figura en es y en, el detector
+    guarda sus probabilidades de validacion cruzada, y un fallo del reporte nunca lanza."""
+    import tempfile
+    from pathlib import Path
+    import cerebro_sintetico as cs
+    import hardware as hw
+    import reporte_detector as rd
+    # 10 errores y 20 aciertos con puntajes conocidos; umbral 0.5
+    y = np.r_[np.ones(10, int), np.zeros(20, int)]
+    p = np.r_[np.linspace(0.45, 0.95, 10), np.linspace(0.05, 0.60, 20)]
+    r = rd.calcular(p, y, 0.5, None)
+    esperado = {'tp': 9, 'fn': 1, 'fp': int((p[10:] > 0.5).sum())}
+    assert (r['tp'], r['fn'], r['fp']) == (esperado['tp'], esperado['fn'], esperado['fp']), r
+    assert r['tn'] == 20 - r['fp'] and abs(r['sens'] - 0.9) < 1e-9 and abs(r['espec'] - r['tn'] / 20) < 1e-9
+    assert abs(r['ba'] - 0.5 * (r['sens'] + r['espec'])) < 1e-9 and 0.8 < r['auc'] < 1.0 and 0 <= r['ece'] <= 1
+    mp, fr, nc = r['confiabilidad']
+    assert nc.sum() == 30 and np.all(np.diff(mp) >= 0) and np.all((fr >= 0) & (fr <= 1))        # casillas con las 30 epocas, de menor a mayor
+    # con las decisiones de la validacion anidada (las que da el CP3), esas mandan en sens / espec / falsos positivos
+    anid = np.zeros(30, int); anid[:5] = 1; anid[10] = 1
+    r2 = rd.calcular(p, y, 0.5, anid)
+    assert (r2['tp'], r2['fn'], r2['fp'], r2['tn']) == (5, 5, 1, 19)
+    for malo in ((p, np.ones(30, int)), (p[:5], y)):
+        try:
+            rd.calcular(malo[0], malo[1], 0.5, None)
+            raise AssertionError('debia rechazar')
+        except ValueError:
+            pass
+    # un detector de verdad: guarda p_cv y la figura se dibuja en los dos idiomas
+    X, ye = cs.sesion_errp(60, semilla=3)
+    det = hw.DetectorErrP().ajustar(X, ye, config.candidatos('detector'))
+    assert det.p_cv is not None and len(det.p_cv) == len(ye) and 0 <= det.p_cv.min() and det.p_cv.max() <= 1
+    with tempfile.TemporaryDirectory() as d:
+        ruta, res = rd.desde_detector(det, Path(d) / 'det.png')
+        assert ruta is not None and ruta.stat().st_size > 30_000 and abs(res['umbral'] - det.umbral) < 1e-12
+        assert abs(res['sens'] - det.sens) < 1e-9 and abs(res['espec'] - det.espec) < 1e-9       # las del CP3, no las de p_cv
+        assert rd.figura(res, Path(d) / 'en.png', 'en', det.eleccion).stat().st_size > 30_000
+        # nunca lanza: sin probabilidades, o con un detector roto
+        det2 = hw.DetectorErrP()
+        ruta2, motivo = rd.desde_detector(det2, Path(d) / 'no.png')
+        assert ruta2 is None and isinstance(motivo, str) and not (Path(d) / 'no.png').exists()
+        assert rd.desde_detector(None, Path(d) / 'no.png')[0] is None
+        # el gancho de CAL_ERRP: la bandera existe y el metodo del backend dibuja y avisa sin lanzar
+        import orquestador
+        assert orquestador.argumentos(['real']).sin_reporte_detector is False
+        assert orquestador.argumentos(['real', '--sin-reporte-detector']).sin_reporte_detector is True
+        viejo, config.RESULTADOS = config.RESULTADOS, Path(d)
+        try:
+            orquestador.BackendReal.reporte_detector(type('B', (), {'detector': det})(), 123)
+            assert (Path(d) / 'detector_errp_123.png').exists()
+            orquestador.BackendReal.reporte_detector(type('B', (), {'detector': hw.DetectorErrP()})(), 124)    # sin p_cv: avisa, no lanza
+            assert not (Path(d) / 'detector_errp_124.png').exists()
+        finally:
+            config.RESULTADOS = viejo
+    return f"umbral {det.umbral:.2f}, sens {det.sens:.2f}, espec {det.espec:.2f}: figura de confiabilidad, ROC y umbral (es y en)"
+
+
+@prueba
 def prior_por_paso():
     """Prior de error por paso (encendido por defecto con epsilon 0.10): el error que el agente predice, con un piso."""
     from agente_errp import AgenteErrP, ConfigAgente
@@ -3965,7 +4023,7 @@ def demo_gemelo_en_vivo():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'reporte_detector', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',

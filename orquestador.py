@@ -634,8 +634,11 @@ class BackendReal:
         if self.detector is None:
             aviso('No se pudo calibrar el detector de ErrP: no quedaron epocas validas.')
             return False
-        np.savez(config.RESULTADOS / f'calibracion_errp_{int(time.time())}.npz', X=np.array(X), y=np.array(y),
+        marca = int(time.time())
+        np.savez(config.RESULTADOS / f'calibracion_errp_{marca}.npz', X=np.array(X), y=np.array(y),
                  direccion=np.array(dirs))
+        if not getattr(self.a, 'sin_reporte_detector', False):
+            self.reporte_detector(marca)
         config.MODELOS.mkdir(exist_ok=True)
         np.savez(config.MODELOS / 'detector_errp_datos.npz', X=X_det, y=y_det)   # para co-adaptar (con las de la memoria)
         self.hw.guardar(self.detector, 'detector_errp.pkl')
@@ -645,6 +648,17 @@ class BackendReal:
                           f'ErrP: sens {d.sens:.2f}, espec {d.espec:.2f}, BA {d.ba:.2f} con {len(y)} epocas '
                           f'({d.eleccion})',
                           self.a.forzar)
+
+    def reporte_detector(self, marca):
+        """Figura del detector al final de CAL_ERRP (reporte_detector.py): confiabilidad, ROC, umbral, sens, espec y
+        falsos positivos. Nunca detiene la calibracion."""
+        import reporte_detector
+        ruta, r = reporte_detector.desde_detector(self.detector, config.RESULTADOS / f'detector_errp_{marca}.png')
+        if ruta is None:
+            aviso(f'    (sin figura del detector: {r})')
+        else:
+            aviso(f"    figura del detector: {ruta} (umbral {r['umbral']:.2f}, sens {r['sens']:.2f}, espec {r['espec']:.2f}, "
+                  f"falsos positivos {r['fp']} de {r['neg']}, AUC {r['auc']:.2f})")
 
     def preparar(self, orq):
         if not self.revisar(orq):
@@ -1578,6 +1592,8 @@ def argumentos(argv=None):
                     help='con --desde-sesion: epocas de la calibracion corta de ErrP')
     ap.add_argument('--control-reposo', dest='control_reposo', action='store_true',
                     help='tras calibrar, la ortesis se mueve sola con el piloto en reposo: p(t) no debe seguirla (~2 min)')
+    ap.add_argument('--sin-reporte-detector', dest='sin_reporte_detector', action='store_true',
+                    help='no dibujar la figura del detector (curva de confiabilidad, ROC, umbral) al final de CAL_ERRP')
     ap.add_argument('--sin-coadaptativo', dest='sin_coadaptativo', action='store_true',
                     help='el detector de ErrP no se re-entrena en el lazo (por defecto si lo hace)')
     ap.add_argument('--ensayos_mi', type=int, default=60, help='maximo; la calibracion para antes si ya decidio')

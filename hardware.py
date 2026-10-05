@@ -1132,6 +1132,7 @@ class DetectorErrP:
         self.canales, self.vistas = list(candidatos[self.eleccion][0]), candidatos[self.eleccion][1]
         self.p_error_cal = float(y.mean())
         self.umbral = self._umbral_neyman_pearson(p_todo[self.eleccion], y)
+        self.p_cv = p_todo[self.eleccion]            # probabilidad por epoca con un modelo que no la vio (reporte_detector.py)
         self.y_cal = y
         if evaluar:
             self.sens = float((self.pred_cv[y == 1] == 1).mean())
