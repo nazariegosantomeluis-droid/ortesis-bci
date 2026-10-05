@@ -11,11 +11,11 @@ Christopher Lara Martinez
 
 Juan Luis Medina Leal
 
-Margarita Isabell Gabuta Garcia
+Margarita Isabel cabuto Garcia
 
 Saul Hernandez Campech
 
-Sixta Janet Lorenzo Romero
+Sixta Janeth Lorenzo Romero
 
 ## Tres escalas de aprendizaje
 
