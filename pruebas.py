@@ -289,6 +289,119 @@ def barrido_paso():
 
 
 @prueba
+def gemelo_personal():
+    """gemelo_personal.py: los estadisticos de la calibracion real, la inversion por simulacion (con un gemelo de juguete
+    de forma cerrada, para que sea rapida y exacta), el informe y la lectura de la sesion real."""
+    import tempfile
+    from pathlib import Path
+    import gemelo_personal as gp
+    C3, FZ, CZ, PZ = (gp.IDX[c] for c in ('C3', 'Fz', 'Cz', 'Pz'))
+    # estadisticos de datos conocidos
+    rng = np.random.default_rng(0)
+    y = np.tile([0, 1], 20)
+    X = rng.normal(size=(40, 8, 200)) * np.arange(1, 9)[None, :, None]               # RMS 1..8 por canal
+    X[y == 1, C3] *= 0.8                                                             # cerrar baja la amplitud en C3 a 0.8 (potencia 0.64)
+    e = gp.estadisticos_mi(X, y)
+    assert np.allclose(e['rms_reposo'], np.arange(1, 9), rtol=0.2) and abs(e['log_cociente_c3'] - np.log(0.64)) < 0.15
+    ye = np.tile([0, 1, 0, 0], 30)
+    Xe = rng.normal(size=(120, 8, 250)) * 0.5
+    bump = np.zeros(250); bump[120:160] = 1.0                                         # cubre la ventana de la Pe (300 a 420 ms tras el movimiento)
+    Xe[np.ix_(ye == 1, [FZ, CZ, PZ])] += 6.0 * bump
+    Xe[:12, FZ, 20] += 400.0                                                          # 12 epocas con un parpadeo enorme
+    s = gp.estadisticos_errp(Xe, ye, 100.0)
+    assert abs(s['errp_pe'] - 6.0) < 1.0 and abs(s['frac_artefacto'] - 0.1) < 1e-9, s      # la Pe (300-420 ms) cae dentro del bump de 6 uV
+    for malo in (lambda: gp.estadisticos_mi(X[:3], y[:3]), lambda: gp.estadisticos_errp(Xe, np.zeros(120, int), 100.0)):
+        try:
+            malo(); raise AssertionError('debia rechazar')
+        except ValueError:
+            pass
+    lo, hi = gp.bootstrap(lambda a, b: gp.estadisticos_errp(a, b, 100.0)['errp_pe'], Xe, ye, n=20)
+    assert lo < s['errp_pe'] + 2 and hi > s['errp_pe'] - 2
+    # la inversion: monotona, y el borde se marca
+    v, fuera = gp._invertir(0.5, [0, 1, 2], [0.0, 1.0, 2.0])
+    assert abs(v - 0.5) < 1e-9 and not fuera and gp._invertir(5.0, [0, 1, 2], [0.0, 1.0, 2.0]) == (2.0, True)
+
+    def falso(params, semilla, n_mi=0, n_errp=0):
+        """Un gemelo de juguete: RMS 6 x ganancia, ERD en C3, ErrP en Fz/Cz/Pz y parpadeos en una fraccion de las epocas."""
+        r = np.random.default_rng(semilla)
+        mi = er = None
+        if n_mi:
+            ym = np.tile([0, 1], n_mi // 2)
+            Xm = r.normal(size=(n_mi, 8, 100)) * (6 * np.asarray(params['ganancia_canal']))[None, :, None]
+            Xm[ym == 1, C3] *= 1 - params['erd']
+            mi = (Xm, ym)
+        if n_errp:
+            yy = np.tile([0, 1, 0, 0], n_errp // 4)
+            Xx = r.normal(size=(n_errp, 8, 250)) * 0.5
+            Xx[np.ix_(yy == 1, [FZ, CZ, PZ])] += params['errp'] * bump
+            Xx[r.random(n_errp) < params['parpadeos'] * 2, FZ, 20] += 400.0
+            er = (Xx, yy)
+        return mi, er
+    verdad = {'erd': 0.30, 'errp': 6.0, 'parpadeos': 0.15, 'ganancia_canal': [1.0, 1.5, 0.8, 1.2, 1.0, 0.9, 1.1, 1.3]}
+    mi, er = falso(verdad, 5, n_mi=60, n_errp=160)
+    est = {'mi': gp.estadisticos_mi(*mi), 'errp': gp.estadisticos_errp(*er, 100.0)}
+    original, gp._gemelo = gp._gemelo, falso
+    try:
+        params, detalle = gp.ajustar(est['mi'], est['errp'], n_mi=60, n_errp=160, pasadas=2, salida=lambda *a: None)
+    finally:
+        gp._gemelo = original
+    assert abs(params['erd'] - 0.30) < 0.05 and abs(params['errp'] - 6.0) < 1.0 and abs(params['parpadeos'] - 0.15) < 0.08, params
+    assert np.allclose(params['ganancia_canal'], verdad['ganancia_canal'], rtol=0.25) and detalle['ganancia_canal']['error_rms_max'] < 0.05
+    assert not any(detalle[k]['fuera_de_rejilla'] for k in ('erd', 'errp', 'parpadeos'))
+    # un piloto fuera de lo que el gemelo sabe hacer queda marcado
+    est_raro = {'mi': est['mi'], 'errp': dict(est['errp'], errp_pe=80.0)}
+    gp._gemelo = falso
+    try:
+        _, det2 = gp.ajustar(est_raro['mi'], est_raro['errp'], n_mi=60, n_errp=160, pasadas=1, salida=lambda *a: None)
+    finally:
+        gp._gemelo = original
+    assert det2['errp']['fuera_de_rejilla']
+    # el informe y la sesion real al lado
+    pred = {k: {'calibracion': {'mi_ba': 0.8, 'sens': 0.7, 'espec': 0.9, 'ba': 0.8}, 'sujetos': 4,
+                'estatico': {'antes': 0.2, 'err': 0.49, 'err_ee': 0.01, 'recuperan': 0, 'n': 16, 'mediana': None},
+                'bayes': {'antes': 0.15, 'err': 0.37, 'err_ee': 0.02, 'recuperan': 14, 'n': 16, 'mediana': 28.0}} for k in ('personal', 'estandar')}
+    with tempfile.TemporaryDirectory() as d:
+        orq, _ = _sesion_sham(3, 'sham-real')
+        real = gp.de_la_sesion(orq.ruta_csv)
+        assert real['error_agente'] is not None and isinstance(real['recuperacion'], list)
+        txt = gp.informe(params, detalle, est, pred, real, Path(d) / 'g.md')
+        assert (Path(d) / 'g.md').exists() and 'predicción' in txt and 'no una medición' in txt and 'La sesión real, al lado' in txt
+        assert 'FUERA' not in txt and f"{params['erd']:.2f}" in txt
+    return f"recupera erd {params['erd']:.2f} (0.30), errp {params['errp']:.1f} (6.0), parpadeos {params['parpadeos']:.2f} (0.15) con un gemelo de juguete; marca lo fuera de rejilla"
+
+
+@prueba
+def ia_sesion():
+    """ia_sesion.py: las 6 preguntas, el co-investigador y el informe sobre una sesion grabada (simulador, sin API) y la
+    auditoria de cifras: lo que sale de las herramientas se verifica, una cifra inventada y un paso que no existe se marcan."""
+    import tempfile
+    from pathlib import Path
+    import copiloto
+    import ia_sesion as isn
+    orq, _ = _sesion_sham(3, 'sham-real')
+    o = isn.auditar(orq.ruta_csv, None)
+    assert len(o['preguntas']) == 6 and all(q['respuesta'] and q['origen'] == 'reglas' for q in o['preguntas'])
+    assert o['api'] is False and o['coinvestigador']['valida'] and o['coinvestigador']['origen'] == 'reglas'
+    assert o['coinvestigador']['coincide_con_reglas'] is True                       # sin API, la propuesta ES la de las reglas
+    # lo que dice el copiloto se verifica contra la sesion: ninguna respuesta cita pasos que no existen
+    for q in o['preguntas']:
+        a = q['auditoria']
+        assert not a['pasos_inexistentes'], q
+        assert q['sin_dato'] or a['cifras'] == 0 or len(a['verificadas']) >= 0.8 * a['cifras'], (q['pregunta'], a)
+    assert sum(len(q['auditoria']['verificadas']) for q in o['preguntas']) >= 10
+    # la auditoria detecta lo inventado
+    s = copiloto.Sesion(Path(orq.ruta_csv))
+    mala = isn.auditar_texto('Se recupero en 999 pasos, en el paso 4000, con un error de 0.123.', s)
+    assert '999' in mala['no_encontradas'] and '0.123' in mala['no_encontradas'] and mala['pasos_inexistentes'] == [4000], mala
+    err = s.metrica('error', 'tras_perturbacion')
+    bien = isn.auditar_texto(f"El error del agente fue {err['error_agente']:.2f} y el de la sombra {err['error_sombra']:.2f} (pasos {err['pasos'][0]} a {err['pasos'][1]}).", s)
+    assert not bien['no_encontradas'] and not bien['pasos_inexistentes'], bien
+    md = isn.a_markdown(o)
+    assert md.count('###') == 6 and 'sin API' in md and 'Co-investigador' in md and 'pendientes de una persona' in md
+    return f"6 preguntas auditadas ({sum(len(q['auditoria']['verificadas']) for q in o['preguntas'])} cifras verificadas), propuesta valida, cifras inventadas detectadas"
+
+
+@prueba
 def prior_por_paso():
     """Prior de error por paso (encendido por defecto con epsilon 0.10): el error que el agente predice, con un piso."""
     from agente_errp import AgenteErrP, ConfigAgente
@@ -3965,7 +4078,7 @@ def demo_gemelo_en_vivo():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'ia_sesion', 'gemelo_personal', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',

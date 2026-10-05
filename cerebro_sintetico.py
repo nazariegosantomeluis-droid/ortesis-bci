@@ -132,6 +132,8 @@ class Cerebro:
         if getattr(a, 'sesion', 0):
             self.ganancia = np.random.default_rng([a.semilla, 31, a.sesion]).uniform(0.8, 1.25, n)
             self.rng = np.random.default_rng([a.semilla, 32, a.sesion])
+        if getattr(a, 'ganancia_canal', None) is not None:      # gemelo_personal.py: la ganancia medida de cada electrodo del piloto
+            self.ganancia = np.asarray(a.ganancia_canal, dtype=float)
         self.fase60 = 0.0
         # respuesta visual, cabeza, IMU y Bluetooth: generador aparte, para que el resto del EEG
         # sea la misma realizacion con o sin ellos (comparaciones limpias en el banco)
