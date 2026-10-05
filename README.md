@@ -7,7 +7,7 @@ Luis Nazariego Santome
 
 Jose Miguel Fausto Tapia
 
-Christopher Lara Martinez
+Cristopher Lara Martinez
 
 Juan Luis Medina Leal
 
