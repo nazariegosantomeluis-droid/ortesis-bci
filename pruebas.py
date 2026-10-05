@@ -255,6 +255,40 @@ def comparacion_baselines():
 
 
 @prueba
+def barrido_paso():
+    """Las cifras del barrido de paso (estudios/barrido_paso.py) a partir de filas conocidas: pasos en tope,
+    cierre completo por tipo de ensayo, recuperacion, y la tabla marca la configuracion actual."""
+    import sys
+    import tempfile
+    from pathlib import Path
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import barrido_paso as bp
+    # 2 ensayos de 5 pasos (cerrar y relajar) en el bloque adaptativo; el de cerrar acaba en 1.0, el de relajar en 0.2
+    filas = []
+    for t in range(10):
+        cerrar = t < 5
+        ang = [0.5, 0.8, 1.0, 1.0, 1.0][t] if cerrar else [0.5, 0.3, 0.2, 0.2, 0.2][t - 5]
+        filas.append({'sujeto': 0, 'rep': 0, 'bloque': 'adaptativo', 'post': False, 't': t, 'meta': 1 if cerrar else -1,
+                      'angulo': ang, 'quieto': t in (3, 4, 8, 9), 'erroneo': False, 'sombra': False, 'beta': 0.0, 'beta_antes': 0.0})
+    for t in range(10, 80):                      # tras perturbar: beta llega a la meta en el paso 20 despues
+        filas.append({'sujeto': 0, 'rep': 0, 'bloque': 'adaptativo', 'post': True, 't': t, 'meta': 1, 'angulo': 0.5, 'quieto': False,
+                      'erroneo': t % 2 == 0, 'sombra': True, 'beta': 0.1 * (t - 9), 'beta_antes': 0.0})
+    x = bp.medir(filas, 5)
+    assert abs(x['quieto'] - 4 / 80) < 1e-9
+    # ensayos de cerrar que terminan completos: el del paso 4 (1.0) de 15 (con los 14 de despues de perturbar, a 0.5); relajar: 0 de 1
+    assert abs(x['cierra'] - 1 / 15) < 1e-9 and x['abre'] == 0.0 and abs(x['completo'] - 1 / 30) < 1e-9, x
+    assert x['recuperan'] == 1 and x['n'] == 1 and x['mediana'] is not None
+    m = {celda: x for celda in ((0.15, 3), bp.ACTUAL)}
+    lineas = bp.tabla(m)
+    assert len(lineas) == 4 and '(actual)' in lineas[3] and '(actual)' not in lineas[2]
+    with tempfile.TemporaryDirectory() as d:
+        mm = {(p, n): x for p in bp.PASOS for n in bp.POR_ENSAYO}
+        png = bp.figura(mm, Path(d) / 'b.png')
+        assert png.exists() and png.stat().st_size > 20_000
+    return 'pasos en tope, cierre completo y recuperacion por celda; tabla y figura'
+
+
+@prueba
 def prior_por_paso():
     """Prior de error por paso (encendido por defecto con epsilon 0.10): el error que el agente predice, con un piso."""
     from agente_errp import AgenteErrP, ConfigAgente
@@ -3931,7 +3965,7 @@ def demo_gemelo_en_vivo():
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
-RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'comparacion_baselines', 'agente_aprende',
+RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basico', 'p_hat_refleja_errp', 'prior_por_paso', 'barrido_paso', 'comparacion_baselines', 'agente_aprende',
            'agente_sin_sesgo', 'confianza_detector', 'maquina_estados', 'orquestador_sim', 'pausa_segura',
            'calibracion_repeticiones', 'calibracion_errp_fija', 'errp_por_direccion', 'bloque_sham', 'cp1_robusto', 'seleccion_canales_vistas',
            'coadaptativo_no_detiene_el_lazo', 'inicio_movimiento', 'rechazo_por_cabeza', 'parpadeos_cruzan_bloques', 'cierre_completo',

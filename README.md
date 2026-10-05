@@ -686,6 +686,24 @@ El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
 `--forzar` continúa aunque un checkpoint diga NO GO (solo para pruebas).
 
+### Barrido del tamaño de paso y de los pasos por ensayo (5 de octubre, gemelo)
+
+`python estudios/barrido_paso.py` (unos 6 minutos; `informe` rehace tabla y figura): 4 tamaños de paso máximo (= ganancia) × 3 largos de ensayo, 16 sesiones por celda con las mismas semillas, agente bayes de hoy, detector actual y los topes del recorrido. Tabla completa en `docs/barrido_paso.md` y figura en `docs/figuras/barrido_paso.png`. **Es el gemelo, no una persona.**
+
+| Paso máx. | Pasos por ensayo | Pasos en tope | Cierre completo | Se recuperan | Error 2 min |
+|---|---|---|---|---|---|
+| 0.30 (actual) | 5 | 23 % | 54 % | 14/16 | 0.371 |
+| 0.30 | 3 | 5 % | 31 % | 16/16 | 0.309 |
+| 0.40 | 3 | 11 % | 46 % | 16/16 | 0.315 |
+| 0.40 | 5 | 32 % | 57 % | 14/16 | 0.378 |
+| 0.20 | 5 | 11 % | 41 % | 16/16 | 0.328 |
+| 0.30 | 8 | 44 % | 61 % | 12/16 | 0.421 |
+
+- **Hay un compromiso, no una celda que gane en todo.** Menos pasos en el tope (y por tanto más épocas de ErrP útiles) y mejor recuperación piden pasos chicos o ensayos cortos; que la órtesis termine cerrada del todo pide lo contrario (cubrir 0.45 del recorrido en pocos pasos). La configuración actual (0.30 × 5) reproduce la corrida de la comparación con baselines (14/16, 0.371).
+- **La mejor recuperación sin perder demasiado cierre:** 0.40 × 3 (16/16, 11 % en tope, 46 % de cierre completo) o 0.30 × 3 (16/16, 5 %, 31 %). Con 8 pasos por ensayo el tope se come casi la mitad de los pasos y se recuperan 12 de 16.
+- **Lo que este barrido NO mide:** con 3 pasos por ensayo hay ~67 % más ensayos para los mismos pasos, y cada ensayo lleva su ventana de imaginación y su cue: la sesión dura más en tiempo real, y el gemelo no cobra ese tiempo (la ventana de «2 min» son 57 pasos). Tampoco el tiempo que tarda un paso grande en el firmware por Wi-Fi (~430 ms para 0.30). Con una persona, el paso visible (0.08) y la fatiga pueden cambiar el cuadro.
+- **No se cambió ningún valor por defecto**: cualquier cambio de `PASO_MAX`, `GANANCIA_PASO` o `PASOS_ENSAYO` mueve los números de referencia de `CLAUDE.md` y lo decide Luis.
+
 ## Figuras para la presentación
 
 Están en `docs/figuras/` y cada una se regenera con su estudio. Todas son del simulador o del gemelo, no de una persona.
@@ -694,6 +712,7 @@ Están en `docs/figuras/` y cada una se regenera con su estudio. Todas son del s
 |---|---|---|
 | `control_negativo.png` | **El resultado central.** Sin la evidencia del ErrP el agente no se recupera de la perturbación (1 de 16 sesiones); con ella sí (10 a 16 de 16), con tres calidades de detector y los topes del recorrido. | `python estudios/paso_sin_movimiento.py` (unos 8 minutos; `informe` rehace la tabla y la figura con lo ya corrido) |
 | `comparacion_baselines_es.png` y `_en.png` | **Comparación final con baselines** (estático, eta fija, bayes, sin ErrP; mismas semillas): β aprendida, error y sesiones recuperadas. La tabla está en `docs/comparacion_baselines_es.md` y `_en.md`. Gemelo con los topes del recorrido, detector actual y el prior por paso de hoy; con los detectores medio y débil (en la tabla) bayes baja a 15 y 7 de 16 y eta fija a 0 de 16. | `python estudios/comparacion_baselines.py` (unos 5 minutos; `informe` rehace tablas y figuras) |
+| `barrido_paso.png` | Barrido del tamaño de paso y los pasos por ensayo: pasos en el tope, ensayos que terminan con la órtesis completa y sesiones que se recuperan (gemelo). | `python estudios/barrido_paso.py` (unos 6 minutos; `informe` rehace tabla y figura) |
 | `transferencia_physionet.png` | BA de un decoder desde cero, pre-entrenado con otras personas y pre-entrenado más ensayos propios, según los ensayos de calibración (EEGMMIDB, 40 personas). | `python estudios/transferencia_physionet.py` (descarga lenta la primera vez; `informe` rehace la tabla y la figura) |
 | `curva_robustez.png` | Error tras perturbar y tiempo de recuperación según la BA del detector (0.65 a 0.85). Simulador rápido: no modela los topes del recorrido. | `python estudios/curva_robustez.py` |
 | `potencia_iic.png` | Cuántos movimientos ajenos pide el IIC para un intervalo de ±0.2 y para un Spearman significativo. | `python estudios/potencia_iic.py` |
