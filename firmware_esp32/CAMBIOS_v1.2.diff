@@ -1,0 +1,56 @@
+--- main.py (1.1)
++++ main.py (1.2)
+@@ -16,9 +16,11 @@
+   {"seq": 12, "cierre": 0.35, "pulgar": 0.2, "p": 0.71, "errp": 0, "vib": 120}
+       cierre, pulgar: 0 = abierta, 1 = cerrada · p: nivel del nervio (0 a 1) · errp: 1 = destello rojo · vib: ms
+   {"cmd": "calibrar", "servo": "dedos", "abierta": 20, "cerrada": 150}    → se guarda en calibracion.json
+-TELEMETRÍA (ESP32 → laptop)
++ACK (ESP32 → laptop), en cuanto aplica una orden con seq nuevo:
++  {"ack": 12, "t_ms": 532118}      t_ms = reloj de la ESP32 en el momento de aplicarla (para alinear el ErrP)
++TELEMETRÍA (ESP32 → laptop), cada 100 ms:
+   {"seq": 12, "cierre": 0.33, "pulgar": 0.2, "i_ma": 410, "fuerza": 0.12, "paro": false, "bloqueo": false,
+-   "vigilancia": false, "ang": {"dedos": [20, 150], "pulgar": [30, 120]}, "msg": "", "ver": "1.1"}
++   "vigilancia": false, "ang": {"dedos": [20, 150], "pulgar": [30, 120]}, "msg": "", "ver": "1.2", "t_ms": 532200}
+ """
+ import json
+ import socket
+@@ -35,7 +37,7 @@
+     ticks_diff = lambda a, b: a - b
+     dormir_ms = lambda ms: time.sleep(ms / 1000)
+ 
+-VERSION = '1.1'
++VERSION = '1.2'
+ PLACA = 'DEVKIT_V1'             # ESP32 DevKit V1 de 30 pines; con la ESP32-C3 SuperMini usen 'C3_SUPERMINI'
+ PINES = {
+     'DEVKIT_V1': {'pin_servo': {'dedos': 18, 'pulgar': 19}, 'pin_led': 23, 'pin_vib': (25, 26),
+@@ -187,7 +189,7 @@
+     adc_p.atten(ADC.ATTN_11DB)
+     ahora = ticks_ms()
+     ESTADO.update(seq=0, p=0.5, destello_hasta=ahora, vib_hasta=ahora, vigilancia=True, paro=False,
+-                  bloqueo=False, i_ma=0, fuerza=0.0, msg='', msg_hasta=ahora)
++                  bloqueo=False, i_ma=0, fuerza=0.0, msg='', msg_hasta=ahora, seq_ack=None)
+     try:
+         ip = ap.ifconfig()[0]
+     except Exception:
+@@ -203,7 +205,12 @@
+                     while True:
+                         datos, direccion = sock.recvfrom(512)
+                         cliente, ultimo_cmd = direccion, ahora
+-                        procesar(json.loads(datos), ahora)
++                        m = json.loads(datos)
++                        procesar(m, ahora)
++                        sq = m.get('seq')
++                        if sq is not None and sq != ESTADO['seq_ack']:   # ACK inmediato con la hora de la ESP32
++                            ESTADO['seq_ack'] = sq
++                            sock.sendto(json.dumps({'ack': sq, 't_ms': ticks_ms()}).encode(), direccion)
+                 except (OSError, ValueError):
+                     pass
+                 ESTADO['vigilancia'] = ticks_diff(ahora, ultimo_cmd) > CFG['vigilancia_ms']
+@@ -244,6 +251,7 @@
+                     tel['ang'] = {k: [s.abierta, s.cerrada] for k, s in SERVOS.items()}
+                     tel['msg'] = ESTADO['msg'] if ticks_diff(ESTADO['msg_hasta'], ahora) > 0 else ''
+                     tel['ver'] = VERSION
++                    tel['t_ms'] = ticks_ms()
+                     try:
+                         sock.sendto(json.dumps(tel).encode(), cliente)
+                     except OSError:
