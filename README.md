@@ -805,6 +805,27 @@ Están en `docs/figuras/` y cada una se regenera con su estudio. Todas son del s
 | `potencia_iic.png` | Cuántos movimientos ajenos pide el IIC para un intervalo de ±0.2 y para un Spearman significativo. | `python estudios/potencia_iic.py` |
 | `agente_lento.png` | Figura técnica: por qué el agente era lento y por qué se descartó la corrección del prior. | `python estudios/agente_lento.py informe` |
 
+## IA sobre una sesión real, con auditoría de cifras (`ia_sesion.py`)
+
+```bash
+python ia_sesion.py --sesion resultados/sesion_real_<fecha>.csv            # con la llave de .env: Claude; sin llave: plantillas y reglas
+python ia_sesion.py --sesion resultados/sesion_real_<fecha>.csv --sin-ia   # solo plantillas y reglas
+```
+
+Corre el copiloto (6 preguntas: recuperación, agente contra sombra, congelamiento, fatiga, excluidos y comparación con la sesión anterior), el co-investigador (propuesta validada contra los rangos seguros y comparada con las reglas deterministas) y el informe clínico (4 Markdown, figuras y la propuesta de la próxima sesión), y **audita** lo que dijeron: cada cifra de una respuesta debe existir en lo que las herramientas devuelven para esa sesión (con el redondeo con que se escribió; los enteros, exactos) y todo «paso N» debe existir. Una cifra sin encontrar no es necesariamente falsa (puede ser una resta o un porcentaje derivado): se lista para revisarla. Deja `sesion_..._ia.md` junto al CSV. **No aplica nada**: las propuestas siguen pendientes de una persona. Prueba `ia_sesion` (65 cifras verificadas en una sesión del simulador y cifras inventadas detectadas). **Con la API de Claude no se ha corrido nunca** (no hay llave en la máquina de desarrollo); con ella la auditoría usa además lo que devolvieron las herramientas que usó el modelo.
+
+## Gemelo personalizado (`gemelo_personal.py`)
+
+```bash
+python gemelo_personal.py --mi resultados/calibracion_mi_<n>.npz --errp resultados/calibracion_errp_<n>.npz --sesion resultados/sesion_real_<fecha>.csv
+python gemelo_personal.py --demo        # un piloto de mentira (del propio gemelo): comprueba el método
+```
+
+Ajusta el cerebro sintético a las calibraciones **reales** de un piloto (ganancia por canal con el RMS en reposo, `erd` con el cociente de potencia en C3, `errp` con la Pe de la onda diferencia en Fz/Cz/Pz sin las épocas con artefacto, `parpadeos` con la fracción de épocas con artefacto) por simulación con rejillas, y **predice** la calibración (BA de MI y del detector) y el lazo (estático y bayes, 4 sujetos × 4 lazos) contra el gemelo estándar; con `--sesion` pone al lado lo medido en la sesión real. Predice, no mide, y el informe lo dice.
+
+- **Comprobación con un piloto de mentira** (`--demo`: erd 0.15, ErrP 4 µV, parpadeos 0.30 y ganancias por canal distintas, medido en el propio gemelo, 4 sujetos × 4 lazos): el método recupera erd 0.15 (0.15), parpadeos 0.25/s (0.30) y un ErrP de 5.3 µV (4.0). **BA del decoder de MI predicha 0.72 contra 0.71 verdadera; BA del detector de ErrP 0.66 contra 0.63; error del agente tras perturbar 0.462 contra 0.497.** Pero **la recuperación sale 8 de 16 contra 0 de 16**: con una BA del detector entre 0.60 y 0.70 la recuperación es un umbral y un error de 0.03 en la BA la cambia por completo. Es un solo piloto de mentira. Lo fiable de la predicción son las BA de la calibración y el rango del error; para la recuperación, ancla con la BA real del CP3 (curva de robustez).
+- La ganancia por canal iguala el RMS (error máximo 0 % por construcción), no recupera las ganancias «verdaderas»: el gemelo tiene su propia mezcla entre electrodos (Fz sale ×1.75 contra ×1.2 puesto).
+- **Sin datos de P001 en esta máquina:** el método está probado con datos del gemelo; correrlo con una persona está pendiente de sus archivos de calibración (ver `TAREAS.md`).
 ## Reporte del detector de ErrP al final de CAL_ERRP
 
 Al terminar la calibración de ErrP el orquestador dibuja `resultados/detector_errp_<marca>.png` (`reporte_detector.py`): **curva de confiabilidad**, **curva ROC** con el punto de operación, **histograma de puntajes con el umbral elegido** y, arriba, el umbral, la sensibilidad, la especificidad, los **falsos positivos** (n de aciertos y %), los falsos negativos, la AUC y el error de calibración (ECE). Se apaga con `--sin-reporte-detector`; si falla (por ejemplo, un detector que viene de la memoria de otra sesión y no guardó `p_cv`), avisa y la calibración sigue.
