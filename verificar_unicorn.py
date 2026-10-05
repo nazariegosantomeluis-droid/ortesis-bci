@@ -4,6 +4,8 @@ g.tec Unicorn Hybrid Black, y dice que fuente de EEG usar.
   python verificar_unicorn.py brainflow [--serie UN-XXXX.XX.XX]    conecta por BrainFlow (dongle)
   python verificar_unicorn.py lsl [--nombre <nombre del flujo>]    lee la app UnicornLSL
   python verificar_unicorn.py ambas                                 primero BrainFlow, luego LSL
+  python verificar_unicorn.py brainflow --toques                    ademas, un toque en cada electrodo (~40 s)
+  python verificar_unicorn.py brainflow --solo-toques               solo los toques (~45 s), para repetirlos
 
 OJO: solo UNA aplicacion puede conectarse al casco a la vez. Para 'brainflow' cierra la
 Unicorn Suite; para 'lsl' abre UnicornLSL, conecta el casco y pulsa Start. Con 'ambas' el
@@ -17,7 +19,10 @@ Comprueba:
   - las unidades del EEG (microvolts) y su offset de continua;
   - que Fz sea el canal 1 (los parpadeos son maximos ahi) y que el alfa con ojos cerrados sea
     occipital (PO7, Oz, PO8): asi se confirma el orden dentro del EEG;
-  - que el giroscopio responda al mover la cabeza.
+  - que el giroscopio responda al mover la cabeza;
+  - con --toques: que al tocar cada electrodo 3 s el pico salga en ESE canal. Es la prueba directa
+    del orden dentro del EEG (por ejemplo, C3 y C4 intercambiados): los parpadeos y el alfa solo lo
+    sugieren y se ensucian con un canal malo.
 El veredicto queda en pantalla y en resultados/verificacion_unicorn.json.
 """
 import argparse
@@ -31,14 +36,33 @@ import config
 CRITICAS = ['tasa', 'contador', 'acelerometro', 'bateria', 'validez', 'eeg_unidades']
 
 
-def fases(auto=False):
-    """(clave, segundos, instruccion). auto=True: sin guia, para probar con el gemelo."""
+def fases_toques(auto=False):
+    """Un toque por electrodo, en el orden de config.CANALES_EEG, con una pausa para soltar."""
+    q = config.TOQUES
+    seg, pausa = (2.0, 0.3) if auto else (q['segundos'], q['pausa_s'])
+    out = []
+    for c in config.CANALES_EEG:
+        out.append((f'toque_{c}', seg, '' if auto else
+                    f'TOCA {c} ({config.UBICACION_ELECTRODO[c]}): golpecitos con la yema del dedo, seguidos'))
+        out.append((f'suelta_{c}', pausa, ''))
+    return out
+
+
+def fases(auto=False, toques=False, solo_toques=False):
+    """(clave, segundos, instruccion). auto=True: sin guia, para probar con el gemelo.
+    toques: agrega un toque por electrodo al final; solo_toques: un reposo corto y los toques."""
     if auto:
-        return [('reposo', 6.0, ''), ('parpadeo', 4.0, ''), ('cerrados', 4.0, ''), ('cabeza', 4.0, '')]
-    return [('reposo', 15.0, 'QUIETO, ojos abiertos, mirando al frente'),
-            ('parpadeo', 10.0, 'PARPADEA fuerte, una vez por segundo'),
-            ('cerrados', 15.0, 'CIERRA los ojos y relajate'),
-            ('cabeza', 8.0, 'ABRE los ojos y di que si y que no con la cabeza')]
+        base = [('reposo', 6.0, ''), ('parpadeo', 4.0, ''), ('cerrados', 4.0, ''), ('cabeza', 4.0, '')]
+    else:
+        base = [('reposo', 15.0, 'QUIETO, ojos abiertos, mirando al frente'),
+                ('parpadeo', 10.0, 'PARPADEA fuerte, una vez por segundo'),
+                ('cerrados', 15.0, 'CIERRA los ojos y relajate'),
+                ('cabeza', 8.0, 'ABRE los ojos y di que si y que no con la cabeza')]
+    if solo_toques:
+        base = [('reposo', config.TOQUES['reposo_s'] if not auto else 3.0,
+                 'QUIETO, ojos abiertos. Quien lleva el casco no se mueve: otra persona toca los electrodos'
+                 if not auto else '')]
+    return base + (fases_toques(auto) if toques or solo_toques else [])
 
 
 # ------------------------------------------------------------ lectura
@@ -102,6 +126,82 @@ def leer_brainflow(serie=None, fases=None, salida=print, placa='unicorn'):
     return {'fuente': 'brainflow', 'nombre': serie, 'x': x, 'llegada': llegada, 'fase': fase,
             'fs': float(plan['fs']), 'modulo': plan['modulo'], 'fases': [c for c, _, _ in fases],
             'mapa': {k: plan[k] for k in ('eeg', 'imu', 'bateria', 'contador', 'validez')}}
+
+
+# ------------------------------------------------------------ toques
+def evaluar_toques(eeg, fase, nombres, fs, canales=None):
+    """Prueba de toques. eeg: canales x muestras en uV (crudo), fase: indice de fase por muestra,
+    nombres: nombre de cada fase ('reposo', 'toque_Fz'...). Devuelve la lista de resultados:
+    un 'toque_<canal>' por electrodo y un 'toques' que resume (con 'matriz' para imprimirla).
+
+    Respuesta de un canal en una fase = percentil 95 de |EEG 1-40 Hz| entre el de su reposo; el
+    canal que responde mas debe ser el tocado, y con margen sobre el segundo. Si dos electrodos
+    responden cada uno donde toca el otro, estan intercambiados."""
+    import hardware as hw
+    canales = list(canales or config.CANALES_EEG)
+    q = config.TOQUES
+    xf = np.abs(hw.filtrar(np.asarray(eeg, float), (1.0, 40.0), fs))      # una sola pasada: sin bordes por fase
+    recorte = int(q['recorte_s'] * fs)
+
+    def p95(clave):
+        i = np.where(fase == nombres.index(clave))[0] if clave in nombres else np.array([], int)
+        if len(i) <= 2 * recorte + fs // 2:
+            return None
+        return np.percentile(xf[:, i[recorte:-recorte]], 95, axis=1)
+    if 'reposo' in nombres:
+        base = p95('reposo')
+    else:
+        pausas = [p for p in (p95(n) for n in nombres if n.startswith('suelta_')) if p is not None]
+        base = np.median(pausas, axis=0) if pausas else None
+    if base is None:
+        return [{'clave': 'toques', 'estado': 'AVISO', 'texto': 'no hay un reposo para comparar los toques'}]
+    base = np.maximum(base, 1e-6)
+    res, matriz, tocados = [], [], []
+    for k, c in enumerate(canales):
+        r = p95(f'toque_{c}')
+        if r is None:
+            res.append({'clave': f'toque_{c}', 'estado': 'AVISO', 'texto': f'no hay datos del toque en {c}'})
+            matriz.append([float('nan')] * len(canales))
+            continue
+        s = r / base
+        matriz.append([round(float(v), 1) for v in s])
+        tocados.append(k)
+        j = int(np.argmax(s))
+        otros = np.delete(s, k)
+        if s.max() < q['min_sobre_reposo']:
+            res.append({'clave': f'toque_{c}', 'estado': 'AVISO',
+                        'texto': f'no se vio el toque en {c}: la mayor respuesta fue x{s.max():.1f} de su reposo'})
+        elif j == k:
+            margen = s[k] / max(otros.max(), 1e-9)
+            res.append({'clave': f'toque_{c}', 'estado': 'OK' if margen >= q['margen'] else 'AVISO',
+                        'texto': f'{c} x{s[k]:.1f} de su reposo, {margen:.1f} veces el segundo ({canales[int(np.argsort(s)[-2])]})'
+                                 + ('' if margen >= q['margen'] else ': los vecinos responden casi igual; toca mas firme y solo ese electrodo')})
+        else:
+            res.append({'clave': f'toque_{c}', 'estado': 'FALLA',
+                        'texto': f'tocaste {c} y respondio mas {canales[j]} (x{s[j]:.1f}) que {c} (x{s[k]:.1f})'})
+    malos = {r['clave'][6:]: r for r in res if r['estado'] == 'FALLA'}
+    mapa = {c: canales[int(np.argmax(np.array(matriz[canales.index(c)])))] for c in malos if not np.isnan(matriz[canales.index(c)]).any()}
+    cruces = sorted({tuple(sorted((a, b))) for a, b in mapa.items() if mapa.get(b) == a})
+    if cruces:
+        estado, texto = 'FALLA', ('electrodos intercambiados: ' + ', '.join(f'{a} y {b}' for a, b in cruces)
+                                  + '. Corrige el orden de los canales de EEG (puente_lsl.plan_placa o config.FUENTES_EEG) y repite')
+    elif malos:
+        estado, texto = 'FALLA', ('el pico no sale donde se toca en ' + ', '.join(malos)
+                                  + ': revisa que tocaste el electrodo correcto y repite con --solo-toques; si se repite, el orden de canales esta mal')
+    elif len(tocados) < len(canales) or any(r['estado'] == 'AVISO' for r in res):
+        estado, texto = 'AVISO', 'toques sin concluir en: ' + ', '.join(r['clave'][6:] for r in res if r['estado'] == 'AVISO')
+    else:
+        estado, texto = 'OK', f'{len(canales)} de {len(canales)} electrodos responden en su propio canal'
+    return res + [{'clave': 'toques', 'estado': estado, 'texto': texto, 'matriz': matriz, 'canales': canales}]
+
+
+def imprimir_matriz(r, salida=print):
+    """La matriz de respuestas: una fila por electrodo tocado, una columna por canal (x veces su reposo)."""
+    cs = r['canales']
+    salida('  respuesta (x su reposo); filas = electrodo tocado, columnas = canal que respondio')
+    salida('        ' + ' '.join(f'{c:>6}' for c in cs))
+    for c, fila in zip(cs, r['matriz']):
+        salida(f'  {c:>5} ' + ' '.join((f'[{v:4.1f}]' if cs[i] == c else f' {v:4.1f} ') for i, v in enumerate(fila)))
 
 
 # ------------------------------------------------------------ comprobaciones
@@ -218,6 +318,8 @@ def evaluar(datos):
                    + ('' if occ > resto else ': se esperaba mas alfa atras; revisa el orden de los canales de EEG'))
     else:
         anotar('eeg_unidades', 'FALLA', 'no hay EEG suficiente o tiene valores no finitos')
+    if any(n.startswith('toque_') for n in nombres) and np.isfinite(eeg).all():
+        res += evaluar_toques(eeg, fase, nombres, fs)
     return res
 
 
@@ -225,7 +327,8 @@ def veredicto(por_fuente, nombre):
     """Que fuente usar el dia de la demo, segun las comprobaciones criticas de cada una."""
     def pasa(res):
         estados = {r['clave']: r['estado'] for r in res}
-        return all(estados.get(k) == 'OK' for k in CRITICAS)
+        # los toques no son criticos si no se corrieron, pero un orden de canales desmentido lo es
+        return all(estados.get(k) == 'OK' for k in CRITICAS) and estados.get('toques') != 'FALLA'
     lineas = []
     if 'brainflow' in por_fuente and pasa(por_fuente['brainflow']):
         lineas.append('VEREDICTO: usa BrainFlow (fuente principal):')
@@ -236,9 +339,13 @@ def veredicto(por_fuente, nombre):
         lineas.append(f"    python orquestador.py real --puerto COM4 --fuente unicornlsl{' --eeg-nombre ' + nombre if nombre else ''}")
     else:
         fallas = sorted({r['clave'] for res in por_fuente.values() for r in res
-                         if r['clave'] in CRITICAS and r['estado'] != 'OK'})
+                         if (r['clave'] in CRITICAS and r['estado'] != 'OK') or (r['clave'] == 'toques' and r['estado'] == 'FALLA')})
         lineas.append('VEREDICTO: NO uses todavia ninguna de las fuentes probadas. Falla: ' + ', '.join(fallas) + '.')
         lineas.append('    Corrige el mapa de canales en config.FUENTES_EEG (o las unidades) y vuelve a verificar.')
+        for res in por_fuente.values():
+            for r in res:
+                if r['clave'] == 'toques' and r['estado'] == 'FALLA':
+                    lineas.append('    Toques: ' + r['texto'])
     avisos = [f"{f}: {r['clave']}" for f, res in por_fuente.items() for r in res if r['estado'] == 'AVISO']
     if avisos:
         lineas.append('  Avisos a revisar: ' + '; '.join(avisos))
@@ -251,15 +358,18 @@ def main():
     ap.add_argument('--serie', help='numero de serie del casco (UN-XXXX.XX.XX); opcional con un solo casco')
     ap.add_argument('--nombre', help='nombre del flujo de UnicornLSL (por defecto se busca por tipo Data)')
     ap.add_argument('--auto', action='store_true', help='sin guia (para probar con el gemelo)')
+    ap.add_argument('--toques', action='store_true', help='ademas, toca cada electrodo 3 s y comprueba que el pico salga en su canal')
+    ap.add_argument('--solo-toques', dest='solo_toques', action='store_true', help='solo la prueba de toques (un reposo corto y los 8 toques)')
     a = ap.parse_args()
+    guia = lambda: fases(a.auto, a.toques, a.solo_toques)
     por_fuente, nombre = {}, a.serie or a.nombre
     for fuente in (['brainflow', 'lsl'] if a.fuente == 'ambas' else [a.fuente]):
         print(f'\n=== {fuente} ===')
         if a.fuente == 'ambas' and fuente == 'lsl':
             input('Ahora abre UnicornLSL, conecta el casco, pulsa Start y luego Enter aqui... ')
         try:
-            datos = (leer_brainflow(a.serie, fases(a.auto)) if fuente == 'brainflow'
-                     else leer_lsl(a.nombre, fases=fases(a.auto)))
+            datos = (leer_brainflow(a.serie, guia()) if fuente == 'brainflow'
+                     else leer_lsl(a.nombre, fases=guia()))
         except Exception as e:
             print(f'  FALLA    conexion: {e}')
             por_fuente[fuente] = [{'clave': k, 'estado': 'FALLA', 'texto': 'sin conexion'} for k in CRITICAS]
@@ -267,7 +377,14 @@ def main():
         nombre = nombre or datos['nombre']
         por_fuente[fuente] = evaluar(datos)
         for r in por_fuente[fuente]:
+            if r['clave'].startswith('toque_'):
+                continue                                   # el detalle va en la matriz de 'toques'
             print(f"  {r['estado']:8s} {r['clave']}: {r['texto']}")
+            if r['clave'] == 'toques':
+                imprimir_matriz(r)
+                for t in por_fuente[fuente]:
+                    if t['clave'].startswith('toque_') and t['estado'] != 'OK':
+                        print(f"  {t['estado']:8s} {t['clave']}: {t['texto']}")
     texto = veredicto(por_fuente, nombre)
     print('\n' + texto)
     config.RESULTADOS.mkdir(exist_ok=True)

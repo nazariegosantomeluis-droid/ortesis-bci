@@ -3887,6 +3887,96 @@ def demo_gemelo_en_vivo():
     return 'gemelo lanzado, visto y cerrado por PID'
 
 
+@prueba
+def toques_electrodos():
+    """La prueba de toques de verificar_unicorn.py: el pico debe salir en el canal tocado. Datos
+    SINTETICOS (ruido, 60 Hz, offset de continua y golpecitos de 150 uV en el canal tocado, 40 uV en sus
+    vecinos): valida la logica, no cuanto responde un electrodo real. Cubre el caso que importa: C3 y C4
+    intercambiados."""
+    import verificar_unicorn as vu
+    fs = 250.0
+    nombres = [n for n, _, _ in vu.fases(solo_toques=True)]
+    segs = [s for _, s, _ in vu.fases(solo_toques=True)]
+    assert nombres[0] == 'reposo' and nombres[1:5] == ['toque_Fz', 'suelta_Fz', 'toque_C3', 'suelta_C3'] and len(nombres) == 17
+    assert [n for n, _, _ in vu.fases(toques=True)][:4] == ['reposo', 'parpadeo', 'cerrados', 'cabeza'] and 'toque_PO8' in [n for n, _, _ in vu.fases(toques=True)]
+    assert 'toque_Fz' not in [n for n, _, _ in vu.fases()]
+    assert all('IZQUIERDA' in t for n, _, t in vu.fases(solo_toques=True) if n == 'toque_C3') and any('DERECHA' in t for n, _, t in vu.fases(solo_toques=True))
+    fase = np.concatenate([np.full(int(s * fs), k) for k, s in enumerate(segs)])
+
+    def senal(semilla=0, intercambio=(), sin_toque=(), debil=()):
+        rng = np.random.default_rng(semilla)
+        n = len(fase)
+        t = np.arange(n) / fs
+        x = rng.normal(0, 8, (8, n)) + 210_000.0 + 20 * np.sin(2 * np.pi * 60 * t)
+        for k, c in enumerate(config.CANALES_EEG):
+            if c in sin_toque:
+                continue
+            ini = np.where(fase == nombres.index(f'toque_{c}'))[0]
+            for t0 in ini[int(0.6 * fs)::int(0.33 * fs)]:                  # golpecitos desde 0.6 s, tres por segundo
+                m = min(int(0.12 * fs), n - t0)
+                golpe = np.exp(-np.arange(m) / (0.03 * fs)) * np.sin(2 * np.pi * 9 * np.arange(m) / fs)
+                x[k, t0:t0 + m] += (60 if c in debil else 150) * golpe
+                for v in (k - 1, k + 1):
+                    if 0 <= v < 8:
+                        x[v, t0:t0 + m] += (35 if c in debil else 40) * golpe
+        for a, b in intercambio:                                            # como si las filas del casco vinieran cruzadas
+            i, j = config.CANALES_EEG.index(a), config.CANALES_EEG.index(b)
+            x[[i, j]] = x[[j, i]]
+        return x
+    est = lambda res: {r['clave']: r['estado'] for r in res}
+    # bien puesto: los 8 en OK y el resumen en OK, con su matriz
+    res = vu.evaluar_toques(senal(), fase, nombres, fs)
+    assert est(res)['toques'] == 'OK' and all(est(res)[f'toque_{c}'] == 'OK' for c in config.CANALES_EEG), res
+    mat = np.array(res[-1]['matriz'])
+    assert mat.shape == (8, 8) and all(np.argmax(mat[k]) == k for k in range(8))
+    # C3 y C4 intercambiados: lo dice con sus nombres, en FALLA, y el veredicto no deja usar la fuente
+    res = vu.evaluar_toques(senal(intercambio=[('C3', 'C4')]), fase, nombres, fs)
+    e = est(res)
+    assert e['toques'] == 'FALLA' and e['toque_C3'] == 'FALLA' and e['toque_C4'] == 'FALLA' and e['toque_Cz'] == 'OK', res
+    assert 'C3 y C4' in res[-1]['texto'] and 'intercambiados' in res[-1]['texto'], res[-1]['texto']
+    assert 'tocaste C3 y respondio mas C4' in [r for r in res if r['clave'] == 'toque_C3'][0]['texto']
+    crit = [{'clave': k, 'estado': 'OK', 'texto': ''} for k in vu.CRITICAS]
+    assert 'usa BrainFlow' in vu.veredicto({'brainflow': crit + [dict(r, estado='OK') for r in res[-1:]]}, None)
+    v = vu.veredicto({'brainflow': crit + res}, None)
+    assert 'NO uses' in v and 'toques' in v and 'C3 y C4' in v, v
+    # un electrodo que no se toco (o no se vio) no se da por bueno ni por malo: AVISO
+    res = vu.evaluar_toques(senal(sin_toque=['Pz']), fase, nombres, fs)
+    e = est(res)
+    assert e['toque_Pz'] == 'AVISO' and e['toques'] == 'AVISO' and e['toque_Cz'] == 'OK', res
+    # toque flojo, con los vecinos casi igual de fuertes: AVISO (margen), nunca FALLA
+    res = vu.evaluar_toques(senal(debil=['Oz']), fase, nombres, fs)
+    assert est(res)['toque_Oz'] in ('AVISO', 'OK') and est(res)['toques'] != 'FALLA'
+    # sin reposo ni pausas con que comparar: no inventa nada
+    assert vu.evaluar_toques(senal(), fase, ['toque_Fz'] * 1, fs)[0]['estado'] == 'AVISO'
+    # la fuente completa pasa por evaluar() (17 canales como la app de g.tec) y los cruzados la tumban
+    n = len(fase)
+
+    def datos17(x):
+        z = np.zeros((17, n))
+        z[:8] = x
+        z[8:11] = np.array([[0.0], [0.0], [1.0]])                           # ~1 g en reposo
+        z[11:14] = 1.0                                                      # giroscopio quieto
+        z[14], z[15], z[16] = 90.0, np.arange(n), 1.0
+        return {'x': z, 'fs': fs, 'fase': fase, 'fases': nombres, 'llegada': np.arange(n) / fs, 'modulo': None,
+                'mapa': {k: config.FUENTES_EEG['unicornlsl'][k] for k in ('eeg', 'imu', 'bateria', 'contador', 'validez')}}
+    ok = {r['clave']: r for r in vu.evaluar(datos17(senal()))}
+    assert ok['toques']['estado'] == 'OK' and ok['eeg_unidades']['estado'] == 'OK' and ok['contador']['estado'] == 'OK', ok
+    cruz = {r['clave']: r for r in vu.evaluar(datos17(senal(intercambio=[('C3', 'C4')])))}
+    assert cruz['toques']['estado'] == 'FALLA' and 'NO uses' in vu.veredicto({'lsl': list(cruz.values())}, 'X')
+    # el preflight de demo.py tambien lo ve
+    import demo
+    import json
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / 'verificacion_unicorn.json').write_text(json.dumps(
+            {'t': 1_000_000.0, 'por_fuente': {'brainflow': [{'clave': k, 'estado': 'OK', 'texto': ''} for k in vu.CRITICAS]
+                                              + [{'clave': 'toques', 'estado': 'FALLA', 'texto': 'x'}]}}), encoding='utf-8')
+        r = demo.revisar_verificaciones('casco', True, Path(d), lambda: 1_000_100.0)[0]
+        assert r['estado'] == 'FALLA' and 'toques' in r['texto'], r
+    return 'C3 y C4 cruzados: FALLA con sus nombres; bien puesto 8/8; sin toque o flojo: AVISO (datos sinteticos)'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -3901,7 +3991,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

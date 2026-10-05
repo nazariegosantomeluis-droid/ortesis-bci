@@ -225,7 +225,7 @@ def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time, 
         else:
             from verificar_unicorn import CRITICAS
             res = d.get('por_fuente', {}).get(fuente)
-            malas = sorted({r['clave'] for r in res or [] if r['clave'] in CRITICAS and r['estado'] != 'OK'}) if res else None
+            malas = sorted({r['clave'] for r in res or [] if (r['clave'] in CRITICAS and r['estado'] != 'OK') or (r['clave'] == 'toques' and r['estado'] == 'FALLA')}) if res else None
             if res is None:
                 out.append(rev('verif_casco', AVISO, f'la verificacion de hoy no probo la fuente {fuente}', f'Corre {cmd}.'))
             elif malas:

@@ -31,6 +31,22 @@ PAPELES = {
 }
 
 
+# Prueba de toques de verificar_unicorn.py --toques: se toca cada electrodo y el pico debe salir en
+# ese canal. Respuesta de un canal = percentil 95 de |EEG 1-40 Hz| en la fase, entre el de su reposo.
+TOQUES = {
+    'segundos': 3.0, 'pausa_s': 1.5, 'reposo_s': 6.0,
+    'min_sobre_reposo': 3.0,       # por debajo, no se vio el toque (AVISO: no se puede juzgar)
+    'margen': 1.5,                 # el canal tocado debe superar al segundo por este factor (si no, AVISO)
+    'recorte_s': 0.3,              # se descarta el inicio de cada fase: el tiempo de reaccion de quien toca
+}
+# Donde esta cada electrodo, para la instruccion en pantalla (izquierda y derecha son las de quien lleva el casco).
+UBICACION_ELECTRODO = {
+    'Fz': 'frente, en la linea media', 'C3': 'IZQUIERDA del centro de la cabeza', 'Cz': 'coronilla, en la linea media',
+    'C4': 'DERECHA del centro de la cabeza', 'Pz': 'parte alta de atras, en la linea media',
+    'PO7': 'atras, a la IZQUIERDA', 'Oz': 'nuca, en la linea media', 'PO8': 'atras, a la DERECHA',
+}
+
+
 def candidatos(modelo):
     """Configuraciones entre las que elige la calibracion real por validacion cruzada (anidada
     para reportar): los canales del papel contra los 8 y, en el detector, dos contra tres vistas."""

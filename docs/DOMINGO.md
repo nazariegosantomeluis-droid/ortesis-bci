@@ -45,6 +45,15 @@ Sigue la guía de unos 50 segundos (quieto, parpadear, ojos cerrados, mover la c
 
 Si la comprobación dice que el orden de los canales o las unidades no son los esperados, **no calibres**: el contrato de `config.py` supone Fz, C3, Cz, C4, Pz, PO7, Oz, PO8 en microvolts.
 
+**Prueba de toques (descarta canales intercambiados).** Los parpadeos y el alfa solo *sugieren* el orden de los canales, y un electrodo malo los confunde. Los toques lo comprueban de frente: con quien lleva el casco quieto, otra persona toca cada electrodo 3 s con la yema del dedo (golpecitos seguidos) cuando la pantalla lo pide, y el pico debe salir en ese canal:
+
+```bash
+python verificar_unicorn.py brainflow --solo-toques     # ~45 s: un reposo corto y los 8 toques
+python verificar_unicorn.py brainflow --toques          # la guía completa y, al final, los toques
+```
+
+Imprime una matriz (fila = electrodo tocado, columna = canal que respondió, en veces su reposo): lo correcto es el máximo de cada fila en la diagonal. La izquierda y la derecha son las de quien lleva el casco (C3 es la izquierda). Si dos electrodos responden cada uno donde toca el otro (por ejemplo C3 y C4), dice `electrodos intercambiados` y el veredicto pasa a `NO uses`: hay que corregir el orden de los canales en `puente_lsl.plan_placa` o `config.FUENTES_EEG`. Un electrodo que no se toca, o que responde poco, queda en AVISO y no se da por bueno ni por malo.
+
 ## 3. Verificar la órtesis (2 minutos)
 
 ```bash
