@@ -31,12 +31,41 @@ PAPELES = {
 }
 
 
-def candidatos(modelo):
+# Prueba de toques de verificar_unicorn.py --toques: se toca cada electrodo y el pico debe salir en
+# ese canal. Respuesta de un canal = percentil 95 de |EEG 1-40 Hz| en la fase, entre el de su reposo.
+TOQUES = {
+    'segundos': 3.0, 'pausa_s': 1.5, 'reposo_s': 6.0,
+    'min_sobre_reposo': 3.0,       # por debajo, no se vio el toque (AVISO: no se puede juzgar)
+    'margen': 1.5,                 # el canal tocado debe superar al segundo por este factor (si no, AVISO)
+    'recorte_s': 0.3,              # se descarta el inicio de cada fase: el tiempo de reaccion de quien toca
+}
+# Donde esta cada electrodo, para la instruccion en pantalla (izquierda y derecha son las de quien lleva el casco).
+UBICACION_ELECTRODO = {
+    'Fz': 'frente, en la linea media', 'C3': 'IZQUIERDA del centro de la cabeza', 'Cz': 'coronilla, en la linea media',
+    'C4': 'DERECHA del centro de la cabeza', 'Pz': 'parte alta de atras, en la linea media',
+    'PO7': 'atras, a la IZQUIERDA', 'Oz': 'nuca, en la linea media', 'PO8': 'atras, a la DERECHA',
+}
+
+
+# Canales del decoder de MI en el orquestador (--decoder-canales). 'mi' (por defecto): solo C3, Cz y C4,
+# sin eleccion: con el casco real (P001, exploratorio) la potencia posterior de "cerrar" salio mas alta
+# que la de "relajar", y un decoder con PO7/Oz/PO8/Pz puede aprender esa pista visual en lugar del ERD
+# motor. 'auto': elige por validacion cruzada anidada entre C3/Cz/C4 y los 8 (como antes). 'todos': los 8.
+DECODER_CANALES = ('mi', 'auto', 'todos')
+DECODER_CANALES_DEFECTO = 'mi'
+
+
+def candidatos(modelo, canales='auto'):
     """Configuraciones entre las que elige la calibracion real por validacion cruzada (anidada
-    para reportar): los canales del papel contra los 8 y, en el detector, dos contra tres vistas."""
+    para reportar): los canales del papel contra los 8 y, en el detector, dos contra tres vistas.
+    canales (solo el decoder): 'auto' los dos candidatos, 'mi' solo C3/Cz/C4, 'todos' solo los 8. Con un
+    solo candidato no hay eleccion y la BA es la de la validacion cruzada simple."""
     todos = list(range(len(CANALES_EEG)))
     if modelo == 'decoder':
-        return {'C3/Cz/C4': indices('mi'), '8 canales': todos}
+        if canales not in DECODER_CANALES:
+            raise ValueError(f'canales del decoder: {canales!r}; valores: {DECODER_CANALES}')
+        completo = {'C3/Cz/C4': indices('mi'), '8 canales': todos}
+        return {'mi': {'C3/Cz/C4': completo['C3/Cz/C4']}, 'todos': {'8 canales': todos}}.get(canales, completo)
     return {f'{nc}, {nv} vistas': (c, nv) for nc, c in (('Fz/Cz/Pz', indices('errp')), ('8 canales', todos))
             for nv in ('dos', 'tres')}
 
@@ -80,6 +109,32 @@ def crear_info(nombre):
 # ============================ Marcadores ============================
 CUE_CERRAR      = 'cue_cerrar'
 CUE_RELAJA      = 'cue_relaja'
+
+# Como se ve y se oye la senal de CERRAR / RELAJA. Con el casco real (4 de octubre, P001, exploratorio) la
+# potencia posterior (PO8/Pz) de "cerrar" salio mas alta que la de "relajar" (d ~ +0.5), y la senal era
+# roja contra azul: color y tamano son una pista visual que el decoder puede aprender en lugar del ERD
+# motor. Por eso las dos senales son IDENTICAS en color, tamano, grosor y ancho (letra monoespaciada y
+# palabras de 6 letras): solo cambia la palabra. Con --cue-sin-visual la pantalla muestra solo un "+" fijo
+# y la meta llega por el oido.
+CUE_VISUAL = {
+    'texto': {1: 'CERRAR', -1: 'RELAJA'},
+    'neutro': '+',                           # lo que se ve cuando la senal es solo auditiva
+    'color': '#222222', 'px': 28, 'familia': 'Consolas, "Courier New", monospace',
+}
+# Senal auditiva (--cue-audio): dos tonos seguidos, los MISMOS dos en cada senal y en el orden contrario
+# (sube = CERRAR, baja = RELAJA). Asi duran lo mismo, suenan igual de fuerte y solo difiere el orden.
+CUE_AUDIO = {'frecuencias_hz': (660, 990), 'tono_ms': 150, 'volumen': 0.4}
+
+# Mano virtual (mano_virtual.py): una mano a pantalla completa que sigue las mismas ordenes que la ortesis.
+# Con --mano-virtual el orquestador publica en Estado un evento por cada orden (tipo 'mano': angulo = fraccion
+# de cierre 0..1, ms = duracion de la orden, seq, inicio = hora LSL en que debe empezar a verse el
+# movimiento). Sin ese evento la mano sigue el angulo de los eventos 'paso' y 'ajeno' (sirve tambien para
+# repetir una sesion vieja con repetir_sesion.py).
+MANO_VIRTUAL = {
+    'evento': 'mano',
+    'dur_min_ms': 120, 'dur_max_ms': 2000,        # la animacion dura lo que la orden, dentro de estos limites
+    'inicio_antes_s': 0.25, 'inicio_despues_s': 0.5,   # un 'inicio' fuera de esta ventana es de otro reloj: se ignora
+}
 PERTURBACION_ON = 'perturbacion:on'
 CENTRADO        = 'centrado'       # la ortesis vuelve al punto medio antes del cue (no es un paso)
 AVISO_AJENO     = 'aviso_ajeno'    # la pantalla anuncia un movimiento ajeno (Tarea 2)
@@ -113,15 +168,33 @@ MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'ep
 # ============================ Tiempos (s) ============================
 CICLO_S     = 2.1
 VENTANA_MI  = 2.0            # ventana de decision de imaginacion motora
-# espera extra tras la senal antes del primer paso de cada ensayo: la ventana del primer paso
-# ya no empieza con la transicion mental (gemelo, 8 sujetos: el error del primer paso baja de
-# 0.22 a 0.15, ~80 % de lo que se gana esperando 2 s)
-ESPERA_PRIMER_PASO_S = 1.0
+# Espera extra tras la senal antes del primer paso de cada ensayo, para que su ventana no empiece con la transicion
+# mental. El 2 de octubre eran 1 s (gemelo, 8 sujetos: el error del primer paso bajaba de 0.22 a 0.15, ~80 % de lo que
+# se gana esperando 2 s). El 4 de octubre pasaron a 2 s con datos del casco real:
+# La calibracion de MI decide con los ULTIMOS VENTANA_MI s de una senal de DURACION_MI_S: [2, 4] s tras la senal. Con el
+# casco real (P001, exploratorio) la desincronizacion aparecio justo ahi: BA con C3/Cz/C4 de 0.53 en [0, 2], 0.56 en
+# [0.5, 2.5], 0.68 en [1, 3], 0.77 en [1.5, 3.5] y 0.76 en [2, 4] (42 ensayos; estudios/ventana_mi_lazo.py real). El primer paso del lazo espera para que
+# su ventana sea EXACTAMENTE la de la calibracion; antes miraba [1, 3]. Los pasos 2 a 5 del ensayo caen despues
+# (~[3.8, 5.8], [4.8, 6.8]...): no hay datos reales de ahi, y el gemelo no tiene el ERD en el tiempo.
+DURACION_MI_S = 4.0
+MI_VENTANA_OBJETIVO_S = (2.0, 4.0)
+ESPERA_PRIMER_PASO_S = DURACION_MI_S - VENTANA_MI
 EPOCA_ERRP  = (-0.2, 0.8)    # alrededor del ACK del paso
 PASOS_ENSAYO = 5             # pasos por ensayo (misma meta)
 
 # ============================ Senal ============================
 RED_HZ     = 60.0            # Mexico
+# CP1, 60 Hz. La fraccion de potencia en 58-62 Hz sobre 1-100 Hz de UNA ventana de 10 s fluctua con el tiempo (P001 con
+# el casco real, 4 de octubre, 616 s, exploratorio: en Fz, Cz, C3 y PO7 ronda 0.5 y en 18 % de las ventanas de 10 s
+# algun canal pasaba de 0.5; la potencia absoluta de 60 Hz cambia de 3 a 10 uV rms entre ventanas, y no es el movimiento de la
+# cabeza ni el resto del EEG). Al decoder le llega muy atenuado, no desaparece: hardware.filtrar lleva un notch de la
+# red y la banda de MI o de ErrP, y un seno de 60 Hz de 10 uV rms sin EEG queda a -26 dB (MI) y -17 dB (ErrP) con una
+# ventana de 2 s, y a -33 y -24 dB con una de 10 s (README, seccion CP1 y el 60 Hz); no se midio con EEG real. Es un
+# indicador de contacto del electrodo, no de lo que ve el decoder, asi que no debe tumbar el CP1 por una ventana mala.
+# Procedimiento (hardware.EntradaEEG.calidad_robusta): se mide una ventana; los canales que pasan de `umbral` se miden
+# en `ventanas` ventanas seguidas (20 s mas con 3) y se decide por la MEDIANA. Con los datos de P001 simulados: falla
+# 15.6 % -> 6.5 % de los inicios y re-mide en 15.6 %. El umbral NO se movio; solo cambio el estimador.
+CP1_RED = {'umbral': 0.5, 'ventanas': 3}
 BANDA_MI   = (8.0, 30.0)
 BANDA_ERRP = (1.0, 10.0)
 
@@ -324,6 +397,16 @@ ESTADO_SESION_JSON = RESULTADOS / 'estado_sesion.json'
 # junto al CSV de cada sesion: todo lo que se publico en el flujo Estado, una linea JSON por
 # evento con su hora ({'t': ..., 'evento': {...}}). Lo usa repetir_sesion.py (plan B)
 SUFIJO_ESTADO = '_estado.jsonl'
+# codigo de salida de orquestador.py cuando un NO GO (CP1, CP2 o CP3, sin --forzar) detuvo la sesion; antes salia con 0
+# y demo.py no podia distinguirlo de una sesion completa. El evento de Estado de esa parada es tipo 'detenida'
+# (detencion.py: n, titulo, motivo, que_hacer) y el tablero lo muestra en grande.
+SALIDA_NO_GO = 4
+# Cortes del arbol del CP3 en docs/DOMINGO.md seccion 5 (detencion.pasos): BA por debajo del primero -> "el detector no
+# informa"; BA >= BA_MIN con especificidad por debajo del segundo -> "demasiadas falsas alarmas"; el resto, dos caminos.
+DETENCION_CP3_BA_NO_INFORMA = 0.65
+DETENCION_CP3_ESPEC_FALSAS_ALARMAS = 0.85
+# En que CP estaba la sesion segun el estado de la maquina, si nadie dejo dicho el motivo de la parada.
+DETENCION_CP_POR_ESTADO = {'IMPEDANCIAS': 1, 'CAL_MI': 2, 'CAL_ERRP': 3}
 # modelos calibrados hace mas que esto: aviso al cargarlos (pueden ser de otro piloto o del gemelo)
 MODELOS_EDAD_AVISO_H = 6.0
 # decoder de MI pre-entrenado con otras personas (estudios/transferencia_physionet.py modelo)
