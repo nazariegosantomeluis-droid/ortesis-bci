@@ -18,6 +18,7 @@ cada 30 s se imprime el registro de huecos (perdidas de Bluetooth) y la bateria.
 """
 import argparse
 import json
+import os
 import time
 
 import numpy as np
@@ -133,6 +134,8 @@ def main():
     ap.add_argument('--estado', action='store_true',
                     help='cada 5 s deja bateria y validez del casco en resultados/estado_puente.json (estado_sistema.py)')
     a = ap.parse_args()
+    if a.grabar and os.path.exists(a.grabar):     # start_stream abre con :w y borraria la grabacion de otra corrida
+        raise SystemExit(f'{a.grabar} ya existe y --grabar lo pisaria (es el crudo de otra corrida). Usa otro nombre.')
 
     BoardShim.disable_board_logger()
     plan = plan_placa(a.placa, a.serie, a.puerto, a.archivo, a.maestra)
