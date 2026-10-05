@@ -825,7 +825,15 @@ Ajusta el cerebro sintético a las calibraciones **reales** de un piloto (gananc
 
 - **Comprobación con un piloto de mentira** (`--demo`: erd 0.15, ErrP 4 µV, parpadeos 0.30 y ganancias por canal distintas, medido en el propio gemelo, 4 sujetos × 4 lazos): el método recupera erd 0.15 (0.15), parpadeos 0.25/s (0.30) y un ErrP de 5.3 µV (4.0). **BA del decoder de MI predicha 0.72 contra 0.71 verdadera; BA del detector de ErrP 0.66 contra 0.63; error del agente tras perturbar 0.462 contra 0.497.** Pero **la recuperación sale 8 de 16 contra 0 de 16**: con una BA del detector entre 0.60 y 0.70 la recuperación es un umbral y un error de 0.03 en la BA la cambia por completo. Es un solo piloto de mentira. Lo fiable de la predicción son las BA de la calibración y el rango del error; para la recuperación, ancla con la BA real del CP3 (curva de robustez).
 - La ganancia por canal iguala el RMS (error máximo 0 % por construcción), no recupera las ganancias «verdaderas»: el gemelo tiene su propia mezcla entre electrodos (Fz sale ×1.75 contra ×1.2 puesto).
-- **Sin datos de P001 en esta máquina:** el método está probado con datos del gemelo; correrlo con una persona está pendiente de sus archivos de calibración (ver `TAREAS.md`).
+- **Con P001 (5 de octubre; EXPLORATORIO: una persona, una sesión que se detuvo en CP3 y no llegó al lazo).** Del XDF de la sesión se reconstruyeron las calibraciones (`desde_xdf.py`: 42 ensayos de MI y 120 épocas de ErrP) y se corrió `gemelo_personal.py` con ellas. Lo ajustado: ERD en C3 0.06 (el estándar, 0.25), ErrP de 1.1 µV (6.0) y parpadeos 0.01/s (0.15). Predicción contra lo medido con esas mismas épocas:
+
+  | | Predicho por el gemelo de P001 | Medido en P001 |
+  |---|---|---|
+  | BA del decoder de MI | 0.61 | **0.79** [IC90 0.67, 0.88] (validación cruzada; el CP2 en vivo dio 0.81) |
+  | Detector de ErrP: sens / espec / BA | 0.31 / 0.84 / 0.58 | **0.03 / 0.95 / 0.49** (validación anidada; el CP3 en vivo dio 0.06 / 0.90 / 0.48) |
+  | Lazo (error tras perturbar, recuperación) | 0.497, 1 de 16 | sin lazo: la sesión se detuvo en el CP3 |
+
+  Lectura: el gemelo acertó en lo cualitativo para el ErrP (con una Pe de 0.9 µV no hay detector útil y el agente no se recupera), pero **subestimó el decoder de MI** en 0.18 de BA: el cociente de potencia de C3, el único estadístico de MI que ajusta, no captura lo que el decoder de Riemann sí encuentra en esta persona (puede ser ERD, o la pista visual de la señal, como ya se vio con la ventana del lazo). Con una persona no se puede decir más; la predicción de la recuperación sigue sin poder compararse con una medición.
 ## Reporte del detector de ErrP al final de CAL_ERRP
 
 Al terminar la calibración de ErrP el orquestador dibuja `resultados/detector_errp_<marca>.png` (`reporte_detector.py`): **curva de confiabilidad**, **curva ROC** con el punto de operación, **histograma de puntajes con el umbral elegido** y, arriba, el umbral, la sensibilidad, la especificidad, los **falsos positivos** (n de aciertos y %), los falsos negativos, la AUC y el error de calibración (ECE). Se apaga con `--sin-reporte-detector`; si falla (por ejemplo, un detector que viene de la memoria de otra sesión y no guardó `p_cv`), avisa y la calibración sigue.
