@@ -4322,6 +4322,53 @@ def mano_virtual_ventana_falsa():
     return 'la ventana corre entera contra un Qt de mentira (demo, dibujo, teclas, pantalla 1); falta abrirla con Qt de verdad'
 
 
+@prueba
+def ventana_mi_lazo():
+    """La ventana de MI del primer paso del lazo es la de la calibracion ([2, 4] s tras la senal), el estudio la mide
+    desde los marcadores de una sesion y mide la BA por ventana en un EEG continuo con el ERD solo de 2 s en adelante."""
+    sys.path.insert(0, str(config.RAIZ / 'estudios'))
+    import ventana_mi_lazo as vm
+    # las constantes: la calibracion decide con los ultimos VENTANA_MI s de DURACION_MI_S y el primer paso del lazo con lo mismo
+    assert config.MI_VENTANA_OBJETIVO_S == (2.0, 4.0)
+    assert (config.DURACION_MI_S - config.VENTANA_MI, config.DURACION_MI_S) == config.MI_VENTANA_OBJETIVO_S
+    assert vm.primera_ventana_esperada() == config.MI_VENTANA_OBJETIVO_S
+    assert config.VENTANA_MI + config.ESPERA_PRIMER_PASO_S == config.DURACION_MI_S
+    import orquestador
+    assert orquestador.argumentos(['real']).duracion_mi == config.DURACION_MI_S
+    # solapamiento con [2, 4]
+    assert abs(vm.solapamiento(1.05, 3.05) - 1.05) < 1e-9 and vm.solapamiento(2, 4) == 2.0 and vm.solapamiento(4.8, 6.8) == 0.0
+    # marcadores de un lazo con 2 ensayos (el centrado y las ordenes de CP1 y de la calibracion de ErrP no cuentan)
+    reg = [{'t': 0.5, 'marcador': config.CUE_CERRAR}, {'t': 0.9, 'marcador': 'paso_ack:1'},
+           {'t': 5.0, 'marcador': 'bloque:LAZO_ESTATICO'}]
+    for base in (10.0, 20.0):
+        reg += [{'t': base, 'marcador': config.CUE_CERRAR}, {'t': base + 4.05, 'marcador': 'paso_ack:7'},
+                {'t': base + 5.1, 'marcador': 'paso_quieto:8'}, {'t': base + 6.2, 'marcador': 'paso_ack:9'},
+                {'t': base + 6.3, 'evento': {'tipo': 'paso'}}]
+    por = vm.ventanas_por_paso(reg)
+    assert sorted(por) == [1, 2, 3] and all(len(v) == 2 for v in por.values()), por
+    filas = vm.tabla_sesion(por)
+    assert abs(filas[0]['ini'] - 2.05) < 1e-9 and abs(filas[0]['fin'] - 4.05) < 1e-9 and filas[0]['cubre_s'] > 1.94
+    assert filas[1]['cubre_s'] < 1.0 and filas[2]['cubre_s'] == 0.0
+    # BA por ventana: EEG continuo de 250 Hz con 36 ensayos de 4 s; el ERD (potencia 8-30 Hz en C3) solo de 2 s en adelante
+    fs = 250.0
+    rng = np.random.default_rng(0)
+    n = int(fs * 36 * 7)
+    x = rng.normal(0, 1.0, (8, n))
+    t = np.arange(n) / fs
+    cues = [(3.0 + 7.0 * k, 1 if k % 2 == 0 else -1) for k in range(36)]
+    ritmo = np.sin(2 * np.pi * 11 * t)
+    for c, meta in cues:
+        if meta > 0:                                            # una clase deja un ritmo de 11 Hz en C3, pero solo de 2 a 4 s
+            i0, i1 = int((c + 2.0) * fs), int((c + 4.0) * fs)
+            x[1, i0:i1] += 3.0 * ritmo[i0:i1]
+    import hardware as hw
+    xf = hw.filtrar(x, config.BANDA_MI, fs)
+    filas = vm.ba_por_ventana(xf, t, cues, fs, ventanas=((0, 2), (2, 4)), repeticiones=3, permutaciones=20)
+    ba_ant, ba_tras = filas[0][2], filas[1][2]
+    assert ba_tras > 0.85 and ba_ant < 0.75 and filas[1][3] < 0.1 and filas[0][3] > 0.1, filas
+    return f'primer paso = [2, 4] s; el estudio mide pasos y ventanas (BA {ba_ant:.2f} antes del ERD, {ba_tras:.2f} sobre el)'
+
+
 # Tres niveles: las rapidas no tocan la red ni esperan en tiempo real (reloj virtual o
 # datos sinteticos); --lsl agrega las que levantan el gemelo o el puente y esperan en
 # tiempo real (o que tardan mas de un minuto); --completa agrega las sesiones reales contra el gemelo.
@@ -4336,7 +4383,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa']
+           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']

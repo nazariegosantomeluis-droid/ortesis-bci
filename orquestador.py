@@ -1644,7 +1644,8 @@ def argumentos(argv=None):
                     help='cada senal de CERRAR/RELAJA tambien suena: dos tonos, sube = CERRAR, baja = RELAJA (solo con el casco)')
     ap.add_argument('--cue-sin-visual', dest='cue_sin_visual', action='store_true',
                     help='la pantalla muestra solo un "+" y la meta llega por el oido (usar con --cue-audio)')
-    ap.add_argument('--duracion_mi', type=float, default=4.0)
+    ap.add_argument('--duracion_mi', type=float, default=config.DURACION_MI_S,
+                    help='segundos de la senal de MI en la calibracion; se decide con los ultimos config.VENTANA_MI')
     ap.add_argument('--espera', type=float, default=1.5)
     ap.add_argument('--p_error', type=float, default=0.3)
     ap.add_argument('--seg_revision', type=float, default=10.0)

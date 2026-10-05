@@ -215,7 +215,7 @@ Medido en el gemelo sin LSL y con los topes del recorrido (`estudios/sham_gemelo
 | débil | permutados | 10/16 | 10/16 | 0.385 / 0.389 | +0.004 [−0.033, +0.046] |
 | débil | sham ciego | 11/16 | 2/16 | 0.385 / 0.429 | +0.044 [+0.008, +0.080] |
 
-El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer**. Con el detector débil el propio bloque real se queda en 11 de 16. Con bloques de 60 pasos las cifras eran casi las mismas (real 16/16, sham 0/16, +0.136 [+0.111, +0.161] con el detector actual).
+El criterio de aceptación (real ≥ 12 de 16, sham ≤ 3 de 16 y una diferencia de error cuyo intervalo excluye el 0) **se cumple con el sham sin evidencia y los detectores actual y de ayer**. Con el detector débil el propio bloque real se queda en 11 de 16. Con bloques de 60 pasos las cifras eran casi las mismas (real 16/16, sham 0/16, +0.136 [+0.111, +0.161] con el detector actual). La tabla se midió el 3 de octubre con `ESPERA_PRIMER_PASO_S = 1`; con la espera de 2 s solo se repitió la fila «actual / sin evidencia» (16/16 contra 0/16, +0.178 [+0.154, +0.202]; ver «Ventana de decisión de MI»).
 
 ### Hallazgo: un sham que conserva la tasa de ErrP no es un sham
 
@@ -394,6 +394,29 @@ Probado con la API simulada (`pruebas.py`, `narrador_jurado`) y, con plantillas,
 - **Decoder de MI en C3, Cz y C4 por defecto** (`--decoder-canales mi`). Sin elección entre canales, así que la BA que reporta el CP2 es la de la validación cruzada simple. `--decoder-canales auto` vuelve a elegir por validación cruzada anidada entre C3/Cz/C4 y los 8; `todos` fija los 8. Con `--preentrenado` el decoder sigue usando los 8 canales con los que se entrenó (el orquestador lo avisa).
 
 **Lo que sí y lo que no se midió.** En el gemelo (8 sujetos, 60 ensayos) C3/Cz/C4 da BA 0.813 y los 8 canales 0.818, y el CP2 (≥ 0.70) pasa 8 de 8 con cualquiera de los dos: restringir los canales no cuesta nada ahí. **El gemelo no tiene la pista visual posterior**, así que no puede mostrar la ventaja; esa justificación sale solo de los datos del casco real de un participante. Hace falta repetirlo con más personas, y con la señal ya neutra, antes de afirmar que quita el sesgo.
+
+## Ventana de decisión de MI: el primer paso del lazo mira lo mismo que la calibración
+
+**Pregunta** (4 de octubre): con el casco real la desincronización apareció de 2 a 4 s después de la señal. ¿La ventana con la que el lazo decide cubre esa parte del ensayo?
+
+**Lo que se midió.** La calibración decide con los últimos 2 s de una señal de 4 s: `[2, 4]` s, justo donde apareció el ERD. El lazo no: la orden del primer paso de cada ensayo salía a 3 s de la señal (ventana `[1, 3]`), y cada paso siguiente unos 1.0 a 1.7 s después (`estudios/ventana_mi_lazo.py sesion`, sobre una sesión del gemelo con la órtesis simulada):
+
+| Paso del ensayo | Ventana antes | Cubre de `[2, 4]` | Ventana ahora | Cubre de `[2, 4]` |
+|---|---|---|---|---|
+| 1 | [1.05, 3.05] s | 1.05 de 2 s | [2.04, 4.04] s | 1.96 de 2 s |
+| 2 | [2.75, 4.75] s | 1.25 | [3.77, 5.77] s | 0.23 |
+| 3 | [3.81, 5.81] s | 0.19 | [4.83, 6.83] s | 0 |
+| 4 y 5 | [4.81, 7.02] s | 0 | [5.80, 8.04] s | 0 |
+
+(Dos sesiones del gemelo con la órtesis simulada, 3 ensayos de 5 pasos cada una; en el paso 5, 2 ensayos. Con la órtesis de verdad el tiempo entre pasos puede ser algo mayor: espera la telemetría.)
+
+**Con datos reales** (P001, 42 ensayos de MI del XDF, decoder Riemann con C3/Cz/C4, validación cruzada, `estudios/ventana_mi_lazo.py real`): la exactitud balanceada sube con la ventana: **0.53** en `[0, 2]`, 0.56 en `[0.5, 2.5]`, **0.68** en `[1, 3]` (la que usaba el primer paso), 0.77 en `[1.5, 3.5]` y **0.76** en `[2, 4]`; los dos últimos con p = 0.01 por permutaciones (el mínimo con 100). **EXPLORATORIO:** un participante, 42 ensayos (un error estándar de unos 0.07), se miraron 5 ventanas sin corregir el p, y los ensayos solo duran 4 s, así que no se puede probar nada más tardío.
+
+**Qué cambió.** `config.ESPERA_PRIMER_PASO_S` pasó de 1 a 2 s (`= DURACION_MI_S - VENTANA_MI`): el primer paso de cada ensayo espera lo mismo que la calibración y decide con la misma ventana. Cada ensayo dura 1 s más (unos 30 s más en toda la demo). La dirección coincide con el hallazgo del gemelo del 2 de octubre (esperar 2 s en lugar de 1 baja el error del primer paso), con la diferencia de que ahora el motivo viene de una persona.
+
+**El control causal `--sham` con la espera de 2 s** (4 de octubre; gemelo sin LSL con topes, **no una persona**): corrida reducida de `estudios/sham_gemelo.py` con solo el detector actual y el sham sin evidencia (`nula`), 4 sujetos × 4 sesiones, 80 pasos por bloque, perturbación en el paso 10 y `ESPERA_PRIMER_PASO_S = 2.0`. El bloque real se recupera en **16 de 16** (mediana de 30 pasos) y el sham en **0 de 16**; error tras perturbar 0.304 contra 0.481; sham − real **+0.178 [+0.154, +0.202]** (IC 90 %). El criterio de aceptación se cumple. Con la espera en 1.0 s y el mismo código de hoy dio 16 de 16 y 0 de 16, 0.289 contra 0.488 y +0.199 [+0.171, +0.230]. Ninguna de las dos corridas reproduce al decimal la referencia del 3 de octubre (16 de 16 y 1 de 16, 0.296 contra 0.471, +0.175, tabla de la sección del control causal), ni la de la «Tabla del control causal con el defecto nuevo» (0 de 16 y +0.184 [+0.155, +0.212], medida con el prior por paso y la espera de 1 s): la diferencia **no viene de la espera**, y probablemente viene del prior por paso (`PRIOR_POR_PASO`), que se activó después de la referencia del 3 de octubre; no se aisló, y los intervalos de todas estas corridas se traslapan. **Solo se repitió ese régimen y esa fuente:** las demás cifras de referencia del gemelo y del simulador (`agente_lento`, `paso_sin_movimiento`, `respaldo_ack`, `prior_por_paso` y el resto del control causal) siguen siendo con 1 s. La corrida reducida es `python estudios/sham_reducido.py` (~1 min con 2 núcleos); `python estudios/sham_gemelo.py` corre además los otros detectores y fuentes de sham.
+
+**Lo que NO se resolvió.** Los pasos 2 a 5 del ensayo caen *después* de `[2, 4]` (y ahora un segundo más tarde): no hay datos reales de qué hace el ERD ahí (la calibración termina a los 4 s), y esas ventanas incluyen además la respuesta cerebral al movimiento del paso anterior. Con este diseño, de 5 pasos por ensayo solo el primero decide con la ventana en que se entrenó el decoder. Opciones para quien decida: menos pasos por ensayo (`config.PASOS_ENSAYO`, que también cambia el agente y los estudios), calibrar con señales más largas para tener ventanas más tardías, o medir primero: en la primera sesión con lazo de verdad, `python estudios/ventana_mi_lazo.py sesion --ultima` da la tabla y el error por paso del ensayo sale del CSV. El gemelo no puede decidirlo: su ERD es constante durante toda la señal.
 
 ## Mano virtual a pantalla completa (`mano_virtual.py`)
 

@@ -168,10 +168,17 @@ MOTIVOS_EXCLUSION = ['pausa:eeg', 'pausa:canal', 'pausa:ortesis', 'sin_ack', 'ep
 # ============================ Tiempos (s) ============================
 CICLO_S     = 2.1
 VENTANA_MI  = 2.0            # ventana de decision de imaginacion motora
-# espera extra tras la senal antes del primer paso de cada ensayo: la ventana del primer paso
-# ya no empieza con la transicion mental (gemelo, 8 sujetos: el error del primer paso baja de
-# 0.22 a 0.15, ~80 % de lo que se gana esperando 2 s)
-ESPERA_PRIMER_PASO_S = 1.0
+# Espera extra tras la senal antes del primer paso de cada ensayo, para que su ventana no empiece con la transicion
+# mental. El 2 de octubre eran 1 s (gemelo, 8 sujetos: el error del primer paso bajaba de 0.22 a 0.15, ~80 % de lo que
+# se gana esperando 2 s). El 4 de octubre pasaron a 2 s con datos del casco real:
+# La calibracion de MI decide con los ULTIMOS VENTANA_MI s de una senal de DURACION_MI_S: [2, 4] s tras la senal. Con el
+# casco real (P001, exploratorio) la desincronizacion aparecio justo ahi: BA con C3/Cz/C4 de 0.53 en [0, 2], 0.56 en
+# [0.5, 2.5], 0.68 en [1, 3], 0.77 en [1.5, 3.5] y 0.76 en [2, 4] (42 ensayos; estudios/ventana_mi_lazo.py real). El primer paso del lazo espera para que
+# su ventana sea EXACTAMENTE la de la calibracion; antes miraba [1, 3]. Los pasos 2 a 5 del ensayo caen despues
+# (~[3.8, 5.8], [4.8, 6.8]...): no hay datos reales de ahi, y el gemelo no tiene el ERD en el tiempo.
+DURACION_MI_S = 4.0
+MI_VENTANA_OBJETIVO_S = (2.0, 4.0)
+ESPERA_PRIMER_PASO_S = DURACION_MI_S - VENTANA_MI
 EPOCA_ERRP  = (-0.2, 0.8)    # alrededor del ACK del paso
 PASOS_ENSAYO = 5             # pasos por ensayo (misma meta)
 
