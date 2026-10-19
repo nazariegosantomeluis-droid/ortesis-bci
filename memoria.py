@@ -207,7 +207,7 @@ def main():
         print('  ' + n)
     ruta = guardar(csv, m)
     print(texto(m))
-    print(f'Guardada: {ruta}\nPara arrancar de ella: python orquestador.py real --puerto COM4 --desde-sesion {ruta}')
+    print(f'Guardada: {ruta}\nPara arrancar de ella: python orquestador.py real --ortesis-usb COM5 --desde-sesion {ruta}')
 
 
 if __name__ == '__main__':

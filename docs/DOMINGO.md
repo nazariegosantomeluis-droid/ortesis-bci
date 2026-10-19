@@ -56,18 +56,21 @@ Imprime una matriz (fila = electrodo tocado, columna = canal que respondió, en 
 
 ## 3. Verificar la órtesis (2 minutos)
 
+La placa lleva el **firmware 1.3**, que habla JSON por el cable: se usa `--ortesis-usb COMx` en todos los comandos. (`--puerto COMx` es el protocolo viejo de texto `M`/`A`/`T`; con esta placa da NO GO en el CP1 por ACK perdidos.)
+
 ```bash
-python verificar_ortesis.py --puerto COM4
+python firmware_esp32/probar_esp32.py --puertos     # cuál COM es la ESP32 (CP210x o CH340); cierra Thonny y MicroPico antes
+python verificar_ortesis.py --ortesis-usb COM5
 ```
 
-Mueve la órtesis 30 veces y mide cuánto tarda en empezar a moverse tras el ACK.
+Mueve la órtesis 30 veces, dice la latencia del ACK (mediana y p95) y cuánto tarda en empezar a moverse tras el ACK. Si el COM no aparece o sale «acceso denegado»: `firmware_esp32/LEEME.md`, *Si la laptop no ve la placa*.
 
 | Resultado | Qué significa | Qué hacer |
 |---|---|---|
 | `OK: latencia mecanica mediana ...` | Hay telemetría: la época del ErrP se alinea al movimiento real. | Sigue. |
 | `AVISO: el inicio se vio en menos del 80 %` | Telemetría intermitente: se usará el ACK más la latencia media. | Sigue. Cuesta algo (en el gemelo se recuperan 12 de 16 sesiones en lugar de las 16), pero el lazo funciona. |
-| `FALLA: no se vio el inicio del movimiento`, y la órtesis **sí se movió** | El firmware no manda la telemetría `T`. | Sigue si no hay tiempo de corregirlo: la época se corta en el ACK. El detector será más débil (en el gemelo, BA 0.72 en lugar de 0.86, y se recuperan 10 de 16 sesiones). |
-| `FALLA`, y la órtesis **no se movió** | No hay ACK: otro programa usa el COM, o el número cambió. | Cierra el monitor serie de Arduino; mira el número en el Administrador de dispositivos y cámbialo en el comando. |
+| `FALLA: no se vio el inicio del movimiento`, y la órtesis **sí se movió** | El firmware no manda telemetría (o la bandera no es la de su firmware: 1.3 → `--ortesis-usb`). | Sigue si no hay tiempo de corregirlo: la época se corta en el ACK. El detector será más débil (en el gemelo, BA 0.72 en lugar de 0.86, y se recuperan 10 de 16 sesiones). |
+| `FALLA`, y la órtesis **no se movió** | No hay ACK: otro programa usa el COM, el número cambió, o se usó `--puerto` con el firmware 1.3. | Usa `--ortesis-usb`. Cierra Thonny, MicroPico y el monitor serie de Arduino; mira el número en el Administrador de dispositivos y cámbialo en el comando. |
 
 ## 4. La sesión
 
@@ -82,28 +85,30 @@ python puente_lsl.py --placa unicorn --grabar resultados/sesion_unicorn.csv
 # terminal 2: tablero
 python tablero.py
 
-# terminal 3: la sesión
-python orquestador.py real --puerto COM4
+# terminal 3: la sesión (la órtesis con el firmware 1.3, por cable)
+python orquestador.py real --ortesis-usb COM5
 ```
 
 **Mano virtual** (segunda pantalla, o en lugar de la órtesis para calibrar el ErrP): `python orquestador.py real --ortesis-sim --mano-virtual` y, en otra terminal, `python mano_virtual.py --pantalla 1` (o `demo.py lanzar ... --mano-virtual --pantalla 1`). Ábrela antes con `python mano_virtual.py --demo` para comprobar que la pantalla y la ventana funcionan; Esc la cierra. Si la órtesis es la real, la mano solo repite lo que se le ordena.
 
-Con la app UnicornLSL como fuente, no lances el puente y usa `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
+Con la app UnicornLSL como fuente, no lances el puente y usa `python orquestador.py real --ortesis-usb COM5 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
 
 ### Atajo: `python demo.py`
 
 Hace lo de arriba en el orden correcto, con una revisión previa y una bitácora. No cambia el orquestador: si algo falla aquí, los comandos manuales de arriba siguen valiendo.
 
 ```bash
-python demo.py preflight --puerto COM4                  # solo revisa: OK / AVISO / FALLA, con qué hacer
-python demo.py lanzar --puerto COM4                     # revisa, y lanza puente + tablero + orquestador
-python demo.py lanzar --plan unicornlsl --puerto COM4   # la fuente es la app UnicornLSL: no lanza el puente
+python demo.py preflight --ortesis-usb COM5             # solo revisa: OK / AVISO / FALLA, con qué hacer
+python demo.py lanzar --ortesis-usb COM5                # revisa, y lanza puente + tablero + orquestador
+python demo.py lanzar --plan unicornlsl --ortesis-usb COM5   # la fuente es la app UnicornLSL: no lanza el puente
 python demo.py lanzar --plan gemelo --ortesis-sim       # sin casco: el gemelo digital como fuente
 python demo.py lanzar --ortesis-udp                     # la órtesis por Wi-Fi (ESP32 en 192.168.4.1), en lugar de --puerto
 python demo.py lanzar --plan gemelo --ortesis-udp 127.0.0.1   # sin la placa: lanza también ortesis_udp_sim.py (la ESP32 simulada)
-python demo.py lanzar --puerto COM4 -- --sham --preentrenado   # lo que va tras `--` pasa tal cual al orquestador
-python demo.py planb --puerto COM4                      # plan B 1: tablero + repetición de la última sesión real que llegó al lazo
+python demo.py lanzar --ortesis-usb COM5 -- --sham --preentrenado   # lo que va tras `--` pasa tal cual al orquestador
+python demo.py planb --ortesis-usb COM5                 # plan B 1: tablero + repetición de la última sesión real que llegó al lazo
 ```
+
+`--ortesis-usb COMx` hace lo mismo que en el orquestador: el preflight pide pyserial, revisa que ese COM exista y que la verificación de hoy se haya hecho con `--ortesis-usb`. `--puerto COMx` queda para el protocolo viejo. `--ortesis-sim`, `--ortesis-usb` y `--ortesis-udp` son excluyentes.
 
 `--ortesis-udp [IP]` (y `--udp-puerto`) hace lo mismo que en el orquestador y es excluyente con `--ortesis-sim`: no pide pyserial ni la verificación USB, y el preflight avisa a dónde apunta (UDP no se puede comprobar sin mandar una orden; con el plan `gemelo` y una IP de esta laptop, `demo.py` lanza `ortesis_udp_sim.py` antes que el orquestador; con otro plan, el aviso recuerda lanzarlo a mano). `planb --ortesis-udp` repite los ángulos por Wi-Fi.
 
@@ -160,8 +165,8 @@ El mensaje dice qué falló.
 - **No llegaron muestras de EEG** (el CP1 lo dice así). No hay electrodos que reacomodar: revisa que el casco esté encendido y enviando, y que `python ver_flujos.py` muestre un solo `EEG` con datos. Luego vuelve a lanzar el orquestador.
 - **No encuentra el flujo `EEG`.** Revisa que el puente siga vivo en la terminal 1 y que ninguna otra aplicación esté conectada al casco. `python ver_flujos.py` debe mostrar un solo `EEG`. **Límite conocido:** este error ocurre antes del CP1 y el tablero no lo anuncia: el orquestador termina con un traceback («No encontre el flujo de EEG…») en su terminal, sin el aviso grande y sin el código de salida 4.
 - **Latencia del ACK** (MAD > 15 ms, p95 > 60 ms o más de 10 % sin ACK).
-  1. Cambia el cable o el puerto USB y cierra lo que use el COM.
-  2. Reinicia el ESP32 y repite `python verificar_ortesis.py --puerto COM4`.
+  1. Cambia el cable o el puerto USB y cierra lo que use el COM. Si lanzaste con `--puerto` y la placa tiene el firmware 1.3, ese es el problema: usa `--ortesis-usb`.
+  2. Reinicia el ESP32 y repite `python verificar_ortesis.py --ortesis-usb COM5` (con el protocolo viejo, `--puerto COM4`).
   3. Si la órtesis no responde, haz la demo sin ella: `python orquestador.py real --ortesis-sim`. El tablero muestra todo; dilo al jurado.
   4. Si ya ibas con `--ortesis-sim` y la latencia falla, no es la órtesis sino la laptop (saturada): cierra lo que no uses y repite. El aviso no vuelve a sugerir `--ortesis-sim`.
 

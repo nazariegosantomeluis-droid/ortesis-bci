@@ -333,10 +333,10 @@ def veredicto(por_fuente, nombre):
     if 'brainflow' in por_fuente and pasa(por_fuente['brainflow']):
         lineas.append('VEREDICTO: usa BrainFlow (fuente principal):')
         lineas.append(f"    python puente_lsl.py --placa unicorn{' --serie ' + nombre if nombre else ''}")
-        lineas.append('    python orquestador.py real --puerto COM4')
+        lineas.append('    python orquestador.py real --ortesis-usb COM5')
     elif 'lsl' in por_fuente and pasa(por_fuente['lsl']):
         lineas.append('VEREDICTO: usa la app UnicornLSL (respaldo), con el casco conectado y en Start:')
-        lineas.append(f"    python orquestador.py real --puerto COM4 --fuente unicornlsl{' --eeg-nombre ' + nombre if nombre else ''}")
+        lineas.append(f"    python orquestador.py real --ortesis-usb COM5 --fuente unicornlsl{' --eeg-nombre ' + nombre if nombre else ''}")
     else:
         fallas = sorted({r['clave'] for res in por_fuente.values() for r in res
                          if (r['clave'] in CRITICAS and r['estado'] != 'OK') or (r['clave'] == 'toques' and r['estado'] == 'FALLA')})

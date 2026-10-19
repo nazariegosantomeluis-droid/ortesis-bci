@@ -4,7 +4,7 @@ Esta carpeta tiene:
 
 - **`main.py`** (versión 1.3) va en la ESP32 DevKit V1. Es **un solo programa con todo**: servos, nervio de luz, vibradores, paro, corriente, sensor de fuerza, Wi-Fi, cable USB y calibración.
 - **`probar_esp32.py`** va en la laptop. Mueve y calibra la órtesis sin el casco, por Wi-Fi o por cable USB.
-- **`ortesis_udp.py`** y **`ortesis_usb.py`** son los clientes para el orquestador (`OrtesisUDP` y `OrtesisUSB`, con la misma interfaz): latido, ACK, telemetría y paro.
+- **`ortesis_udp.py`** y **`ortesis_usb.py`** son clientes de referencia (`OrtesisUDP` y `OrtesisUSB`, con su propia interfaz: `mover(cierre=...)` devuelve un dict): latido, ACK, telemetría y paro. **El orquestador no los usa:** usa `hardware.OrtesisUDP` (`--ortesis-udp`) y `hardware.OrtesisUSB` (`--ortesis-usb COMx`), que hablan el mismo JSON con la interfaz del orquestador.
 - **`pruebas/`** corre `main.py` en la laptop con el hardware simulado: `python pruebas/prueba_firmware.py` (Linux o Mac).
 - **`CAMBIOS_v1.3.diff`** muestra qué cambió desde la 1.2, para revisarlo antes de aprobarlo.
 
@@ -17,6 +17,21 @@ Esta carpeta tiene:
 5. Presiona el botón **EN** (reset). En la consola debe salir: `Adaptrode 1.3 · DEVKIT_V1 · red Adaptrode · IP 192.168.4.1 · canal 6 · USB sí`, y la tira debe prender en **ámbar**.
 
 Si usas la ESP32-C3 SuperMini, cambia la línea `PLACA = 'DEVKIT_V1'` por `PLACA = 'C3_SUPERMINI'`.
+
+**Con VS Code en lugar de Thonny (extensión MicroPico):**
+
+1. Instala la extensión **MicroPico** y abre esta carpeta (`firmware_esp32`) en VS Code.
+2. Paleta de comandos (Ctrl+Shift+P) → *MicroPico: Configure project*. MicroPico se conecta solo al puerto de la placa; si no, *MicroPico: Connect* y elige el COM.
+3. Clic derecho sobre `main.py` → *Upload current file to Pico* (el nombre dice «Pico», pero sirve con la ESP32 que ya tiene MicroPython). Se guarda como `main.py` en la placa.
+4. *MicroPico: Reset → Soft reset* (o el botón **EN**) y en la terminal de MicroPico debe salir el mismo saludo `Adaptrode 1.3 ...`.
+5. **Antes de usar la órtesis desde la laptop, desconecta MicroPico** (*MicroPico: Disconnect*, o cierra VS Code): mientras está conectado se queda con el puerto. MicroPython hay que instalarlo antes en la placa (paso 3 de Thonny, o con `esptool`).
+
+### Si la laptop no ve la placa
+
+- **El cable.** Muchos cables USB solo cargan: no tienen las líneas de datos. Si la placa prende pero no aparece ningún puerto nuevo, prueba con otro cable (uno que sepas que pasa datos, por ejemplo el de un teléfono con el que copias archivos).
+- **El driver.** Mira el chip junto al conector USB de la placa: **CP2102** (o CP210x) o **CH340**. En Windows instala su driver (Silicon Labs «CP210x VCP» o WCH «CH341SER») y vuelve a conectar. En el Administrador de dispositivos, *Puertos (COM y LPT)*, debe aparecer «Silicon Labs CP210x ... (COMx)» o «USB-SERIAL CH340 (COMx)»; ese número es el que va en `--usb COMx` y `--ortesis-usb COMx`. `python probar_esp32.py --puertos` lista lo mismo.
+- **Un solo programa a la vez en el puerto.** Si el puerto existe pero sale «Acceso denegado», «PermissionError» o «could not open port», otro programa lo tiene abierto: Thonny, el monitor serie de Arduino, las extensiones de VS Code **MicroPico** o **Pymakr**, otro `probar_esp32.py`, `verificar_ortesis.py` u `orquestador.py` en otra terminal, o cualquier script de Python que haya quedado abierto. Ciérralo y vuelve a intentar.
+- **Sigue sin aparecer:** prueba otro puerto USB de la laptop (sin concentrador) y, si nada funciona, mantén apretado **BOOT** mientras conectas el cable.
 
 **Si la tira no prende:** la flechita impresa en la tira debe apuntar alejándose del cable de datos (el DIN entra por el primer LED), el GND de la tira debe estar unido al GND de la ESP32 y la tira necesita su +5V.
 
@@ -119,6 +134,8 @@ o.cerrar()
 ```
 
 Cada latido trae su ACK; con esas muestras el cliente calcula el desfase entre el reloj de la ESP32 y el de la laptop y sigue su deriva.
+
+**Con el orquestador por cable:** `python orquestador.py real --ortesis-usb COM5` (en lugar de `--puerto COM5`, que es el protocolo viejo de texto `M`/`A`/`T` y con este firmware da NO GO en el CP1 por ACK perdidos). Verificación previa: `python verificar_ortesis.py --ortesis-usb COM5`. Detalles en el README, sección *Protocolo del ESP32*.
 
 ## 10. Cómo bajar la latencia
 

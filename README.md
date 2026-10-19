@@ -73,8 +73,8 @@ python pruebas.py                    # debe decir 81/81 pruebas pasaron
 | `caos.py` | `PlanCaos`: fallas reproducibles por semilla (ingeniería del caos aplicada al lazo). |
 | `detencion.py` | Qué dice el tablero cuando un NO GO detiene la sesión: el CP, el motivo y qué hacer (el árbol de `docs/DOMINGO.md`), sin Qt ni hardware. |
 | `repetir_sesion.py` | Plan B: repite en el tablero, y si se quiere en la órtesis, una sesión grabada (`resultados/sesion_..._estado.jsonl`). |
-| `ortesis_udp_sim.py` | Firmware 1.2 de la ESP32 simulado en la laptop (UDP): prueba `OrtesisUDP` y el orquestador sin la placa. |
-| `verificar_ortesis.py` | Mide con la telemetría del ESP32 cuánto tarda la órtesis en empezar a moverse tras el ACK. |
+| `ortesis_udp_sim.py` | Firmware de la ESP32 simulado en la laptop (UDP, o un cable USB en memoria para las pruebas): prueba `OrtesisUDP`, `OrtesisUSB` y el orquestador sin la placa. |
+| `verificar_ortesis.py` | Mide la latencia del ACK y, con la telemetría del ESP32, cuánto tarda la órtesis en empezar a moverse tras el ACK (`--ortesis-usb COMx` con el firmware 1.3, `--puerto` con el protocolo viejo). |
 | `ia.py` | Lo común a toda la IA: llave desde `.env`, lo que puede salir hacia la API (`sanear`), preguntas con herramientas, y el esquema, la validación y las reglas deterministas de las propuestas. Nada de esto corre dentro del lazo. |
 | `copiloto.py` | Copiloto clínico: preguntas sobre una sesión respondidas con herramientas sobre su CSV, e informe entre sesiones. |
 | `narrador.py` | Narrador para el jurado: proceso aparte que escucha `Estado` y publica una frase por evento relevante en el flujo `Narracion` (Claude, con plantillas de respaldo). |
@@ -758,16 +758,16 @@ python puente_lsl.py --placa unicorn --grabar resultados/sesion_unicorn.csv
 # LabRecorder: seleccionar todos los flujos y grabar XDF
 # terminal 2
 python tablero.py
-# terminal 3
-python orquestador.py real --puerto COM4
+# terminal 3: la órtesis con el firmware 1.3, por cable (COMx según el Administrador de dispositivos)
+python orquestador.py real --ortesis-usb COM5
 ```
 
-Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orquestador.py real --puerto COM4 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
+`--puerto COM4` sigue existiendo, pero habla el protocolo viejo de texto (`M`/`A`/`T`): con la placa del firmware 1.3 da NO GO en el CP1 por ACK perdidos. Con la app UnicornLSL como fuente de respaldo no se usa el puente: `python orquestador.py real --ortesis-usb COM5 --fuente unicornlsl` (agrega `--eeg-nombre <nombre>` si hay más de un flujo de tipo `Data`).
 
 Con modelos ya calibrados: `--saltar-calibracion`. Sin ESP32: `--ortesis-sim`. Para que el detector no cambie durante el lazo: `--sin-coadaptativo`.
 Si el CP3 da NO GO, `--solo-errp` repite solo la calibración de ErrP con el decoder de MI ya calibrado. Al cargar modelos guardados, el orquestador dice hace cuánto se calibraron y avisa si tienen más de 6 horas (en `modelos/` pueden quedar los del gemelo o los de otro piloto).
 
-**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --puerto COM4` repite en el tablero la última sesión real que llegó al lazo (una que un NO GO detuvo en la calibración no cuenta), y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
+**Plan B.** Cada sesión deja, junto a su CSV, `resultados/sesion_..._estado.jsonl` con todo lo que publicó al tablero. `python repetir_sesion.py --ultima --velocidad 2 --ortesis-usb COM5` repite en el tablero la última sesión real que llegó al lazo (una que un NO GO detuvo en la calibración no cuenta), y la órtesis hace los mismos movimientos, sin casco ni calibración. Es una repetición y hay que decirlo. La alternativa es el gemelo en vivo (`cerebro_sintetico.py` en lugar del puente). Reproducir el EEG crudo (`puente_lsl.py --placa playback --archivo resultados/sesion_unicorn.csv`) sirve para mostrar la señal, pero no para el lazo: lo grabado no responde a las señales nuevas.
 
 El puente imprime cada 30 s el registro de huecos de Bluetooth y la batería.
 
@@ -858,6 +858,10 @@ Al terminar la calibración de ErrP el orquestador dibuja `resultados/detector_e
 
 ## Protocolo del ESP32 (para P2)
 
+Hay dos protocolos por el cable USB. **El de la placa real es el JSON del firmware 1.3** (`--ortesis-usb COMx`, abajo); el de texto `M`/`A`/`T` (`--puerto COMx`, `hardware.OrtesisSerial`) es el del primer diseño y se conserva, pero el firmware 1.3 no lo entiende: con él, el CP1 da NO GO por ACK perdidos aunque el puerto abra bien.
+
+### Protocolo viejo de texto: `--puerto`
+
 ```
 PC -> ESP32   M,<seq>,<angulo 0-1000>,<duracion_ms>\n     0 = abierta, 1000 = cerrada
 ESP32 -> PC   A,<seq>,<t_us>\n     ACK al aplicar el primer pulso (marca el inicio del ErrP)
@@ -865,7 +869,26 @@ ESP32 -> PC   T,<t_us>,<angulo>,<fsr>\n     telemetría a 50 Hz
 ```
 USB serial a 115200 baudios. El orquestador espera el ACK máximo 300 ms por paso y mide la latencia de cada uno. Si el ACK no llega, el paso queda excluido y el lazo sigue; con tres seguidos entra en `PAUSA_SEGURA`. El ESP32 solo debe devolver el `seq` que recibió: tras reiniciarse no necesita recordar nada.
 
-### Por Wi-Fi: `--ortesis-udp` (firmware 1.2 de la ESP32)
+### Por cable USB con el firmware 1.3: `--ortesis-usb COMx`
+
+```bash
+python firmware_esp32/probar_esp32.py --puertos          # cuál COM es la ESP32 (CP210x o CH340)
+python verificar_ortesis.py --ortesis-usb COM5           # latencia del ACK y del inicio del movimiento
+python orquestador.py real --ortesis-usb COM5            # la sesión
+python demo.py lanzar --ortesis-usb COM5                 # o con demo.py (también preflight y planb)
+```
+
+El mismo JSON que por Wi-Fi (abajo), **una línea por mensaje** a 115200 baudios (`config.py`, sección *Ortesis por Wi-Fi*, con las diferencias del cable). `hardware.OrtesisUSB` comparte con `OrtesisUDP` toda la lógica (`_OrtesisJSON`: latido, `seq` de latidos aparte, reloj de LSL, `set_p`, `errp`, paro y bloqueo); solo cambia el transporte. Lo propio del cable:
+
+- **Abre el puerto con DTR y RTS en False**, para que abrirlo no reinicie la ESP32 (en la mayoría de las placas esas líneas van al circuito de auto-reset).
+- **Por el mismo cable el firmware imprime texto** (el saludo `Adaptrode 1.3 ...`, `cal_ok ...`, `error en el ciclo: ...`): toda línea que no es un objeto JSON se ignora, sin tumbar el hilo lector.
+- **Telemetría a 5 Hz y solo mientras llegan órdenes** por USB (el latido de 100 ms la mantiene); `ang` llega una vez por segundo y se recuerda. El inicio del movimiento se extrapola con la velocidad del servo: es exacto mientras la primera muestra que ve moverse el servo lo encuentre aún en la rampa; en un movimiento más corto que 200 ms (un paso de menos de ~0.14 del recorrido) puede salir **tarde, hasta 200 ms menos lo que duró el movimiento** (por Wi-Fi el tope es 100 ms). `inicio_movimiento` espera hasta 0.6 s la muestra (no atrasa el lazo: la época espera EEG hasta 0.8 s tras el ACK). Como por Wi-Fi, la telemetría es la posición **ordenada**, no la medida.
+- **Si el puerto se cae** (cable suelto, ESP32 reiniciada): `puerto_ok = False`, `mover()` devuelve «sin ACK» de inmediato y un hilo lo reabre con retroceso, sin reiniciar `seq` (como `OrtesisSerial`).
+- **Un candado** para escribir: el latido y `mover()` escriben desde hilos distintos y las líneas no pueden mezclarse.
+- **El nervio de luz y el destello de ErrP** funcionan igual que por Wi-Fi.
+- Prueba `ortesis_usb`: contra `ortesis_udp_sim.FirmwareSimulado(usb=True)`, con un puerto serie en memoria (sin pty, corre en Windows). Prueba `banderas_ortesis_usb`: el orquestador y `demo.py`. **Nada de esto se probó con la placa real.**
+
+### Por Wi-Fi: `--ortesis-udp` (firmware 1.2 o 1.3 de la ESP32)
 
 ```bash
 python orquestador.py real --ortesis-udp                 # la ESP32 en su red «Adaptrode» (192.168.4.1:8888), en lugar de --puerto
@@ -880,7 +903,7 @@ python orquestador.py real --ortesis-udp 127.0.0.1       #   y el orquestador co
 - **Latido.** La ESP32 abre la mano si pasan 0.5 s sin órdenes y el orquestador solo mueve cada ~2 s: un hilo reenvía el estado cada 100 ms. Los latidos numeran aparte (desde 10⁹) para que el `seq` de los pasos siga de uno en uno; sus ACK alimentan el reloj.
 - **Sin ACK** en 0.3 s (como por USB): `(seq, None, nan)`, el paso queda excluido y el lazo sigue.
 - **Telemetría a 10 Hz** (por USB, 50 Hz). El inicio real del movimiento se extrapola con la velocidad del servo (90 °/s, `config.UDP_VEL_MAX_GRADOS_S`): la interpolación lineal de la telemetría lenta lo adelantaba 30–60 ms. En el firmware simulado el error queda en ~−15 ± 10 ms. **La telemetría del firmware 1.2 es la posición ordenada (`frac`), no la medida:** el retraso físico del servo no se ve.
-- **El cerebro enseñando, en la mano.** En cada paso el orquestador manda `p = p'` del agente (`set_p()`, viaja con la orden y en los latidos) y el nervio de luz sube con ella; cuando el detector marca un ErrP (`p_errp` sobre el umbral) en una época **sin artefacto**, manda `errp()` y la órtesis destella en rojo. Una época con artefacto no cuenta como ErrP para el agente y tampoco destella. UDP pierde datagramas (el Wi-Fi del evento), así que `errp` viaja también en los 3 latidos siguientes (`config.UDP_ERRP_LATIDOS`): con la mitad de los datagramas perdidos en el firmware simulado llegan 12 de 12 ErrP contra 6 de 12 con un solo datagrama (prueba `destello_errp_con_perdidas`). Costo: el firmware reinicia su destello de 300 ms con cada mensaje, así que dura hasta ~0.6 s en lugar de 0.3 s. Por USB y con la órtesis simulada no pasa nada (no la tienen). Prueba `ortesis_udp_nervio`. En una sesión `--sham` el nervio y el destello son iguales en los dos bloques (`p'` y la detección reales), así que no delatan cuál es cuál.
+- **El cerebro enseñando, en la mano.** En cada paso el orquestador manda `p = p'` del agente (`set_p()`, viaja con la orden y en los latidos) y el nervio de luz sube con ella; cuando el detector marca un ErrP (`p_errp` sobre el umbral) en una época **sin artefacto**, manda `errp()` y la órtesis destella en rojo. Una época con artefacto no cuenta como ErrP para el agente y tampoco destella. UDP pierde datagramas (el Wi-Fi del evento), así que `errp` viaja también en los 3 latidos siguientes (`config.UDP_ERRP_LATIDOS`): con la mitad de los datagramas perdidos en el firmware simulado llegan 12 de 12 ErrP contra 6 de 12 con un solo datagrama (prueba `destello_errp_con_perdidas`). Costo: el firmware reinicia su destello de 300 ms con cada mensaje, así que dura hasta ~0.6 s en lugar de 0.3 s. Con el protocolo viejo (`--puerto`) y con la órtesis simulada no pasa nada (no la tienen); por cable con el firmware 1.3 (`--ortesis-usb`), sí. Prueba `ortesis_udp_nervio`. En una sesión `--sham` el nervio y el destello son iguales en los dos bloques (`p'` y la detección reales), así que no delatan cuál es cuál.
 - **Paro de emergencia y bloqueo.** El `Vigilante` pasa la órtesis a ROJO (`PAUSA_SEGURA`) con el paro oprimido y a AMARILLO con el bloqueo por corriente.
 - **El firmware limita la velocidad:** `dur_ms` se ignora, y un paso de 0.30 del rango tarda ~430 ms (90 °/s sobre 130 °), no los 250 ms del protocolo USB. Un solo grado de libertad: la fracción va a `cierre` y a `pulgar`. 
 - **`ortesis_udp_sim.py` no es el firmware:** modela ACK, relojes con otro origen y deriva, vigilancia, velocidad del servo, paro y bloqueo; no mide corriente ni fuerza. Cada cambio de meta empieza a moverse `latencia_mecanica_simulada(seq)` tras el ACK, para que el gemelo (`cerebro_sintetico.py`) siga alineado. **Sin probar con la ESP32 ni por Wi-Fi real.**
