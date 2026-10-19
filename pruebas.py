@@ -2857,6 +2857,97 @@ def ortesis_serial_reconecta():
 
 
 @prueba
+def ortesis_usb():
+    """OrtesisUSB (firmware 1.3 por el cable, JSON por lineas) contra el firmware simulado con un puerto serie en
+    memoria, sin placa ni pty: ACK en el reloj de LSL con seq de uno en uno pese a los latidos, texto y JSON roto
+    ignorados, ACK perdido sin bloqueo, inicio del movimiento con la telemetria de 5 Hz, errp repetido en los
+    latidos, paro en ROJO, y el puerto que cae y se reabre solo sin reiniciar seq."""
+    import math
+    from pylsl import local_clock
+    import hardware
+    import ortesis_udp_sim as sim
+    from salud import Vigilante
+    fw = sim.FirmwareSimulado(usb=True, origen_ms=7_654_321).iniciar()     # su reloj en ms no se parece al de LSL
+    mundo = {'aperturas': 0, 'falla': False}
+
+    def abrir():
+        mundo['aperturas'] += 1
+        if mundo['falla']:
+            raise OSError('no existe el puerto')
+        return fw.serie
+    o = hardware.OrtesisUSB('COMX', abrir=abrir)
+    try:
+        assert o._clock is local_clock and o.conectada() and o.lecturas()['puerto_ok']
+        # el saludo ya llego; ahora mas texto del firmware, JSON roto, JSON que no es objeto y bytes que no son UTF-8
+        for linea in ('cal_ok dedos guardada', 'error en el ciclo: ValueError()', '{"ack": 3, "t_ms"', '[1, 2]', '"t_ms"', '17'):
+            fw.serie.escribir_esp(linea)
+        with fw.serie._cv:
+            fw.serie.a_pc += b'\xff\xfe\x00basura\n'
+        time.sleep(1.2)                                                       # latidos: reloj sincronizado
+        assert o.conectada() and o.ang == [sim.ABIERTA, sim.CERRADA]          # 'ang' llega una vez por segundo
+        desvios = []
+        for k in range(6):
+            antes = local_clock()
+            seq, t_ack, rtt = o.mover(0.3 if k % 2 else 0.6)
+            despues = local_clock()
+            assert seq == k + 1, seq                                          # los latidos numeran aparte
+            assert antes - 0.005 <= t_ack <= despues + 0.005, (k, antes, t_ack, despues)
+            assert o.metodo == 'ack' and 0 <= rtt < 100, (o.metodo, rtt)
+            desvios.append(t_ack - (antes + despues) / 2)
+            time.sleep(0.3)
+        assert fw.vigilancia is False and sum(1 for s_, _ in fw.recibidos if s_ and s_ > config.UDP_SEQ_LATIDO) > 10
+        assert max(abs(d) for d in desvios) < 0.025, desvios                  # ACK en el ciclo de 20 ms del firmware
+        # inicio del movimiento con la telemetria de 5 Hz: la rampa del servo lo da aunque las muestras disten 200 ms
+        time.sleep(1.5)
+        seq, t_ack, _ = o.mover(0.95)
+        t0, como = o.inicio_movimiento(seq, t_ack)
+        lat = hardware.latencia_mecanica_simulada(seq, 0)
+        assert como == 'telemetria' and abs(t0 - (t_ack + lat)) < 0.05, (como, t0 - t_ack, lat)
+        # ACK perdido: no bloquea mas que config.UDP_ESPERA_ACK_S y el paso siguiente funciona
+        fw.perder_acks.add(o.seq + 1)
+        t = time.time()
+        seq3, t_ack3, rtt3 = o.mover(0.4)
+        assert t_ack3 is None and math.isnan(rtt3) and o.acks_perdidos == 1
+        assert time.time() - t < config.UDP_ESPERA_ACK_S + 0.1, time.time() - t
+        assert o.mover(0.5)[1] is not None and o.acks_perdidos == 0 and o.seq == seq3 + 1
+        # errp: el inmediato y los config.UDP_ERRP_LATIDOS latidos siguientes
+        n0 = len(fw.destellos)
+        o.errp()
+        time.sleep(0.6)
+        assert len(fw.destellos) - n0 == 1 + config.UDP_ERRP_LATIDOS, len(fw.destellos) - n0
+        # paro de emergencia: el Vigilante lo pone en ROJO
+        v, bien = Vigilante(), {'edad_s': 0.02, 'tasa_hz': 250.0, 'canales': {}}
+        v.actualizar(0.0, eeg=bien, ortesis=o.lecturas(), reloj_ms=0.0)
+        assert v.colores['ortesis'] == config.VERDE, v.detalle
+        fw.paro = True
+        time.sleep(0.5)
+        v.actualizar(1.0, eeg=bien, ortesis=o.lecturas(), reloj_ms=0.0)
+        assert o.lecturas()['paro'] and v.colores['ortesis'] == config.ROJO and 'paro' in v.detalle['ortesis']
+        fw.paro = False
+        # el cable se suelta: sin ACK de inmediato; no reabre mientras el puerto no exista; al volver, seq continua
+        mundo['falla'], fw.serie.caido = True, True
+        time.sleep(0.2)
+        t = time.time()
+        seq4, t_ack4, _ = o.mover(0.5)
+        assert t_ack4 is None and time.time() - t < 0.05 and not o.lecturas()['puerto_ok'] and not o.conectada()
+        time.sleep(1.0)
+        assert not o.lecturas()['puerto_ok'] and mundo['aperturas'] >= 2              # lo intento y fallo
+        mundo['falla'], fw.serie.caido = False, False
+        t_fin = time.time() + 10
+        while not o.lecturas()['puerto_ok'] and time.time() < t_fin:
+            time.sleep(0.05)
+        assert o.lecturas()['puerto_ok'], 'no se reabrio'
+        seq5, t_ack5, _ = o.mover(0.5)
+        assert seq5 == seq4 + 1 and t_ack5 is not None and o.acks_perdidos == 0
+    finally:
+        o.cerrar()
+        fw.detener()
+    return (f'ACK en el reloj de LSL (desvio {max(abs(d) for d in desvios) * 1000:.0f} ms), seq sin saltos; texto y JSON roto '
+            f'ignorados; inicio por telemetria de 5 Hz a {abs(t0 - t_ack - lat) * 1000:.0f} ms; errp repetido; paro en ROJO; '
+            f"reabre solo ({mundo['aperturas']} aperturas)")
+
+
+@prueba
 def reconexion_eeg():
     """El flujo de EEG muere y vuelve como instancia nueva con OTRO desfase de reloj:
     EntradaEEG se reconecta, el reloj no queda en ROJO, la pausa puede terminar y
@@ -5631,7 +5722,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'orquestador_ajenos', 'cuestionario', 'deriva_reloj', 'plan_caos', 'caos_sim',
            'caos_agente_vs_sombra', 'senal_sham', 'orquestador_sham', 'reanudar_sham', 'controles_especificidad', 'copiloto_herramientas', 'copiloto_api_simulada', 'ia_esquemas', 'ia_cliente_tiempos', 'coinvestigador_entre_bloques', 'narrador_jurado', 'tablero_salud', 'tablero_flechas', 'repetir_sesion', 'plan_b_sin_sesion_detenida', 'modelos_del_dia', 'instantanea_estado', 'modelos_hardware',
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
-           'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
+           'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'ortesis_usb', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
            'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'visor_eeg', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida', 'sensor_fuerza']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',

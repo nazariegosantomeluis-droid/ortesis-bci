@@ -286,6 +286,8 @@ ERRP_DIRECCION_ALFA = 0.05
 CONTROL_REPOSO = 'control_reposo'       # marcador del inicio del control
 
 # ============================ Ortesis (USB serial) ============================
+# Dos protocolos por el cable, a BAUDIOS: el viejo de texto M/A/T (abajo; hardware.OrtesisSerial, --puerto) y el
+# JSON del firmware 1.3 (hardware.OrtesisUSB, --ortesis-usb PUERTO), que es el que corre en la placa real.
 PUERTO_ORTESIS = 'COM4'
 BAUDIOS        = 115200
 DURACION_PASO_MS = 250
@@ -308,7 +310,14 @@ PUERTO_ORTESIS_UDP = 8888
 # ESP32 -> PC:  {"ack": 12, "t_ms": 532118}   ACK al llegar un seq nuevo, con el reloj de la ESP32 (ms)
 #               telemetria cada 100 ms: {"seq", "cierre", "pulgar", "i_ma", "fuerza", "paro", "bloqueo",
 #               "vigilancia", "ang", "msg", "ver", "t_ms"}
-UDP_LATIDO_S        = 0.1       # el firmware abre la mano si pasan 0.5 s sin ordenes: la PC repite el estado cada 100 ms
+# Por el cable USB (firmware 1.3, hardware.OrtesisUSB): el MISMO JSON, una linea por mensaje a BAUDIOS, y estas
+# mismas constantes UDP_* (latido, espera del ACK, seq de latidos, errp, velocidad). Diferencias del firmware:
+#   - telemetria cada 200 ms y solo mientras llegan ordenes por USB (2 s); "ang" y "ver" una vez por segundo;
+#   - el ACK sale una sola vez por cada seq nuevo (por eso los latidos numeran aparte);
+#   - por el mismo cable salen lineas de texto que no son JSON (saludo "Adaptrode 1.3 ...", "cal_ok ...",
+#     "error en el ciclo: ..."): el cliente las ignora;
+#   - el puerto se abre con DTR y RTS en False para no reiniciar la ESP32.
+UDP_LATIDO_S       = 0.1       # el firmware abre la mano si pasan 0.5 s sin ordenes: la PC repite el estado cada 100 ms
 UDP_ESPERA_ACK_S    = 0.3       # un ACK que tarda mas cuenta como perdido (el mismo plazo que por USB)
 UDP_TELEMETRIA_VIVA_S = 1.0     # sin telemetria en este tiempo, la ortesis cuenta como desconectada
 UDP_ERRP_LATIDOS    = 3         # el destello de ErrP es un datagrama: se repite en los 3 latidos siguientes (Wi-Fi con perdidas)

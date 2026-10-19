@@ -689,8 +689,10 @@ class RelojEsp32Wifi:
         return None if d is None else t_us / 1e6 - d
 
 
-class OrtesisUDP(_OrtesisBase):
-    """Ortesis Adaptrode (ESP32, firmware 1.2) por Wi-Fi: JSON por UDP, protocolo en config.py.
+class _OrtesisJSON(_OrtesisBase):
+    """Ortesis Adaptrode (ESP32, firmware 1.2 o 1.3): ordenes y respuestas JSON, protocolo en config.py.
+    Lo comun a Wi-Fi (OrtesisUDP) y cable (OrtesisUSB); cada una pone su transporte: _tx (manda un
+    mensaje, True si salio) y _rx (los mensajes que llegaron, lista posiblemente vacia).
 
     Misma interfaz que OrtesisSerial. Diferencias:
       - Latido: un hilo reenvia el estado cada config.UDP_LATIDO_S (el firmware abre la mano si pasan
@@ -700,24 +702,23 @@ class OrtesisUDP(_OrtesisBase):
       - mover() devuelve (seq, t_ack, rtt_ms): t_ack es la hora en que la ESP32 APLICO la orden
         (su reloj convertido al de la PC, RelojEsp32Wifi), en el reloj `reloj` (por defecto el de
         LSL, pylsl.local_clock: el mismo que estampa el EEG); rtt_ms es la ida y vuelta del ACK.
-        Si el ACK no llega: (seq, None, nan), como por USB.
+        Si el ACK no llega: (seq, None, nan), como OrtesisSerial.
       - Un solo grado de libertad: fraccion va a `cierre` (dedos) y a `pulgar`. `dur_ms` se ignora:
         la velocidad la limita el firmware (90 grados/s).
-      - La telemetria llega a 10 Hz (la serial, a 50 Hz): el inicio real del movimiento
-        (inicio_movimiento) se estima con menos resolucion.
+      - La telemetria es lenta (10 Hz por Wi-Fi, 5 Hz por USB; la del protocolo M/A/T, 50 Hz): el
+        inicio real del movimiento (inicio_movimiento) se extrapola con la velocidad del servo. Ojo:
+        el 'cierre' de la telemetria es la posicion que el firmware ORDENA al servo, no una medida.
       - lecturas() agrega 'paro' y 'bloqueo' del firmware; el Vigilante pasa el paro a ROJO.
     """
 
-    def __init__(self, ip=config.IP_ORTESIS_UDP, puerto=config.PUERTO_ORTESIS_UDP, reloj=None,
-                 latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S, esperar_telemetria_s=2.0,
-                 errp_latidos=config.UDP_ERRP_LATIDOS):
+    def __init__(self, reloj=None, latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S,
+                 esperar_telemetria_s=2.0, errp_latidos=config.UDP_ERRP_LATIDOS):
         super().__init__()
         if reloj is None:
             from pylsl import local_clock as reloj
         self._clock = reloj
-        self.dest, self.latido_s, self.espera_ack_s = (ip, int(puerto)), latido_s, espera_ack_s
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.s.settimeout(0.05)
+        self.latido_s, self.espera_ack_s = latido_s, espera_ack_s
+        self.ang = None                           # (abierta, cerrada) de los dedos en grados, si la telemetria lo dijo
         self.estado = {'cierre': 0.0, 'pulgar': 0.0, 'p': 0.5}
         self._reloj_esp = RelojEsp32Wifi()
         self._enviados, self._acks = {}, {}
@@ -736,7 +737,7 @@ class OrtesisUDP(_OrtesisBase):
 
     # ---------------- envio y recepcion ----------------
     def _enviar(self, seq, extra=None):
-        """Manda el estado con ese seq y devuelve la hora de envio (reloj de la PC)."""
+        """Manda el estado con ese seq y devuelve la hora de envio (reloj de la PC), o None si no salio."""
         mensaje = dict(self.estado, seq=seq, **(extra or {}))
         t = self._clock()
         with self._cv:
@@ -746,11 +747,7 @@ class OrtesisUDP(_OrtesisBase):
                     self._enviados.pop(k, None)
                     self._acks.pop(k, None)
                     self._acks_us.pop(k, None)
-        try:
-            self.s.sendto(json.dumps(mensaje).encode(), self.dest)
-        except OSError:
-            pass
-        return t
+        return t if self._tx(json.dumps(mensaje).encode()) else None
 
     def _seq_aparte(self):
         with self._cv:
@@ -767,23 +764,19 @@ class OrtesisUDP(_OrtesisBase):
 
     def _escuchar(self):
         while self._vivo:
-            try:
-                datos, _ = self.s.recvfrom(2048)
-            except socket.timeout:
-                continue
-            except OSError:
-                if not self._vivo:
-                    break
-                continue
+            mensajes = self._rx()
             t = self._clock()
-            try:
-                m = json.loads(datos)
-                if 'ack' in m:
-                    self._ack(int(m['ack']), t, int(m['t_ms']))
-                elif 't_ms' in m:
-                    self._telemetria_udp(m, t)
-            except (ValueError, KeyError, TypeError):
-                continue                          # datagrama corrupto: se ignora
+            for datos in mensajes:
+                try:
+                    m = json.loads(datos)
+                    if not isinstance(m, dict):
+                        continue
+                    if 'ack' in m:
+                        self._ack(int(m['ack']), t, int(m['t_ms']))
+                    elif 't_ms' in m:
+                        self._telemetria_udp(m, t)
+                except (ValueError, KeyError, TypeError):
+                    continue                      # mensaje corrupto o texto del firmware: se ignora
 
     def _ack(self, seq, t, t_ms):
         with self._cv:
@@ -798,6 +791,8 @@ class OrtesisUDP(_OrtesisBase):
 
     def _telemetria_udp(self, m, t):
         self.t_tel, self.ultima_tel = t, m
+        if isinstance(m.get('ang'), dict) and m['ang'].get('dedos'):
+            self.ang = m['ang']['dedos']          # por USB 'ang' llega una vez por segundo: se recuerda
         self.paro, self.bloqueo = bool(m.get('paro')), bool(m.get('bloqueo'))
         angulo = int(round(float(m['cierre']) * 1000))
         self.telemetria = {'angulo': angulo, 'fsr': int(round(float(m.get('fuerza', 0.0)) * 1000)),
@@ -814,12 +809,17 @@ class OrtesisUDP(_OrtesisBase):
         return dict(super().lecturas(), paro=self.paro, bloqueo=self.bloqueo)
 
     def _inicio_telemetria(self, tele, t_us_ack):
-        """El firmware mueve el servo a vel_max (config.UDP_VEL_MAX_GRADOS_S) y su telemetria es de
-        10 Hz: el inicio se extrapola con esa velocidad. En unidades de 0-1000 del recorrido de los
-        dedos, que la propia telemetria informa en 'ang' (abierta, cerrada) en grados."""
-        ang = (self.ultima_tel or {}).get('ang', {}).get('dedos')
+        """El firmware mueve el servo a vel_max (config.UDP_VEL_MAX_GRADOS_S) y su telemetria es lenta:
+        el inicio se extrapola con esa velocidad. En unidades de 0-1000 del recorrido de los dedos, que
+        la propia telemetria informa en 'ang' (abierta, cerrada) en grados."""
+        ang = self.ang
         recorrido = abs(float(ang[1]) - float(ang[0])) if ang else config.UDP_RECORRIDO_DEDOS_GRADOS
         return inicio_por_rampa(tele, t_us_ack, 1000.0 * config.UDP_VEL_MAX_GRADOS_S / max(recorrido, 1.0))
+
+    def inicio_movimiento(self, seq, t_ack, espera_s=0.6):
+        """Como en _OrtesisBase, esperando hasta 0.6 s: con telemetria de 5 Hz (USB) la primera muestra posterior a
+        ACK + 300 ms llega hasta 500 ms despues del ACK. No atrasa el lazo: la epoca espera EEG hasta ACK + 0.8 s."""
+        return super().inicio_movimiento(seq, t_ack, espera_s)
 
     def set_p(self, p):
         """Nivel del nervio de luz (0 a 1); viaja en el siguiente latido."""
@@ -840,6 +840,8 @@ class OrtesisUDP(_OrtesisBase):
         f = float(np.clip(fraccion, 0.0, 1.0))
         self.estado['cierre'] = self.estado['pulgar'] = f
         t_envio = self._enviar(seq)
+        if t_envio is None:                       # no salio (puerto caido): sin esperar
+            return self._sin_ack(seq)
         with self._cv:
             self._cv.wait_for(lambda: seq in self._acks, timeout=self.espera_ack_s)
             ack = self._acks.pop(seq, None)
@@ -863,9 +865,134 @@ class OrtesisUDP(_OrtesisBase):
         self._vivo = False
         time.sleep(0.1)
         try:
-            self.s.close()
+            self._cerrar_transporte()
         except Exception:
             pass
+
+
+class OrtesisUDP(_OrtesisJSON):
+    """La ortesis por Wi-Fi (red propia «Adaptrode» de la ESP32): un datagrama UDP por mensaje. La logica
+    (latido, seq aparte, reloj, nervio, paro) esta en _OrtesisJSON."""
+
+    def __init__(self, ip=config.IP_ORTESIS_UDP, puerto=config.PUERTO_ORTESIS_UDP, reloj=None,
+                 latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S, esperar_telemetria_s=2.0,
+                 errp_latidos=config.UDP_ERRP_LATIDOS):
+        self.dest = (ip, int(puerto))
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s.settimeout(0.05)
+        super().__init__(reloj, latido_s, espera_ack_s, esperar_telemetria_s, errp_latidos)
+
+    def _tx(self, datos):
+        try:
+            self.s.sendto(datos, self.dest)
+            return True
+        except OSError:
+            return False
+
+    def _rx(self):
+        try:
+            return [self.s.recvfrom(2048)[0]]
+        except OSError:                           # incluye el timeout de 50 ms
+            return []
+
+    def _cerrar_transporte(self):
+        self.s.close()
+
+
+def _abrir_serie(puerto, baudios):
+    """Abre el puerto con DTR y RTS en False ANTES de abrirlo: en la mayoria de las placas ESP32 esas lineas
+    van al circuito de auto-reset (EN y BOOT), y abrir el puerto con ellas activas reinicia la placa."""
+    import serial
+    s = serial.Serial()
+    s.port, s.baudrate, s.timeout, s.write_timeout = puerto, baudios, 0.05, 0.5
+    s.dtr = s.rts = False
+    s.open()
+    return s
+
+
+class OrtesisUSB(_OrtesisJSON):
+    """La ortesis con el firmware 1.3 por el cable USB: el mismo JSON que por Wi-Fi, una linea por mensaje a
+    config.BAUDIOS (protocolo en config.py). Misma interfaz y logica que OrtesisUDP (latido, seq de latidos
+    aparte, reloj de LSL, set_p, errp con repeticiones, paro y bloqueo); solo cambia el transporte.
+      - El firmware escribe tambien texto por el mismo cable (el saludo "Adaptrode 1.3 ...", "cal_ok ...",
+        "error en el ciclo: ..."): toda linea que no es un objeto JSON se ignora.
+      - Telemetria a 5 Hz y solo mientras llegan ordenes por USB (el latido la mantiene); 'ang' llega una
+        vez por segundo y se recuerda el ultimo.
+      - Resolucion del inicio del movimiento (inicio_por_rampa): se extrapola desde la primera muestra que
+        ve moverse el servo; es exacto si en esa muestra el servo sigue en la rampa. Si el movimiento dura
+        menos que el periodo de la telemetria (200 ms; por Wi-Fi 100 ms), la muestra puede caer con el
+        servo ya quieto y el inicio sale TARDE hasta 200 ms menos lo que duro el movimiento: a 90 grados/s
+        sobre 130 grados, en los pasos de menos de ~0.14 del recorrido (por Wi-Fi, ~0.07).
+      - Si el puerto se cae (cable suelto, ESP32 reiniciada): puerto_ok = False, mover() devuelve "sin ACK"
+        de inmediato y el hilo lector lo reabre con retroceso (salud.Retroceso), sin reiniciar seq.
+      - El puerto se abre con DTR y RTS en False (_abrir_serie). `abrir` (sin argumentos; devuelve algo con
+        read, write, in_waiting y close) permite probarla sin hardware."""
+
+    def __init__(self, puerto=config.PUERTO_ORTESIS, baudios=config.BAUDIOS, reloj=None, abrir=None,
+                 latido_s=config.UDP_LATIDO_S, espera_ack_s=config.UDP_ESPERA_ACK_S, esperar_telemetria_s=3.0,
+                 errp_latidos=config.UDP_ERRP_LATIDOS):
+        self.puerto = puerto
+        self._abrir = abrir or (lambda: _abrir_serie(puerto, baudios))
+        self.ser = self._abrir()                  # si el puerto no existe o esta ocupado, lanza aqui
+        self._abierto, self._buf = True, b''
+        self._candado_tx = threading.Lock()       # el latido y mover() escriben desde hilos distintos
+        self._retroceso = Retroceso()
+        super().__init__(reloj, latido_s, espera_ack_s, esperar_telemetria_s, errp_latidos)
+
+    def _caido(self, ser):
+        """Con el candado tomado: si `ser` sigue siendo el puerto vigente, queda caido."""
+        if ser is self.ser:
+            self._abierto = self.puerto_ok = False
+
+    def _tx(self, datos):
+        with self._candado_tx:
+            if not self._abierto:
+                return False
+            try:
+                self.ser.write(datos + b'\n')
+                return True
+            except Exception:
+                self._caido(self.ser)
+                return False
+
+    def _rx(self):
+        if not self._abierto:
+            self._reabrir()
+            return []
+        ser = self.ser
+        try:
+            self._buf += ser.read(max(1, ser.in_waiting))
+        except Exception:
+            with self._candado_tx:
+                self._caido(ser)
+            return []
+        *lineas, self._buf = self._buf.split(b'\n')
+        if len(self._buf) > 4096:                 # ruido sin fin de linea
+            self._buf = b''
+        return [l for l in lineas if l.strip()]
+
+    def _reabrir(self):
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+        time.sleep(self._retroceso.siguiente())
+        if not self._vivo:
+            return
+        try:
+            nuevo = self._abrir()
+        except Exception:
+            return
+        with self._candado_tx:
+            self.ser, self._buf, self._abierto = nuevo, b'', True
+        self._retroceso.reiniciar()
+        print(f'  [ortesis] puerto {self.puerto} recuperado', flush=True)
+
+    def conectada(self, max_edad_s=config.UDP_TELEMETRIA_VIVA_S):
+        return self._abierto and super().conectada(max_edad_s)
+
+    def _cerrar_transporte(self):
+        self.ser.close()
 
 
 class OrtesisSimulada(_OrtesisBase):
