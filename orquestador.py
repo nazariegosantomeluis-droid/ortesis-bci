@@ -8,7 +8,8 @@ Uso
   python orquestador.py sim --falla_detector           prueba el congelamiento
   python orquestador.py sim --ciclo 0 --caos 1         caos estandar: cortes, ACK perdidos, canal despegado
   python orquestador.py real --ortesis-sim --forzar    casco (o placa sintetica) sin ESP32
-  python orquestador.py real --puerto COM4             todo real
+  python orquestador.py real --ortesis-usb COM5       todo real, ortesis con el firmware 1.3 por cable (JSON)
+  python orquestador.py real --puerto COM4             todo real, ortesis con el protocolo viejo de texto (M/A/T)
   python orquestador.py real --puerto COM4 --saltar-calibracion   usa modelos guardados
 
   python orquestador.py real --puerto COM4 --reanudar   continua la sesion tras un cierre inesperado
@@ -434,11 +435,15 @@ class BackendSim:
 
 
 def crear_ortesis(hw, a):
-    """La ortesis del backend real: simulada, por Wi-Fi (--ortesis-udp) o por USB. La de Wi-Fi se crea con
-    el reloj de LSL (pylsl.local_clock), el mismo que estampa el EEG: time.monotonic no lo es, y en Windows
-    tiene ~15 ms de resolucion."""
+    """La ortesis del backend real: simulada, por Wi-Fi (--ortesis-udp), por USB con el firmware 1.3
+    (--ortesis-usb, JSON) o por USB con el protocolo viejo de texto (--puerto). Las JSON se crean con el reloj de
+    LSL (pylsl.local_clock), el mismo que estampa el EEG: time.monotonic no lo es, y en Windows tiene ~15 ms de
+    resolucion."""
     if a.ortesis_sim:
         return hw.OrtesisSimulada()
+    if getattr(a, 'ortesis_usb', None):
+        from pylsl import local_clock
+        return hw.OrtesisUSB(a.ortesis_usb, reloj=local_clock)
     if getattr(a, 'ortesis_udp', None):
         from pylsl import local_clock
         return hw.OrtesisUDP(a.ortesis_udp, getattr(a, 'udp_puerto', config.PUERTO_ORTESIS_UDP), reloj=local_clock)
@@ -1631,6 +1636,9 @@ def argumentos(argv=None):
                     help='ortesis por Wi-Fi (firmware 1.2 de la ESP32): su IP (sin valor, la de fabrica '
                          f'{config.IP_ORTESIS_UDP}); en lugar de --puerto. Sin placa: python ortesis_udp_sim.py y --ortesis-udp 127.0.0.1')
     ap.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
+    ap.add_argument('--ortesis-usb', dest='ortesis_usb', default=None, metavar='PUERTO',
+                    help='ortesis por cable USB con el firmware 1.3 de la ESP32 (JSON por lineas), p. ej. COM5; '
+                         'en lugar de --puerto, que es el protocolo viejo de texto M/A/T')
     ap.add_argument('--fuente', choices=sorted(config.FUENTES_EEG), default='puente',
                     help='de donde viene el EEG: puente (puente_lsl.py o el gemelo) o unicornlsl (la app de g.tec)')
     ap.add_argument('--eeg-nombre', dest='eeg_nombre', default=None,
@@ -1680,8 +1688,8 @@ def argumentos(argv=None):
     ap.add_argument('--p_error', type=float, default=0.3)
     ap.add_argument('--seg_revision', type=float, default=10.0)
     a = ap.parse_args(argv)
-    if a.ortesis_sim and a.ortesis_udp:
-        ap.error('--ortesis-sim y --ortesis-udp son excluyentes')
+    if sum(map(bool, (a.ortesis_sim, a.ortesis_udp, a.ortesis_usb))) > 1:
+        ap.error('--ortesis-sim, --ortesis-udp y --ortesis-usb son excluyentes')
     sim = a.backend == 'sim'
     a.pasos_estatico = a.pasos_estatico or (60 if sim else 30)
     a.pasos_adaptativo = a.pasos_adaptativo or (300 if sim else 120)
@@ -1700,9 +1708,10 @@ def anunciar_detencion(orq, a):
     if ng is None:
         n = config.DETENCION_CP_POR_ESTADO.get(orq.fsm.estado)
         ng = {'n': n, 'motivo': 'la sesion se detuvo antes del lazo; la consola dice por que', 'datos': {}}
+    usb_json = getattr(a, 'ortesis_usb', None)
     usb = not (getattr(a, 'ortesis_sim', False) or getattr(a, 'ortesis_udp', None))
-    ev = detencion.evento(ng['n'], ng['motivo'], ng['datos'], getattr(a, 'puerto', None) if usb else None,
-                          simulada=bool(getattr(a, 'ortesis_sim', False)))
+    ev = detencion.evento(ng['n'], ng['motivo'], ng['datos'], usb_json or (getattr(a, 'puerto', None) if usb else None),
+                          simulada=bool(getattr(a, 'ortesis_sim', False)), bandera='--ortesis-usb' if usb_json else '--puerto')
     orq.salidas.estado(**ev)
     aviso('\n' + detencion.texto_consola(ev))
     return ev
@@ -1764,15 +1773,15 @@ def correr(orq, a):
 
 def argumentos_reanudados(inst, a):
     """Los argumentos de la sesion guardada. De la linea de comandos solo se toma lo que
-    puede cambiar tras un cierre inesperado: --ciclo, --puerto, --ortesis-sim y --ortesis-udp."""
+    puede cambiar tras un cierre inesperado: --ciclo, --puerto, --ortesis-sim, --ortesis-udp y --ortesis-usb."""
     if inst['args']['backend'] != a.backend:
         aviso(f"La sesion guardada es '{inst['args']['backend']}', no '{a.backend}'.")
         sys.exit(2)
     r = argparse.Namespace(**inst['args'])
     r.reanudar, r.saltar_calibracion = True, True
     r.puerto, r.ortesis_sim = a.puerto, a.ortesis_sim or r.ortesis_sim
-    r.ortesis_udp, r.udp_puerto = a.ortesis_udp, a.udp_puerto
-    if a.ortesis_udp:
+    r.ortesis_udp, r.udp_puerto, r.ortesis_usb = a.ortesis_udp, a.udp_puerto, a.ortesis_usb
+    if a.ortesis_udp or a.ortesis_usb:
         r.ortesis_sim = False
     if a.ciclo_cli is not None:
         r.ciclo = a.ciclo_cli

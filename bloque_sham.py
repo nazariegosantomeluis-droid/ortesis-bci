@@ -3,7 +3,8 @@ no debe seguirla. Si la sigue, p(t) esta leyendo otra cosa que la intencion (rui
 cables que se mueven, respuesta visual al movimiento) y el lazo "funcionaria" por el motivo equivocado.
 
 Uso (despues de calibrar el decoder: existe modelos/decoder_im.pkl)
-  python bloque_sham.py --puerto COM4                  casco real + ortesis por USB
+  python bloque_sham.py --ortesis-usb COM5            casco real + ortesis con el firmware 1.3 por USB (JSON)
+  python bloque_sham.py --puerto COM4                  casco real + ortesis por USB con el protocolo viejo (M/A/T)
   python bloque_sham.py --ortesis-sim                  ortesis simulada (EEG real o del gemelo)
   python bloque_sham.py --fuente unicornlsl            EEG desde la app UnicornLSL de g.tec
 
@@ -71,16 +72,26 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--puerto', default=config.PUERTO_ORTESIS)
     ap.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true')
+    ap.add_argument('--ortesis-usb', dest='ortesis_usb', default=None, metavar='PUERTO',
+                    help='firmware 1.3 de la ESP32 por cable (JSON), en lugar de --puerto')
     ap.add_argument('--fuente', choices=sorted(config.FUENTES_EEG), default='puente')
     ap.add_argument('--eeg-nombre', dest='eeg_nombre', default=None)
     ap.add_argument('--pasos', type=int, default=config.SHAM_PASOS)
     ap.add_argument('--semilla', type=int, default=None)
     a = ap.parse_args()
+    if a.ortesis_sim and a.ortesis_usb:
+        ap.error('--ortesis-sim y --ortesis-usb son excluyentes')
     import hardware as hw
     decoder = hw.cargar('decoder_im.pkl')
     print(f'Decoder cargado (BA de calibracion {decoder.ba:.2f}, canales {decoder.eleccion}).')
     eeg = hw.EntradaEEG(fuente=a.fuente, nombre=a.eeg_nombre)
-    ortesis = hw.OrtesisSimulada() if a.ortesis_sim else hw.OrtesisSerial(a.puerto)
+    if a.ortesis_sim:
+        ortesis = hw.OrtesisSimulada()
+    elif a.ortesis_usb:
+        from pylsl import local_clock
+        ortesis = hw.OrtesisUSB(a.ortesis_usb, reloj=local_clock)
+    else:
+        ortesis = hw.OrtesisSerial(a.puerto)
     print('Piloto: REPOSO. No imagines ningun movimiento; mira la ortesis con la mente en blanco.')
     time.sleep(3.0)
     try:

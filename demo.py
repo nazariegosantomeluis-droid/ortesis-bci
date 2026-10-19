@@ -180,7 +180,11 @@ def es_local(ip):
     return bool(ip) and (ip == 'localhost' or ip.startswith('127.'))
 
 
-def revisar_puerto(puerto, ortesis_sim, listar=_puertos, ortesis_udp=None, udp_puerto=config.PUERTO_ORTESIS_UDP, plan=None):
+def revisar_puerto(puerto, ortesis_sim, listar=_puertos, ortesis_udp=None, udp_puerto=config.PUERTO_ORTESIS_UDP, plan=None,
+                   ortesis_usb=None):
+    """El COM de la ortesis existe: el de --ortesis-usb (firmware 1.3, JSON) o el de --puerto (protocolo M/A/T)."""
+    bandera = '--ortesis-usb' if ortesis_usb else '--puerto'
+    puerto = ortesis_usb or puerto
     if ortesis_sim:
         return [rev('puerto', OK, 'ortesis simulada: no hace falta puerto')]
     if ortesis_udp:
@@ -197,9 +201,10 @@ def revisar_puerto(puerto, ortesis_sim, listar=_puertos, ortesis_udp=None, udp_p
     except Exception as e:
         return [rev('puerto', AVISO, f'no pude listar los puertos: {type(e).__name__}: {e}')]
     if puerto.lower() in [p.lower() for p in hay]:
-        return [rev('puerto', OK, f'{puerto} existe')]
+        return [rev('puerto', OK, f'{puerto} existe' + (' (ortesis con el firmware 1.3, JSON)' if ortesis_usb else ''))]
     return [rev('puerto', FALLA, f"{puerto} no esta; puertos vistos: {', '.join(hay) or 'ninguno'}",
-                'Mira el numero en el Administrador de dispositivos y pasalo con --puerto. Cierra el monitor serie de Arduino.')]
+                f'Mira el numero en el Administrador de dispositivos y pasalo con {bandera}. Cierra el monitor serie de Arduino, '
+                'Thonny y MicroPico (firmware_esp32/LEEME.md: Si la laptop no ve la placa).')]
 
 
 def _leer_json(ruta):
@@ -209,7 +214,7 @@ def _leer_json(ruta):
         return None
 
 
-def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time, ortesis_udp=None):
+def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time, ortesis_udp=None, ortesis_usb=None):
     """Lo que dejaron verificar_unicorn.py y verificar_ortesis.py hoy (no los corre: son guiados)."""
     resultados = Path(resultados or config.RESULTADOS)
     out = []
@@ -238,12 +243,16 @@ def revisar_verificaciones(plan, ortesis_sim, resultados=None, ahora=time.time, 
                        'El CP1 mide la latencia del ACK al empezar; prueba antes con python probar_esp32.py.'))
     elif not ortesis_sim:
         d = _leer_json(resultados / 'verificacion_ortesis.json')
+        cmd = f'python verificar_ortesis.py --ortesis-usb {ortesis_usb}' if ortesis_usb else 'python verificar_ortesis.py --puerto COM4'
         if d is None or d.get('simulada'):
             out.append(rev('verif_ortesis', AVISO, 'no hay verificacion de la ortesis real',
-                           'Corre python verificar_ortesis.py --puerto COM4 (30 movimientos).'))
+                           f'Corre {cmd} (30 movimientos).'))
         elif (ahora() - d.get('t', 0)) / 3600 > EDAD_VERIFICACION_H:
             out.append(rev('verif_ortesis', AVISO, f"la verificacion de la ortesis es de hace {(ahora() - d.get('t', 0)) / 3600:.1f} h",
-                           'Repitela: python verificar_ortesis.py --puerto COM4.'))
+                           f'Repitela: {cmd}.'))
+        elif ortesis_usb and d.get('ortesis') != 'usb_json':
+            out.append(rev('verif_ortesis', AVISO, 'la verificacion de hoy no probo la ortesis por --ortesis-usb (firmware 1.3)',
+                           f'Repitela: {cmd}.'))
         else:
             v = str(d.get('veredicto', ''))
             estado = FALLA if v.startswith('FALLA') else AVISO if v.startswith('AVISO') else OK
@@ -293,8 +302,9 @@ def preflight(a):
                                 mano_virtual=getattr(a, 'mano_virtual', False))
     out += revisar_modelos()
     out += revisar_flujos(a.plan)
-    out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto, plan=a.plan)
-    out += revisar_verificaciones(a.plan, a.ortesis_sim, ortesis_udp=a.ortesis_udp)
+    out += revisar_puerto(a.puerto, a.ortesis_sim, ortesis_udp=a.ortesis_udp, udp_puerto=a.udp_puerto, plan=a.plan,
+                          ortesis_usb=a.ortesis_usb)
+    out += revisar_verificaciones(a.plan, a.ortesis_sim, ortesis_udp=a.ortesis_udp, ortesis_usb=a.ortesis_usb)
     out += revisar_llave()
     out += revisar_plan_b()
     out += revisar_disco()
@@ -347,6 +357,8 @@ def comandos(plan, a, extras=(), ahora=time.time):
         orq = ['real', '--ortesis-sim']
     elif a.ortesis_udp:
         orq = ['real', '--ortesis-udp', a.ortesis_udp, '--udp-puerto', str(a.udp_puerto)]
+    elif a.ortesis_usb:
+        orq = ['real', '--ortesis-usb', a.ortesis_usb]
     else:
         orq = ['real', '--puerto', a.puerto]
     if plan == 'unicornlsl':
@@ -473,13 +485,14 @@ def lanzar(a, extras=(), salida=print, procesos=None, resolver=_resolver_lsl, co
     t0 = time.time()
     resultados = Path(resultados or config.RESULTADOS)
     salida(f'Modo demo: plan {a.plan}, ' + ('ortesis simulada' if a.ortesis_sim else
-                                         f'ortesis por Wi-Fi en {a.ortesis_udp}:{a.udp_puerto}' if a.ortesis_udp else f'ortesis en {a.puerto}'))
+                                         f'ortesis por Wi-Fi en {a.ortesis_udp}:{a.udp_puerto}' if a.ortesis_udp else
+                                         f'ortesis por USB (firmware 1.3) en {a.ortesis_usb}' if a.ortesis_usb else f'ortesis en {a.puerto}'))
     if a.limpiar_modelos:
         destino, movidos = limpiar_modelos()
         salida(f'  modelos viejos movidos a {destino}: {", ".join(movidos)}' if movidos else '  no habia modelos que mover')
     revs = (hacer_preflight or preflight)(a)
     sin_fallas = imprimir_revisiones(revs, salida)
-    bitacora = {'inicio': t0, 'plan': a.plan, 'puerto': None if a.ortesis_sim else a.puerto, 'ortesis_udp': None if a.ortesis_sim else a.ortesis_udp, 'extras_orquestador': list(extras),
+    bitacora = {'inicio': t0, 'plan': a.plan, 'puerto': None if a.ortesis_sim else a.puerto, 'ortesis_udp': None if a.ortesis_sim else a.ortesis_udp, 'ortesis_usb': a.ortesis_usb, 'extras_orquestador': list(extras),
                 'preflight': revs, 'ignoro_fallas': bool(a.ignorar_fallas and not sin_fallas)}
     if not sin_fallas and not a.ignorar_fallas:
         salida('Hay fallas: arreglalas y repite, o usa --ignorar-fallas bajo tu responsabilidad (queda en la bitacora).')
@@ -573,7 +586,7 @@ def planb(a, salida=print, resultados=None, dormir=time.sleep, correr_foreground
         dormir(2.0)
         args = ['--ultima', '--velocidad', str(a.velocidad)] + (
             [] if a.ortesis_sim else ['--ortesis-udp', a.ortesis_udp, '--udp-puerto', str(a.udp_puerto)] if a.ortesis_udp
-            else ['--puerto', a.puerto])
+            else ['--ortesis-usb', a.ortesis_usb] if a.ortesis_usb else ['--puerto', a.puerto])
         salida('Repitiendo la ultima sesion real en el tablero. Es una repeticion: nada se decide en vivo, y hay que decirlo.')
         codigo = (correr_foreground or _correr_en_primer_plano)(argv_de('repetir_sesion.py', args))
     except KeyboardInterrupt:
@@ -597,6 +610,8 @@ def argumentos(argv=None):
         p.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP',
                        help=f'ortesis por Wi-Fi (firmware 1.2 de la ESP32), como en orquestador.py; sin valor, {config.IP_ORTESIS_UDP}')
         p.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
+        p.add_argument('--ortesis-usb', dest='ortesis_usb', default=None, metavar='PUERTO',
+                       help='ortesis por cable con el firmware 1.3 de la ESP32 (JSON), como en orquestador.py; en lugar de --puerto')
         p.add_argument('--serie', default='', help='numero de serie del Unicorn (solo con varios cascos cerca)')
         p.add_argument('--eeg-nombre', dest='eeg_nombre', default='', help='nombre del flujo de la app UnicornLSL')
         p.add_argument('--sin-tablero', dest='sin_tablero', action='store_true')
@@ -620,11 +635,12 @@ def argumentos(argv=None):
     p.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true')
     p.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP')
     p.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
+    p.add_argument('--ortesis-usb', dest='ortesis_usb', default=None, metavar='PUERTO')
     p = sub.add_parser('hijo', help='uso interno: corre un script del proyecto con cierre limpio')
     p.add_argument('resto', nargs=argparse.REMAINDER)
     a, resto = ap.parse_known_args(argv)
-    if getattr(a, 'ortesis_sim', False) and getattr(a, 'ortesis_udp', None):
-        ap.error('--ortesis-sim y --ortesis-udp son excluyentes')
+    if sum(bool(getattr(a, k, None)) for k in ('ortesis_sim', 'ortesis_udp', 'ortesis_usb')) > 1:
+        ap.error('--ortesis-sim, --ortesis-udp y --ortesis-usb son excluyentes')
     if a.orden == 'lanzar':
         a.extras = [x for x in resto if x != '--']
     elif resto:

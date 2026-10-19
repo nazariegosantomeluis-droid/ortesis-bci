@@ -3,11 +3,12 @@
 Cada sesion del orquestador deja, junto a su CSV, resultados/sesion_..._estado.jsonl con todo lo
 que publico en el flujo Estado (senales, pasos, semaforos, checkpoints, IIC) y la hora de cada
 cosa. Este programa lo vuelve a publicar en el flujo Estado, al ritmo original o mas rapido: el
-tablero lo muestra igual que en vivo. Con --puerto, ademas la ortesis repite los mismos angulos.
+tablero lo muestra igual que en vivo. Con --ortesis-usb (firmware 1.3), --ortesis-udp o --puerto (protocolo
+viejo M/A/T), ademas la ortesis repite los mismos angulos.
 
   python tablero.py                                                      terminal 1
   python repetir_sesion.py resultados/sesion_real_XXXX_estado.jsonl      terminal 2
-  python repetir_sesion.py --ultima --velocidad 2 --puerto COM4          la mas reciente, al doble, con la ortesis
+  python repetir_sesion.py --ultima --velocidad 2 --ortesis-usb COM5     la mas reciente, al doble, con la ortesis
 
 Por defecto empieza en el lazo (se salta los minutos de calibracion, pero muestra sus checkpoints);
 --completa repite todo. Es una REPETICION: nada se decide en vivo, y hay que decirlo al mostrarla.
@@ -117,7 +118,11 @@ def main():
     ap.add_argument('--ortesis-udp', dest='ortesis_udp', nargs='?', const=config.IP_ORTESIS_UDP, default=None, metavar='IP',
                     help='lo mismo, con la ortesis por Wi-Fi (firmware 1.2 de la ESP32)')
     ap.add_argument('--udp-puerto', dest='udp_puerto', type=int, default=config.PUERTO_ORTESIS_UDP)
+    ap.add_argument('--ortesis-usb', dest='ortesis_usb', default=None, metavar='PUERTO',
+                    help='lo mismo, con la ortesis por cable y el firmware 1.3 (JSON), p. ej. COM5')
     a = ap.parse_args()
+    if sum(map(bool, (a.puerto, a.ortesis_udp, a.ortesis_usb))) > 1:
+        ap.error('--puerto, --ortesis-udp y --ortesis-usb son excluyentes')
     ruta = ultima(a.backend) if a.ultima else a.archivo
     if not ruta or not Path(ruta).exists():
         raise SystemExit('No hay sesion grabada que repetir. Da un archivo _estado.jsonl o usa --ultima.')
@@ -126,6 +131,10 @@ def main():
         import hardware as hw
         from pylsl import local_clock
         ortesis = hw.OrtesisUDP(a.ortesis_udp, a.udp_puerto, reloj=local_clock)
+    elif a.ortesis_usb:
+        import hardware as hw
+        from pylsl import local_clock
+        ortesis = hw.OrtesisUSB(a.ortesis_usb, reloj=local_clock)
     elif a.puerto:
         import hardware as hw
         ortesis = hw.OrtesisSerial(a.puerto)

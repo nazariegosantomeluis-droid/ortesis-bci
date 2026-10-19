@@ -23,9 +23,10 @@ def _f(x):
     return f'{x:.2f}'
 
 
-def pasos(n, datos=None, puerto=None, simulada=False):
+def pasos(n, datos=None, puerto=None, simulada=False, bandera='--puerto'):
     """Que hacer despues de un NO GO en el CP n, en frases cortas (con el comando entre comillas cuando lo hay).
-    `puerto` es el COM de la ortesis por USB, o None si va simulada o por Wi-Fi; `simulada`, que es --ortesis-sim."""
+    `puerto` es el COM de la ortesis por USB, o None si va simulada o por Wi-Fi; `simulada`, que es --ortesis-sim;
+    `bandera`, con que bandera se verifica ese COM: --puerto (protocolo M/A/T) o --ortesis-usb (firmware 1.3)."""
     d = datos or {}
     if n == 1:
         r = []
@@ -41,7 +42,7 @@ def pasos(n, datos=None, puerto=None, simulada=False):
         if not d.get('latencia_ok', True):
             if puerto:
                 r += [f'Cambia el cable o el puerto USB y cierra lo que use el {puerto}.',
-                      f'Reinicia el ESP32 y repite "python verificar_ortesis.py --puerto {puerto}".']
+                      f'Reinicia el ESP32 y repite "python verificar_ortesis.py {bandera} {puerto}".']
             elif simulada:
                 r += ['La ortesis es la simulada y aun asi la latencia fallo: la laptop esta saturada. Cierra lo que no uses y repite.']
             else:
@@ -80,12 +81,12 @@ def pasos(n, datos=None, puerto=None, simulada=False):
     return ['Mira la consola del orquestador y docs/DOMINGO.md, seccion 5.']
 
 
-def evento(n, motivo, datos=None, puerto=None, simulada=False):
+def evento(n, motivo, datos=None, puerto=None, simulada=False, bandera='--puerto'):
     """El evento de Estado de una parada. `motivo` es la linea del checkpoint ("ErrP: sens 0.83, espec 0.87...").
     Con n = None (la parada no dijo en que CP) no inventa uno: titulo sin CP y la referencia al arbol."""
     return {'tipo': 'detenida', 'n': None if n is None else int(n),
             'titulo': 'Sesion detenida' if n is None else f'Sesion detenida en CP{int(n)}', 'motivo': str(motivo),
-            'que_hacer': pasos(n, datos, puerto, simulada)}
+            'que_hacer': pasos(n, datos, puerto, simulada, bandera)}
 
 
 def texto_consola(ev):

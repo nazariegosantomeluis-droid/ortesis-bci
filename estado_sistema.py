@@ -1,7 +1,8 @@
 """Estado del sistema: revision previa a la sesion y franja en vivo del tablero.
 
   python estado_sistema.py                   revision previa (unos 15 s; no mueve la ortesis)
-  python estado_sistema.py --puerto COM4     ademas mide la latencia del ACK con 10 movimientos
+  python estado_sistema.py --ortesis-usb COM5   ademas mide la latencia del ACK con 10 movimientos (firmware 1.3)
+  python estado_sistema.py --puerto COM4     lo mismo con el protocolo viejo de texto (M/A/T)
   python estado_sistema.py --ortesis-sim     lo mismo con la ortesis simulada (para probar)
   python estado_sistema.py --sin-api         no llama a la API: solo mira que haya llave
   python tablero.py --estado-sistema         la misma revision, en vivo, en una franja del tablero
@@ -250,7 +251,7 @@ def medir_ack(ortesis, movimientos=U['ack_movimientos']):
 def revisar_ack(latencias):
     if len(latencias) < U['ack_movimientos']:
         return [res('ack', AVISO, f'latencia del ACK sin medir ({len(latencias)} movimientos)',
-                    'antes de la sesion: python estado_sistema.py --puerto COM4; en el lazo se mide sola')]
+                    'antes de la sesion: python estado_sistema.py --ortesis-usb COM5 (firmware 1.3; --puerto con el protocolo M/A/T); en el lazo se mide sola')]
     import hardware as hw
     e = hw.evaluar_latencias(latencias)
     return [res('ack', OK if e['ok'] else FALLA, e['texto'],
@@ -444,13 +445,21 @@ def texto(resultados):
     return '\n'.join(lineas)
 
 
-def previa(puerto=None, ortesis_sim=False, api=True, salida=print):
-    """La revision previa completa. Devuelve los resultados."""
+def previa(puerto=None, ortesis_sim=False, api=True, salida=print, ortesis_usb=None):
+    """La revision previa completa. Devuelve los resultados. `ortesis_usb`: COM de la ortesis con el firmware 1.3
+    (JSON); `puerto`, el de la del protocolo viejo (M/A/T)."""
     monitor, falla_puerto = Monitor(), []
+    puerto = ortesis_usb or puerto
     if puerto or ortesis_sim:
         import hardware as hw
         try:
-            ortesis = hw.OrtesisSimulada() if ortesis_sim else hw.OrtesisSerial(puerto)
+            if ortesis_sim:
+                ortesis = hw.OrtesisSimulada()
+            elif ortesis_usb:
+                from pylsl import local_clock
+                ortesis = hw.OrtesisUSB(ortesis_usb, reloj=local_clock)
+            else:
+                ortesis = hw.OrtesisSerial(puerto)
         except Exception as e:                               # puerto ocupado o inexistente
             falla_puerto = [res('ack', FALLA, f'no se pudo abrir {puerto}: {type(e).__name__}: {str(e)[:100]}',
                                 'cierra el monitor serie de Arduino y mira el numero del puerto en el Administrador de dispositivos')]
@@ -475,11 +484,15 @@ def previa(puerto=None, ortesis_sim=False, api=True, salida=print):
 
 def main():
     ap = argparse.ArgumentParser(description='Revision previa del sistema, con la solucion de cada falla')
-    ap.add_argument('--puerto', help='mide la latencia del ACK de la ortesis en este puerto (la mueve 10 veces)')
+    ap.add_argument('--puerto', help='mide la latencia del ACK de la ortesis en este puerto (la mueve 10 veces; protocolo M/A/T)')
+    ap.add_argument('--ortesis-usb', dest='ortesis_usb', metavar='PUERTO',
+                    help='lo mismo con la ortesis del firmware 1.3 por cable (JSON), p. ej. COM5')
     ap.add_argument('--ortesis-sim', dest='ortesis_sim', action='store_true', help='lo mismo con la ortesis simulada')
     ap.add_argument('--sin-api', dest='sin_api', action='store_true', help='no llama a la API: solo mira que haya llave')
     a = ap.parse_args()
-    resultados = previa(a.puerto, a.ortesis_sim, api=not a.sin_api)
+    if sum(map(bool, (a.puerto, a.ortesis_sim, a.ortesis_usb))) > 1:
+        ap.error('--puerto, --ortesis-sim y --ortesis-usb son excluyentes')
+    resultados = previa(a.puerto, a.ortesis_sim, api=not a.sin_api, ortesis_usb=a.ortesis_usb)
     sys.exit(1 if any(r['estado'] == FALLA for r in resultados) else 0)
 
 

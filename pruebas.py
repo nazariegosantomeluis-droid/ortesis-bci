@@ -4016,6 +4016,85 @@ def demo_comandos():
 
 
 @prueba
+def banderas_ortesis_usb():
+    """--ortesis-usb PUERTO (firmware 1.3 por cable) en el orquestador y en demo.py: se produce, se acepta, crea
+    OrtesisUSB con el reloj de LSL, sobrevive a --reanudar, el NO GO del CP1 manda a verificarla con su bandera,
+    y es excluyente con --ortesis-sim y --ortesis-udp. Los scripts de la ortesis tambien la aceptan."""
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+    import types
+    from pathlib import Path
+    from pylsl import local_clock
+    import demo
+    import orquestador
+
+    def falla(f):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                f()
+        except SystemExit:
+            return True
+        return False
+    a = orquestador.argumentos(['real', '--ortesis-usb', 'COM5'])
+    assert a.ortesis_usb == 'COM5' and not a.ortesis_sim and a.ortesis_udp is None
+    for otra in (['--ortesis-sim'], ['--ortesis-udp'], ['--ortesis-udp', '10.0.0.5']):
+        assert falla(lambda: orquestador.argumentos(['real', '--ortesis-usb', 'COM5'] + otra)), otra
+    # crear_ortesis: OrtesisUSB con el puerto y el reloj de LSL
+    creadas = []
+    hw = types.SimpleNamespace(OrtesisUSB=lambda puerto, reloj=None: creadas.append((puerto, reloj)) or 'usb',
+                               OrtesisSerial=lambda puerto: 'serial')
+    assert orquestador.crear_ortesis(hw, a) == 'usb' and creadas == [('COM5', local_clock)]
+    assert orquestador.crear_ortesis(hw, orquestador.argumentos(['real', '--puerto', 'COM5'])) == 'serial'
+    # --reanudar: la ortesis de la linea de comandos manda sobre la guardada
+    inst = {'args': vars(orquestador.argumentos(['real', '--ortesis-udp']))}
+    r = orquestador.argumentos_reanudados(inst, a)
+    assert r.ortesis_usb == 'COM5' and r.ortesis_udp is None and not r.ortesis_sim
+    viejo = {'args': {k: v for k, v in vars(orquestador.argumentos(['real', '--ortesis-sim'])).items() if k != 'ortesis_usb'}}
+    r = orquestador.argumentos_reanudados(viejo, a)                    # una instantanea de antes de la bandera
+    assert r.ortesis_usb == 'COM5' and not r.ortesis_sim
+    # NO GO del CP1 por latencia: verificar con --ortesis-usb, no con --puerto
+    eventos = []
+    orq = types.SimpleNamespace(salidas=types.SimpleNamespace(estado=lambda **d: eventos.append(d),
+                                                              no_go={'n': 1, 'motivo': 'latencia', 'datos': {'latencia_ok': False}}),
+                                fsm=types.SimpleNamespace(estado='IMPEDANCIAS'))
+    with contextlib.redirect_stdout(io.StringIO()):
+        ev = orquestador.anunciar_detencion(orq, a)
+    texto = ' '.join(ev['que_hacer'])
+    assert 'verificar_ortesis.py --ortesis-usb COM5' in texto and '--puerto' not in texto, texto
+    # demo.py: lanzar, preflight y planb la producen y el orquestador la acepta
+    d = demo.argumentos(['lanzar', '--plan', 'gemelo', '--ortesis-usb', 'COM5', '--', '--sham'])
+    orq_args = demo.comandos('gemelo', d, d.extras)['orquestador'][1]
+    assert orq_args == ['real', '--ortesis-usb', 'COM5', '--sham'], orq_args
+    assert orquestador.argumentos(orq_args).ortesis_usb == 'COM5'
+    for orden in ('lanzar', 'preflight', 'planb'):
+        assert demo.argumentos([orden, '--ortesis-usb', 'COM5']).ortesis_usb == 'COM5'
+        for otra in (['--ortesis-sim'], ['--ortesis-udp']):
+            assert falla(lambda: demo.argumentos([orden, '--ortesis-usb', 'COM5'] + otra)), (orden, otra)
+    # preflight: pide pyserial y revisa que el COM exista, con la bandera correcta en el que hacer
+    vistos = []
+    demo.revisar_dependencias('gemelo', False, True, vistos.append)
+    assert 'serial' in vistos
+    assert demo.revisar_puerto('COM4', False, lambda: ['COM5'], ortesis_usb='COM5')[0]['estado'] == 'OK'
+    r = demo.revisar_puerto('COM4', False, lambda: ['COM4'], ortesis_usb='COM5')[0]
+    assert r['estado'] == 'FALLA' and '--ortesis-usb' in r['que_hacer'] and 'COM5' in r['texto'], r
+    with tempfile.TemporaryDirectory() as tmp:
+        carpeta, ahora = Path(tmp), lambda: 1_000_000.0
+        assert 'verificar_ortesis.py --ortesis-usb COM5' in demo.revisar_verificaciones('gemelo', False, carpeta, ahora, ortesis_usb='COM5')[0]['que_hacer']
+        (carpeta / 'verificacion_ortesis.json').write_text(json.dumps({'t': 1_000_000.0, 'veredicto': 'OK: x', 'ortesis': 'serial_mat'}))
+        r = demo.revisar_verificaciones('gemelo', False, carpeta, ahora, ortesis_usb='COM5')[0]
+        assert r['estado'] == 'AVISO' and '--ortesis-usb COM5' in r['que_hacer'], r
+        (carpeta / 'verificacion_ortesis.json').write_text(json.dumps({'t': 1_000_000.0, 'veredicto': 'OK: x', 'ortesis': 'usb_json'}))
+        assert demo.revisar_verificaciones('gemelo', False, carpeta, ahora, ortesis_usb='COM5')[0]['estado'] == 'OK'
+    # los demas scripts que mueven la ortesis la aceptan y crean OrtesisUSB
+    for script in ('verificar_ortesis.py', 'repetir_sesion.py', 'bloque_sham.py', 'estado_sistema.py'):
+        texto = (config.RAIZ / script).read_text(encoding='utf-8')
+        assert "'--ortesis-usb'" in texto and 'OrtesisUSB(' in texto, script
+    return 'orquestador y demo.py producen y aceptan --ortesis-usb; excluyente; reanudar, NO GO y preflight la respetan'
+
+
+@prueba
 def demo_ortesis_udp():
     """demo.py --ortesis-udp se comporta como el orquestador: la misma IP y puerto llegan a orquestador.py (y a
     repetir_sesion.py en el plan B), sin pyserial ni verificacion USB, excluyente con --ortesis-sim."""
@@ -4491,6 +4570,10 @@ def demo_lanzar_simulado():
         demo.planb(demo.argumentos(['planb', '--puerto', 'COM9']), salida=lineas.append, resultados=res, procesos=_ProcesosFalsos(res / 'l2'),
                    dormir=lambda s: None, correr_foreground=correr())
         assert foreground[0][-2:] == ['--puerto', 'COM9']
+        foreground.clear()
+        demo.planb(demo.argumentos(['planb', '--ortesis-usb', 'COM5']), salida=lineas.append, resultados=res, procesos=_ProcesosFalsos(res / 'l3'),
+                   dormir=lambda s: None, correr_foreground=correr())
+        assert foreground[0][-2:] == ['--ortesis-usb', 'COM5'] and '--puerto' not in foreground[0]
 
 
 @prueba
@@ -5724,7 +5807,7 @@ RAPIDAS = ['contrato', 'vigilante', 'semaforo_piloto', 'retroceso', 'agente_basi
            'detector_umbral_anidado', 'decoder_preentrenado', 'intervalo_por_ensayos', 'senal_valida', 'ortesis_sin_ack',
            'ortesis_serial_reconecta', 'ortesis_udp', 'ortesis_udp_nervio', 'destello_errp_con_perdidas', 'ortesis_usb', 'registro_huecos', 'reloj_contador', 'puente_reconecta', 'cerebro_sintetico',
            'estado_sistema', 'memoria_sesiones',
-           'demo_comandos', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'visor_eeg', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida', 'sensor_fuerza']
+           'demo_comandos', 'banderas_ortesis_usb', 'demo_ortesis_udp', 'demo_firmware_simulado', 'demo_revisiones', 'demo_limpiar_modelos', 'demo_esperar_flujo', 'demo_procesos', 'demo_lanzar_simulado', 'visor_eeg', 'toques_electrodos', 'senal_neutra', 'decoder_canales_mi', 'mano_virtual_logica', 'mano_virtual_ventana_falsa', 'ventana_mi_lazo', 'cp1_red_robusto', 'detencion_texto', 'detencion_orquestador', 'tablero_detenida', 'sensor_fuerza']
 CON_LSL = ['detector_coadaptativo', 'reanudar', 'reconexion_eeg', 'silencio_sin_recrear', 'dos_flujos_eeg', 'entrada_unicorn',
            'verificar_unicorn', 'puente_hora_por_contador', 'gemelo_unicorn', 'estado_sistema_lsl', 'demo_gemelo_en_vivo']
 LAZO_REAL = ['lazo_real_sintetico', 'lazo_real_caos', 'lazo_real_memoria']
